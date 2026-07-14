@@ -2,40 +2,60 @@
 // Supabase's row-level security. Only whitelisted tables are reachable, and
 // every query on an owned table is forced through its owner column.
 //
-// NOTE: owner columns below are the working assumption from frontend code
-// (user_id everywhere). Reconcile against the real DDL + RLS policies once the
-// Supabase dump lands (see scripts/export-supabase.md), then update this map.
+// Owner columns mirror the foreign keys in the Neon schema (every owned table
+// references users(id) via user_id). Child tables without a user_id column are
+// scoped through their parent row instead.
 import { query } from './db.js';
 
 export const TABLES = {
   datasets:                      { owner: 'user_id' },
   analyses:                      { owner: 'user_id' },
+  projects:                      { owner: 'user_id' },
   reports:                       { owner: 'user_id' },
   sandbox_scale_projects:        { owner: 'user_id' },
   scale_responses:               { owner: null, publicInsert: true }, // public survey submissions
+  expert_ratings:                { owner: null, publicInsert: true },
   analysis_history:              { owner: 'user_id' },
   cultural_groups:               { owner: 'user_id' },
   translation_items:             { owner: 'user_id' },
-  cultural_responses:            { owner: 'user_id' },
+  cultural_responses:            { owner: null },
+  dif_analyses:                  { owner: 'user_id' },
   forum_admins:                  { owner: null, readAll: true, readonly: true },
+  forum_categories:              { owner: null, readAll: true, readonly: true },
   forum_posts:                   { owner: 'user_id', readAll: true },
   forum_replies:                 { owner: 'user_id', readAll: true },
+  forum_votes:                   { owner: 'user_id', readAll: true },
+  messages:                      { owner: 'from_user_id' },
   notifications:                 { owner: 'user_id' },
-  user_notification_preferences: { owner: 'user_id' },
+  user_notification_preferences: { owner: 'user_id', conflictKey: 'user_id' },
+  email_queue:                   { owner: 'user_id' },
   cat_item_banks:                { owner: 'user_id' },
-  cat_items:                     { owner: null }, // scoped through its bank; tightened after dump review
+  cat_items:                     { owner: null }, // scoped through its bank
   cat_sessions:                  { owner: 'user_id' },
-  cat_session_responses:         { owner: null }, // scoped through its session; tightened after dump review
+  cat_session_responses:         { owner: null }, // scoped through its session
   network_projects:              { owner: 'user_id' },
   network_datasets:              { owner: null },
   network_estimations:           { owner: null },
   network_centrality:            { owner: null },
   network_communities:           { owner: null },
   network_stability:             { owner: null },
+  network_comparisons:           { owner: null },
   plssem_models:                 { owner: 'user_id' },
+  plssem_analyses:               { owner: null },
+  r_analysis_jobs:               { owner: 'user_id' },
+  r_analysis_templates:          { owner: null, readAll: true, readonly: true },
+  r_analysis_logs:               { owner: 'user_id' },
+  r_analysis_reports:            { owner: 'user_id' },
+  r_analysis_cache:              { owner: null, readAll: true, readonly: true },
 };
 
 const IDENT = /^[a-z_][a-z0-9_]*$/;
+
+// node-postgres encodes JS arrays as Postgres array literals, which breaks
+// jsonb columns — serialize objects/arrays to JSON strings instead.
+function toParam(v) {
+  return v !== null && typeof v === 'object' && !(v instanceof Date) ? JSON.stringify(v) : v;
+}
 
 function assertIdent(name) {
   if (!IDENT.test(name)) throw Object.assign(new Error(`Invalid identifier: ${name}`), { status: 400 });
@@ -48,7 +68,9 @@ function tableConfig(table) {
   return cfg;
 }
 
-// Filters arrive as query params: eq.column=value, in.column=a,b,c
+// Filters arrive as query params: eq.column=value, gte.column=value, in.column=a,b,c
+const FILTER_OPS = { eq: '=', neq: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' };
+
 function buildFilters(params, startIndex = 1) {
   const clauses = [];
   const values = [];
@@ -57,13 +79,15 @@ function buildFilters(params, startIndex = 1) {
     const [op, column] = key.split('.', 2);
     if (!column) continue;
     assertIdent(column);
-    if (op === 'eq') {
-      clauses.push(`"${column}" = $${i++}`);
+    if (FILTER_OPS[op]) {
+      clauses.push(`"${column}" ${FILTER_OPS[op]} $${i++}`);
       values.push(raw);
     } else if (op === 'in') {
       const list = String(raw).split(',');
       clauses.push(`"${column}" = ANY($${i++})`);
       values.push(list);
+    } else if (op === 'is') {
+      clauses.push(`"${column}" IS ${raw === 'null' ? 'NULL' : 'NOT NULL'}`);
     }
   }
   return { clauses, values, nextIndex: i };
@@ -80,8 +104,17 @@ export async function selectRows(table, user, params) {
     values.push(user.id);
   }
 
-  let sql = `SELECT * FROM "${assertIdent(table)}"`;
-  if (clauses.length) sql += ` WHERE ${clauses.join(' AND ')}`;
+  const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+
+  // Count-only queries (Supabase's { count: 'exact', head: true })
+  let count = null;
+  if (params.count) {
+    const { rows } = await query(`SELECT count(*)::int AS n FROM "${assertIdent(table)}"${where}`, values);
+    count = rows[0].n;
+    if (params.head) return { rows: [], count };
+  }
+
+  let sql = `SELECT * FROM "${assertIdent(table)}"${where}`;
   if (params.order) {
     const [col, dir] = String(params.order).split('.');
     sql += ` ORDER BY "${assertIdent(col)}" ${dir === 'desc' ? 'DESC' : 'ASC'}`;
@@ -89,10 +122,10 @@ export async function selectRows(table, user, params) {
   if (params.limit) sql += ` LIMIT ${Math.max(0, parseInt(params.limit, 10) || 0)}`;
 
   const { rows } = await query(sql, values);
-  return rows;
+  return { rows, count };
 }
 
-export async function insertRows(table, user, rows) {
+export async function insertRows(table, user, rows, { upsert = false } = {}) {
   const cfg = tableConfig(table);
   if (cfg.readonly) throw Object.assign(new Error('Read-only table'), { status: 403 });
   if (!cfg.publicInsert && !user) throw Object.assign(new Error('Not signed in'), { status: 401 });
@@ -105,9 +138,14 @@ export async function insertRows(table, user, rows) {
     if (cfg.owner && user) data[cfg.owner] = user.id; // ownership is never client-controlled
     const cols = Object.keys(data).map(assertIdent);
     const placeholders = cols.map((_, idx) => `$${idx + 1}`);
-    const sql = `INSERT INTO "${assertIdent(table)}" (${cols.map((c) => `"${c}"`).join(', ')})
-                 VALUES (${placeholders.join(', ')}) RETURNING *`;
-    const { rows: r } = await query(sql, Object.values(data));
+    let sql = `INSERT INTO "${assertIdent(table)}" (${cols.map((c) => `"${c}"`).join(', ')})
+               VALUES (${placeholders.join(', ')})`;
+    if (upsert && cfg.conflictKey) {
+      const updates = cols.filter((c) => c !== cfg.conflictKey).map((c) => `"${c}" = EXCLUDED."${c}"`);
+      sql += ` ON CONFLICT ("${cfg.conflictKey}") DO UPDATE SET ${updates.join(', ')}`;
+    }
+    sql += ' RETURNING *';
+    const { rows: r } = await query(sql, Object.values(data).map(toParam));
     inserted.push(r[0]);
   }
   return inserted;
@@ -120,7 +158,7 @@ export async function updateRows(table, user, filters, patch) {
 
   const cols = Object.keys(patch).map(assertIdent);
   if (!cols.length) return [];
-  const values = cols.map((c) => patch[c]);
+  const values = cols.map((c) => toParam(patch[c]));
   const sets = cols.map((c, idx) => `"${c}" = $${idx + 1}`);
 
   const { clauses, values: fv, nextIndex } = buildFilters(filters, cols.length + 1);

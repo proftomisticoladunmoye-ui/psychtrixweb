@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { User } from '@supabase/supabase-js';
 import { Scale, Menu, Bell, LogOut, X, Check, Settings, HelpCircle } from 'lucide-react';
 import { useAuth } from './AuthProvider';
-import { supabase } from '../lib/supabase';
+import { supabase, AppUser as User } from '../lib/supabase';
 import { ViewType } from '../App';
 
 interface HeaderProps {

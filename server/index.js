@@ -46,25 +46,12 @@ app.post('/api/auth/signup', wrap(async (req, res) => {
 app.post('/api/auth/signin', wrap(async (req, res) => {
   const { email, password } = req.body ?? {};
   const { rows } = await query(
-    `SELECT id, email, created_at, password_salt, password_hash, supabase_bcrypt_hash
+    `SELECT id, email, created_at, password_salt, password_hash
        FROM users WHERE lower(email) = lower($1)`,
     [email ?? ''],
   );
   const record = rows[0];
-  let ok = record && verifyPassword(password, record.password_salt, record.password_hash);
-
-  // Users migrated from Supabase carry a bcrypt hash; verify once and upgrade to scrypt.
-  if (!ok && record?.supabase_bcrypt_hash) {
-    const { default: bcrypt } = await import('bcryptjs');
-    if (bcrypt.compareSync(password ?? '', record.supabase_bcrypt_hash)) {
-      const { salt, hash } = hashPassword(password);
-      await query(
-        'UPDATE users SET password_salt = $1, password_hash = $2, supabase_bcrypt_hash = NULL WHERE id = $3',
-        [salt, hash, record.id],
-      );
-      ok = true;
-    }
-  }
+  const ok = record && verifyPassword(password, record.password_salt, record.password_hash);
   if (!ok) return res.status(401).json({ error: 'Invalid email or password' });
 
   const session = await createSession(record.id);
@@ -92,32 +79,36 @@ app.post('/api/auth/update', requireUser, wrap(async (req, res) => {
 
 // ---- generic table CRUD (Supabase .from() replacement) --------------------
 function splitParams(queryParams) {
-  const { order, limit, ...rest } = queryParams;
-  return { filters: rest, order, limit };
+  const { order, limit, count, head, upsert, ...rest } = queryParams;
+  return { filters: rest, order, limit, count, head, upsert };
 }
 
 app.get('/api/db/:table', wrap(async (req, res) => {
-  res.json(await selectRows(req.params.table, req.user, splitParams(req.query)));
+  const p = splitParams(req.query);
+  const { rows, count } = await selectRows(req.params.table, req.user, { ...p, filters: p.filters });
+  res.json({ data: rows, count });
 }));
 
 app.post('/api/db/:table', wrap(async (req, res) => {
-  res.json(await insertRows(req.params.table, req.user, req.body));
+  const p = splitParams(req.query);
+  const rows = await insertRows(req.params.table, req.user, req.body, { upsert: p.upsert === 'true' });
+  res.json({ data: rows });
 }));
 
 app.patch('/api/db/:table', wrap(async (req, res) => {
   const { filters } = splitParams(req.query);
-  res.json(await updateRows(req.params.table, req.user, filters, req.body ?? {}));
+  res.json({ data: await updateRows(req.params.table, req.user, filters, req.body ?? {}) });
 }));
 
 app.delete('/api/db/:table', wrap(async (req, res) => {
   const { filters } = splitParams(req.query);
-  res.json(await deleteRows(req.params.table, req.user, filters));
+  res.json({ data: await deleteRows(req.params.table, req.user, filters) });
 }));
 
 // ---- RPCs ------------------------------------------------------------------
 app.post('/api/rpc/increment_forum_post_views', wrap(async (req, res) => {
   const { post_id } = req.body ?? {};
-  await query('UPDATE forum_posts SET views = COALESCE(views, 0) + 1 WHERE id = $1', [post_id]);
+  await query('UPDATE forum_posts SET views_count = COALESCE(views_count, 0) + 1 WHERE id = $1', [post_id]);
   res.json({ ok: true });
 }));
 

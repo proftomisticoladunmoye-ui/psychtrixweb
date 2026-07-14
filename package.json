@@ -8,8 +8,8 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "start": "node server/index.js",
-    "server:dev": "node server/index.js"
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "server:dev": "node --env-file-if-exists=.env server/index.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

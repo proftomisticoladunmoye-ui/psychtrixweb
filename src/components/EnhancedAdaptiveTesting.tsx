@@ -807,7 +807,7 @@ export function EnhancedAdaptiveTesting() {
 
       const { data: sessions, error } = await supabase
         .from('cat_sessions')
-        .select('*, cat_item_banks(name)')
+        .select('*')
         .eq('user_id', user.id)
         .eq('status', 'completed')
         .order('completed_at', { ascending: false })
@@ -815,7 +815,16 @@ export function EnhancedAdaptiveTesting() {
 
       if (error) throw error;
 
-      setSessionHistory(sessions || []);
+      // Attach bank names (the old nested select 'cat_item_banks(name)')
+      const bankIds = [...new Set((sessions || []).map((s: any) => s.item_bank_id).filter(Boolean))];
+      let banksById: Record<string, { name: string }> = {};
+      if (bankIds.length) {
+        const { data: banks } = await supabase.from('cat_item_banks').select('*').in('id', bankIds);
+        banksById = Object.fromEntries((banks || []).map((b: any) => [b.id, { name: b.name }]));
+      }
+      const withBanks = (sessions || []).map((s: any) => ({ ...s, cat_item_banks: banksById[s.item_bank_id] ?? null }));
+
+      setSessionHistory(withBanks);
     } catch (err: any) {
       setError(err.message);
     }
