@@ -343,101 +343,88 @@ export class EigenDecomposition {
  * Factor Rotation - Varimax
  */
 export class FactorRotation {
-  static varimax(loadings: number[][], maxIterations: number = 100, tolerance: number = 1e-6): number[][] {
-    const n = loadings.length;
-    const m = loadings[0].length;
+  /**
+   * Varimax rotation (Kaiser, 1958) with Kaiser row normalization, using the
+   * classical planar-rotation criterion — matches R's stats::varimax defaults.
+   */
+  static varimax(loadings: number[][], maxIterations: number = 100, tolerance: number = 1e-8): number[][] {
+    const p = loadings.length;      // items
+    const m = loadings[0].length;   // factors
+    if (m < 2) return MatrixOps.copy(loadings);
 
-    let rotated = MatrixOps.copy(loadings);
-    let rotationMatrix = MatrixOps.identity(m);
+    // Kaiser normalization: scale each row to unit communality before rotating.
+    const h = loadings.map((row) => Math.sqrt(row.reduce((s, v) => s + v * v, 0)) || 1);
+    let A = loadings.map((row, k) => row.map((v) => v / h[k]));
 
     for (let iter = 0; iter < maxIterations; iter++) {
-      let changed = false;
-
+      let rotated = false;
       for (let i = 0; i < m - 1; i++) {
         for (let j = i + 1; j < m; j++) {
-          const rotation = this.computeVarimaxRotation(rotated, i, j);
-
-          if (Math.abs(rotation.angle) > tolerance) {
-            rotated = this.applyRotation(rotated, i, j, rotation.angle);
-            changed = true;
+          // Classical pairwise varimax angle (e.g., Harman, 1976, ch. 14):
+          //   u_k = x_ki^2 - x_kj^2,  v_k = 2 x_ki x_kj
+          //   num = 2( p*Σuv - Σu Σv ),  den = p*Σ(u²-v²) - ((Σu)² - (Σv)²)
+          let su = 0, sv = 0, suv = 0, su2v2 = 0;
+          for (let k = 0; k < p; k++) {
+            const u = A[k][i] * A[k][i] - A[k][j] * A[k][j];
+            const v = 2 * A[k][i] * A[k][j];
+            su += u; sv += v; suv += u * v; su2v2 += u * u - v * v;
           }
+          const num = 2 * (p * suv - su * sv);
+          const den = p * su2v2 - (su * su - sv * sv);
+          const angle = 0.25 * Math.atan2(num, den);
+          if (Math.abs(angle) <= tolerance) continue;
+
+          const cos = Math.cos(angle);
+          const sin = Math.sin(angle);
+          for (let k = 0; k < p; k++) {
+            const xi = A[k][i];
+            const xj = A[k][j];
+            A[k][i] = xi * cos + xj * sin;
+            A[k][j] = -xi * sin + xj * cos;
+          }
+          rotated = true;
         }
       }
-
-      if (!changed) break;
+      if (!rotated) break;
     }
 
-    return rotated;
+    // Undo Kaiser normalization.
+    return A.map((row, k) => row.map((v) => v * h[k]));
   }
 
-  private static computeVarimaxRotation(loadings: number[][], i: number, j: number): { angle: number } {
-    const n = loadings.length;
-
-    let u = 0, v = 0, a = 0, b = 0;
-
-    for (let k = 0; k < n; k++) {
-      const xi = loadings[k][i];
-      const xj = loadings[k][j];
-
-      u += (xi * xi) - (xj * xj);
-      v += 2 * xi * xj;
-      a += (xi * xi) + (xj * xj);
-      b += Math.pow(xi, 4) + Math.pow(xj, 4);
-    }
-
-    const num = 2 * v * n - 2 * u * a / n;
-    const denom = Math.pow(u, 2) - Math.pow(v, 2) + (b - a * a / n);
-
-    const angle = Math.atan2(num, denom) / 4;
-
-    return { angle };
-  }
-
-  private static applyRotation(loadings: number[][], i: number, j: number, angle: number): number[][] {
-    const n = loadings.length;
-    const result = MatrixOps.copy(loadings);
-
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-
-    for (let k = 0; k < n; k++) {
-      const xi = loadings[k][i];
-      const xj = loadings[k][j];
-
-      result[k][i] = xi * cos - xj * sin;
-      result[k][j] = xi * sin + xj * cos;
-    }
-
-    return result;
-  }
-
+  /**
+   * Promax oblique rotation (Hendrickson & White, 1964) — the same algorithm
+   * as R psych::Promax. Returns the pattern matrix and factor correlations.
+   */
   static promax(loadings: number[][], power: number = 4): { loadings: number[][]; correlations: number[][] } {
-    const varimax = this.varimax(loadings);
-    const n = varimax.length;
-    const m = varimax[0].length;
+    const V = this.varimax(loadings);
+    const p = V.length;
+    const m = V[0].length;
+    if (m < 2) return { loadings: V, correlations: MatrixOps.identity(m) };
 
-    const target: number[][] = Array(n).fill(0).map(() => Array(m).fill(0));
-    for (let i = 0; i < n; i++) {
-      for (let j = 0; j < m; j++) {
-        const val = varimax[i][j];
-        target[i][j] = Math.sign(val) * Math.pow(Math.abs(val), power);
-      }
-    }
+    // Target: element-wise |v|^power with original signs.
+    const Q: number[][] = V.map((row) => row.map((v) => Math.sign(v) * Math.pow(Math.abs(v), power)));
 
-    const promaxLoadings = MatrixOps.copy(varimax);
+    // Least-squares transformation U = (V'V)^-1 V'Q
+    const Vt = MatrixOps.transpose(V);
+    const VtV = MatrixOps.multiply(Vt, V);
+    let U = MatrixOps.multiply(MatrixOps.multiply(MatrixOps.inverse(VtV), Vt), Q);
 
-    const correlations = MatrixOps.identity(m);
-    for (let i = 0; i < m; i++) {
-      for (let j = i + 1; j < m; j++) {
-        let sum = 0;
-        for (let k = 0; k < n; k++) {
-          sum += promaxLoadings[k][i] * promaxLoadings[k][j];
-        }
-        correlations[i][j] = correlations[j][i] = sum / n;
-      }
-    }
+    // Rescale columns of U so the implied factor variances are 1:
+    // d = diag((U'U)^-1); U <- U * diag(sqrt(d))
+    const UtUinv = MatrixOps.inverse(MatrixOps.multiply(MatrixOps.transpose(U), U));
+    const d = UtUinv.map((row, i) => Math.sqrt(row[i]));
+    U = U.map((row) => row.map((v, j) => v * d[j]));
 
-    return { loadings: promaxLoadings, correlations };
+    // Pattern matrix and factor correlation matrix.
+    const pattern = MatrixOps.multiply(V, U);
+    const Uinv = MatrixOps.inverse(U);
+    const phi = MatrixOps.multiply(Uinv, MatrixOps.transpose(Uinv));
+
+    // Clean tiny numerical noise on the diagonal.
+    for (let i = 0; i < m; i++) phi[i][i] = 1;
+
+    return { loadings: pattern, correlations: phi };
   }
 }
 
@@ -552,21 +539,55 @@ export class BartlettTest {
 
   private static chiSquarePValue(chisq: number, df: number): number {
     if (chisq <= 0 || df <= 0) return 1;
+    // p = Q(df/2, chisq/2), the upper regularized incomplete gamma function.
+    return Math.max(0, Math.min(1, this.gammaQ(df / 2, chisq / 2)));
+  }
 
-    const x = chisq / 2;
-    const k = df / 2;
+  /**
+   * Upper regularized incomplete gamma Q(k, x) = 1 - P(k, x).
+   * Series expansion for x < k+1, Lentz continued fraction otherwise
+   * (Numerical Recipes §6.2) — stable for arbitrarily large x, where the
+   * naive series underflows and wrongly returns p = 1.
+   */
+  private static gammaQ(k: number, x: number): number {
+    if (x < 0 || k <= 0) return 1;
+    if (x === 0) return 1;
 
-    // Regularized incomplete gamma function via series expansion
-    // P(k, x) = e^{-x} * x^k / Gamma(k) * sum_{i=0}^{inf} x^i / (k*(k+1)*...*(k+i))
-    let sum = 0;
-    let term = Math.exp(-x + k * Math.log(x) - this.logGamma(k + 1));
-    for (let i = 0; i < 200; i++) {
-      sum += term;
-      term *= x / (k + i + 1);
-      if (term < 1e-12) break;
+    if (x < k + 1) {
+      // P(k,x) by series: P = e^{-x} x^k / Γ(k) · Σ x^n / (k(k+1)...(k+n))
+      let ap = k;
+      let sum = 1 / k;
+      let del = sum;
+      for (let i = 0; i < 500; i++) {
+        ap += 1;
+        del *= x / ap;
+        sum += del;
+        if (Math.abs(del) < Math.abs(sum) * 1e-14) break;
+      }
+      const logP = -x + k * Math.log(x) - this.logGamma(k);
+      return 1 - sum * Math.exp(logP);
     }
 
-    return Math.max(0, Math.min(1, 1 - sum));
+    // Q(k,x) by modified Lentz continued fraction.
+    const FPMIN = 1e-300;
+    let b = x + 1 - k;
+    let c = 1 / FPMIN;
+    let d = 1 / b;
+    let h = d;
+    for (let i = 1; i <= 500; i++) {
+      const an = -i * (i - k);
+      b += 2;
+      d = an * d + b;
+      if (Math.abs(d) < FPMIN) d = FPMIN;
+      c = b + an / c;
+      if (Math.abs(c) < FPMIN) c = FPMIN;
+      d = 1 / d;
+      const del = d * c;
+      h *= del;
+      if (Math.abs(del - 1) < 1e-14) break;
+    }
+    const logQ = -x + k * Math.log(x) - this.logGamma(k);
+    return Math.exp(logQ) * h;
   }
 
   private static logGamma(z: number): number {

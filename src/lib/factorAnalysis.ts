@@ -98,6 +98,25 @@ export class ExploratoryFactorAnalysis {
       factorCorrelations = promaxResult.correlations;
     }
 
+    // Standardize factor signs (flip columns whose loadings sum negative) so
+    // output matches the convention of SPSS/R — pure reflection, no change in fit.
+    if (rotatedLoadings) {
+      for (let j = 0; j < numFactors; j++) {
+        const colSum = rotatedLoadings.reduce((s, row) => s + row[j], 0);
+        if (colSum < 0) {
+          rotatedLoadings.forEach((row) => { row[j] = -row[j]; });
+          if (factorCorrelations) {
+            for (let k = 0; k < numFactors; k++) {
+              if (k !== j) {
+                factorCorrelations[j][k] = -factorCorrelations[j][k];
+                factorCorrelations[k][j] = -factorCorrelations[k][j];
+              }
+            }
+          }
+        }
+      }
+    }
+
     return {
       loadings,
       communalities,
