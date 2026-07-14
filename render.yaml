@@ -1,0 +1,17 @@
+# Render Blueprint — deploys Psychtrix Web as a single Node web service that
+# serves both the API (server/) and the built Vite frontend (dist/).
+# Data lives in an external Neon Postgres — set DATABASE_URL in the dashboard.
+services:
+  - type: web
+    name: psychtrix-web
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Neon connection string — paste it in the Render dashboard (kept secret).
+      - key: DATABASE_URL
+        sync: false

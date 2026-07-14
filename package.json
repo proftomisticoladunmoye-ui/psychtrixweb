@@ -1,15 +1,20 @@
 {
-  "name": "vite-react-typescript-starter",
+  "name": "psychtrix-web",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "start": "node server/index.js",
+    "server:dev": "node server/index.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.2",
+    "pg": "^8.13.1",
     "@supabase/supabase-js": "^2.57.4",
     "chart.js": "^4.5.0",
     "lucide-react": "^0.344.0",
