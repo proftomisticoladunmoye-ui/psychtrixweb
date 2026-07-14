@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" fill="none">
+  <rect width="1200" height="630" fill="#0F172A"/>
+
+  <!-- Background pattern -->
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1E293B" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- Gradient overlay -->
+  <rect width="1200" height="630" fill="url(#gradient)"/>
+  <defs>
+    <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0EA5E9;stop-opacity:0.1" />
+      <stop offset="100%" style="stop-color:#3B82F6;stop-opacity:0.05" />
+    </linearGradient>
+  </defs>
+
+  <!-- Logo/Icon -->
+  <circle cx="150" cy="315" r="70" fill="#0EA5E9" opacity="0.2"/>
+  <circle cx="150" cy="315" r="50" fill="#0EA5E9"/>
+  <text x="150" y="335" font-family="Arial, sans-serif" font-size="48" font-weight="bold" fill="white" text-anchor="middle">Ψ</text>
+
+  <!-- Main title -->
+  <text x="280" y="280" font-family="Arial, sans-serif" font-size="68" font-weight="bold" fill="white">
+    PsychtrixWeb
+  </text>
+
+  <!-- Subtitle -->
+  <text x="280" y="345" font-family="Arial, sans-serif" font-size="32" fill="#94A3B8">
+    Advanced Psychometric Analysis &amp; Modeling
+  </text>
+
+  <!-- Features -->
+  <g transform="translate(280, 400)">
+    <rect width="180" height="45" rx="8" fill="#0EA5E9" opacity="0.2"/>
+    <text x="90" y="30" font-family="Arial, sans-serif" font-size="20" font-weight="600" fill="#0EA5E9" text-anchor="middle">CTT • EFA • CFA</text>
+  </g>
+
+  <g transform="translate(480, 400)">
+    <rect width="180" height="45" rx="8" fill="#3B82F6" opacity="0.2"/>
+    <text x="90" y="30" font-family="Arial, sans-serif" font-size="20" font-weight="600" fill="#3B82F6" text-anchor="middle">SEM • IRT • Path</text>
+  </g>
+
+  <g transform="translate(680, 400)">
+    <rect width="220" height="45" rx="8" fill="#06B6D4" opacity="0.2"/>
+    <text x="110" y="30" font-family="Arial, sans-serif" font-size="20" font-weight="600" fill="#06B6D4" text-anchor="middle">Multi-Group • MI</text>
+  </g>
+</svg>

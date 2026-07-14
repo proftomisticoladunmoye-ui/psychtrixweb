@@ -1,0 +1,54 @@
+# PsychTrix Robots.txt
+# Welcome search engine crawlers!
+
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /api/
+Disallow: /*.json$
+
+# Sitemap
+Sitemap: https://psychtrixweb.com/sitemap.xml
+
+# Crawl delay for politeness
+Crawl-delay: 1
+
+# Specific instructions for major crawlers
+User-agent: Googlebot
+Allow: /
+Crawl-delay: 1
+
+User-agent: Googlebot-Image
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+Crawl-delay: 1
+
+User-agent: Slurp
+Allow: /
+Crawl-delay: 1
+
+# Social media crawlers
+User-agent: facebookexternalhit
+Allow: /
+
+User-agent: Twitterbot
+Allow: /
+
+User-agent: LinkedInBot
+Allow: /
+
+# Academic and research crawlers
+User-agent: ia_archiver
+Allow: /
+
+User-agent: Scholarsbot
+Allow: /
+
+# Block bad bots
+User-agent: AhrefsBot
+Crawl-delay: 10
+
+User-agent: SemrushBot
+Crawl-delay: 10
