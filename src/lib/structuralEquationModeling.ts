@@ -10,6 +10,7 @@
  */
 
 import { MatrixOps } from './psychometricStats';
+import { normalCDF, chiSqPValue, ncpRmseaBound as ncpBound } from './statDistributions';
 
 // ── Interfaces ────────────────────────────────────────────────────────────────
 
@@ -81,43 +82,8 @@ export interface SEMResults {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function normalCDF(z: number): number {
-  const t = 1 / (1 + 0.2316419 * Math.abs(z));
-  const d = 0.3989423 * Math.exp(-z * z / 2);
-  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-  return z > 0 ? 1 - p : p;
-}
-
-function chiSqPValue(chi2: number, df: number): number {
-  if (chi2 <= 0 || df <= 0) return 1;
-  const a = df / 2, x = chi2 / 2;
-  const cbrtX = Math.pow(x / a, 1 / 3);
-  const corr  = 1 - 1 / (9 * a);
-  const sigma = Math.sqrt(1 / (9 * a));
-  return Math.max(0, Math.min(1, 1 - normalCDF((cbrtX - corr) / sigma)));
-}
-
-/** NCP such that P(χ²(df,λ) ≥ x) = targetP via bisection (WH approx). */
-function ncpBound(x: number, df: number, targetP: number): number {
-  const survF = (lam: number) => {
-    const mu   = df + lam;
-    const sig2 = 2 * (df + 2 * lam);
-    const h    = sig2 / (2 * mu * mu);
-    const corr = 1 - h;
-    const sig  = Math.sqrt(Math.max(1e-12, h));
-    const cbrt = Math.pow(Math.max(0, x) / mu, 1 / 3);
-    return 1 - normalCDF((cbrt - corr) / sig);
-  };
-  if (survF(0) < targetP) return 0;
-  let lo = 0, hi = Math.max(x * 5, df * 5 + 100);
-  while (survF(hi) > targetP) hi *= 2;
-  for (let i = 0; i < 80; i++) {
-    const mid = (lo + hi) / 2;
-    if (survF(mid) > targetP) lo = mid; else hi = mid;
-    if (hi - lo < 1e-6) break;
-  }
-  return (lo + hi) / 2;
-}
+// normalCDF, chiSqPValue, and ncpBound (RMSEA CI) are imported from
+// statDistributions.ts — shared, verified implementations.
 
 function pearsonR(x: number[], y: number[]): number {
   const n  = x.length;

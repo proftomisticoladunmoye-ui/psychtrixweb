@@ -11,6 +11,7 @@
  */
 
 import { MatrixOps, Statistics, CorrelationMatrix } from './psychometricStats';
+import { normalCDF, chiSqPValue, ncpRmseaBound } from './statDistributions';
 
 // ─── Public interfaces ────────────────────────────────────────────────────────
 
@@ -169,56 +170,8 @@ function trace(M: number[][]): number {
   return M.reduce((s, row, i) => s + row[i], 0);
 }
 
-function normalCDF(z: number): number {
-  const t = 1 / (1 + 0.2316419 * Math.abs(z));
-  const d = 0.3989423 * Math.exp(-z * z / 2);
-  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-  return z > 0 ? 1 - p : p;
-}
-
-/** Regularised lower incomplete gamma for chi-square p-values */
-function chiSqPValue(chisq: number, df: number): number {
-  if (chisq <= 0 || df <= 0) return 1;
-  // Use Wilson-Hilferty normal approximation (accurate for df >= 1)
-  const k = df / 2;
-  const x = chisq / 2;
-  // Poisson series (good for small x/df)
-  if (x < k + 1) {
-    let sum = 0, term = 1 / k;
-    for (let i = 1; i <= 300; i++) {
-      term *= x / (k + i);
-      sum += term;
-      if (term < 1e-12 * sum) break;
-    }
-    const p = sum * Math.exp(-x + k * Math.log(x) - lgamma(k));
-    return Math.max(0, Math.min(1, 1 - p));
-  }
-  // Continued fraction for large x
-  const cf = chiSqPValueCF(chisq, df);
-  return Math.max(0, Math.min(1, cf));
-}
-
-function chiSqPValueCF(chisq: number, df: number): number {
-  const a = df / 2, x = chisq / 2;
-  // Wilson-Hilferty normal approximation
-  const cbrtFactor = 1 - 2 / (9 * a);
-  const cbrtX = Math.pow(x / a, 1 / 3);
-  const z = (cbrtX - cbrtFactor) / Math.sqrt(2 / (9 * a));
-  return 1 - normalCDF(z);
-}
-
-function lgamma(x: number): number {
-  // Stirling series
-  if (x < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * x)) - lgamma(1 - x);
-  const g = 7;
-  const c = [0.99999999999980993, 676.5203681218851, -1259.1392167224028,
-    771.32342877765313, -176.61502916214059, 12.507343278686905,
-    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
-  let sum = c[0];
-  for (let i = 1; i < g + 2; i++) sum += c[i] / (x + i - 1);
-  const t = x + g - 0.5;
-  return 0.9189385332046727 + (x - 0.5) * Math.log(t) - t + Math.log(sum);
-}
+// normalCDF, chiSqPValue, and the RMSEA CI machinery live in statDistributions.ts
+// (shared with SEM and measurement invariance).
 
 // ─── Power-iteration eigenvector (for starting values) ────────────────────────
 
@@ -330,33 +283,6 @@ function gradient(
  * approximated via the shifted Wilson-Hilferty transformation.
  * This is the standard method for computing RMSEA 90% CI bounds.
  */
-function ncpRmseaBound(x: number, df: number, targetP: number): number {
-  // Non-central chi-square SF ≈ using normal approx (accurate for df ≥ 1):
-  // P(χ²(df, λ) ≥ x) ≈ 1 - Φ(z)  where z uses W-H transformation
-  const survF = (lam: number): number => {
-    const mu   = df + lam;
-    const sig2 = 2 * (df + 2 * lam);
-    const cbrt  = Math.pow(x / mu, 1 / 3);
-    const corr  = 1 - sig2 / (9 * mu * mu);
-    const z = (cbrt - corr) / Math.sqrt(Math.max(1e-12, sig2 / (9 * mu * mu)));
-    return 1 - normalCDF(z);
-  };
-
-  // Lower bound: λ = 0 gives maximum P (upper tail is largest at λ=0)
-  if (survF(0) < targetP) return 0; // target is beyond λ=0
-
-  // Bisection: find λ in [0, 10*(x+df)] such that survF(λ) = targetP
-  let lo = 0, hi = Math.max(x * 5, df * 5 + 100);
-  // Ensure hi is large enough
-  while (survF(hi) > targetP) hi *= 2;
-
-  for (let i = 0; i < 80; i++) {
-    const mid = (lo + hi) / 2;
-    if (survF(mid) > targetP) lo = mid; else hi = mid;
-    if (hi - lo < 1e-6) break;
-  }
-  return (lo + hi) / 2;
-}
 
 // ─── Main CFA Estimator ───────────────────────────────────────────────────────
 
