@@ -20,6 +20,7 @@ import {
 } from '../lib/exportUtils';
 import { InvariancePathDiagram } from './InvariancePathDiagram';
 import { MeasurementInvarianceTester } from '../lib/measurementInvariance';
+import { normalCDF } from '../lib/statDistributions';
 
 interface Dataset {
   id: string;
@@ -348,37 +349,30 @@ export function EnhancedInvariance({ datasets, selectedDataset, onDatasetChange 
         powerAnalysis: undefined
       };
 
-      // Add partial invariance testing if requested
-      if (advancedOptions.testPartialInvariance) {
-        const allItems = Object.values(factorStructure).flat();
-        const problematicItems = allItems.slice(0, Math.min(2, allItems.length));
+      // Partial invariance and modification indices previously showed FABRICATED
+      // numbers (Math.random) that contradicted the real fit results. They stay
+      // empty until per-constraint release refits are implemented in the engine;
+      // the sections hide themselves when empty.
 
-        problematicItems.forEach(item => {
-          invResults.partialInvariance.push({
-            item,
-            parameter: 'loading',
-            constraintReleased: true,
-            improvementChisq: 8 + Math.random() * 12,
-            improvementCFI: 0.008 + Math.random() * 0.007,
-          });
-        });
-      }
-
-      // Add latent mean differences if requested
+      // Latent mean differences — real values from the scalar model (factor
+      // means with their standard errors from the estimator).
       if (advancedOptions.computeLatentMeans && realResults.groups.length === 2) {
         invResults.latentMeanDifferences = [];
         Object.keys(factorStructure).forEach(factor => {
           const group1 = realResults.groups[0];
           const group2 = realResults.groups[1];
-          const mean1 = realResults.groupParameters[group1]?.factorMeans?.find(m => m.factor === factor)?.mean ?? 0;
-          const mean2 = realResults.groupParameters[group2]?.factorMeans?.find(m => m.factor === factor)?.mean ?? 0;
+          const fm1 = realResults.groupParameters[group1]?.factorMeans?.find(m => m.factor === factor);
+          const fm2 = realResults.groupParameters[group2]?.factorMeans?.find(m => m.factor === factor);
+          const mean1 = fm1?.mean ?? 0;
+          const mean2 = fm2?.mean ?? 0;
           const difference = mean2 - mean1;
-          const se = 0.12;
-          const z = difference / se;
-          const pvalue = 2 * (1 - 0.84134);
+          const se = Math.sqrt((fm1?.se ?? 0.1) ** 2 + (fm2?.se ?? 0.1) ** 2);
+          const z = se > 0 ? difference / se : 0;
+          const pvalue = Math.min(1, 2 * (1 - normalCDF(Math.abs(z))));
 
-          const pooledSD = 1.0;
-          const cohensD = difference / pooledSD;
+          // Factors are standardized (variance 1 in the reference group), so the
+          // mean difference is itself in SD units — i.e., Cohen's d.
+          const cohensD = difference;
 
           invResults.latentMeanDifferences!.push({
             factor,
@@ -394,55 +388,6 @@ export function EnhancedInvariance({ datasets, selectedDataset, onDatasetChange 
                           Math.abs(cohensD) < 0.8 ? 'Medium' : 'Large'
           });
         });
-      }
-
-      // Add modification indices if requested
-      if (advancedOptions.computeModificationIndices) {
-        invResults.modificationIndices = [];
-        const allItems = Object.values(factorStructure).flat();
-        const topItems = allItems.slice(0, Math.min(3, allItems.length));
-
-        topItems.forEach(item => {
-          realResults.groups.forEach(group => {
-            const mi = 10 + Math.random() * 30;
-            const epc = (Math.random() - 0.5) * 0.3;
-            const sepc = (Math.random() - 0.5) * 0.2;
-
-            invResults.modificationIndices!.push({
-              parameter: 'intercept',
-              item,
-              group,
-              mi,
-              epc,
-              sepc,
-              interpretation: mi > 10 ? 'Releasing this constraint would significantly improve fit' :
-                            mi > 4 ? 'Moderate improvement expected' :
-                            'Minor improvement expected'
-            });
-          });
-        });
-      }
-
-      // Add alignment optimization if requested
-      if (advancedOptions.useAlignmentOptimization) {
-        const allItems = Object.values(factorStructure).flat();
-        const invariantCount = Math.floor(allItems.length * 0.7);
-        const nonInvariantItems = allItems.slice(invariantCount);
-
-        invResults.alignmentOptimization = {
-          method: 'free',
-          simplicity: 0.85 + Math.random() * 0.1,
-          convergence: true,
-          invariantParameters: allItems.slice(0, invariantCount),
-          nonInvariantParameters: nonInvariantItems.flatMap(item =>
-            realResults.groups.slice(1).map(group => ({
-              parameter: 'loading',
-              item,
-              group,
-              deviation: (Math.random() - 0.5) * 0.3
-            }))
-          )
-        };
       }
 
       // Add power analysis if requested
