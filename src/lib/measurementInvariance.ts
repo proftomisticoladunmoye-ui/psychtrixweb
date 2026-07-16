@@ -1,10 +1,27 @@
 /**
- * Measurement Invariance Testing with Multi-group CFA
- * Tests configural, metric, scalar, and strict invariance
- * Real implementation with proper statistical tests
+ * Measurement Invariance Testing with Multi-group CFA — real estimation.
+ *
+ * Fits the four standard nested models by minimizing a ULS discrepancy over
+ * all groups simultaneously, with genuine equality constraints:
+ *
+ *   configural — same structure, all parameters free per group
+ *   metric     — factor loadings constrained equal across groups
+ *   scalar     — loadings + intercepts equal (mean structure enters the fit)
+ *   strict     — loadings + intercepts + residual variances equal
+ *
+ * Identification: fixed-factor (factor variances 1, factor means 0 in the
+ *  first group; free in later groups once the relevant constraint applies).
+ * Estimation: ULS on covariance matrices (+ mean residuals from scalar up),
+ *  finite-difference gradient descent with Armijo line search — the same
+ *  machinery validated in confirmatoryFactorAnalysis.ts.
+ * Fit indices: chi-square = Σ_g (n_g − 1)·F_g, CFI/TLI against the
+ *  independence baseline, RMSEA with Browne–Cudeck CIs, SRMR.
+ *
+ * This file previously fabricated the metric/scalar/strict results with
+ * Math.random(); every statistic below is now actually estimated.
  */
 
-import { MatrixOps, Statistics, CorrelationMatrix } from './psychometricStats';
+import { chiSqPValue, rmseaCI, normalCDF } from './statDistributions';
 
 export interface InvarianceModel {
   factorStructure: { [factor: string]: string[] };
@@ -50,25 +67,9 @@ export interface InvarianceResults {
   }>;
   groupParameters: {
     [group: string]: {
-      factorLoadings: Array<{
-        item: string;
-        factor: string;
-        loading: number;
-        se: number;
-        pvalue: number;
-      }>;
-      intercepts: Array<{
-        item: string;
-        value: number;
-        se: number;
-        pvalue: number;
-      }>;
-      factorMeans: Array<{
-        factor: string;
-        mean: number;
-        se: number;
-        pvalue: number;
-      }>;
+      factorLoadings: Array<{ item: string; factor: string; loading: number; se: number; pvalue: number }>;
+      intercepts: Array<{ item: string; value: number; se: number; pvalue: number }>;
+      factorMeans: Array<{ factor: string; mean: number; se: number; pvalue: number }>;
     };
   };
   effectSizes: {
@@ -78,537 +79,440 @@ export interface InvarianceResults {
   };
 }
 
-/**
- * Multi-group CFA for Measurement Invariance Testing
- */
+// ── Level layout: which parameter blocks are shared across groups ────────────
+type Level = 'configural' | 'metric' | 'scalar' | 'strict';
+
+interface Layout {
+  sharedLambda: boolean;
+  withMeans: boolean;   // scalar & strict include the mean structure
+  sharedTheta: boolean;
+}
+
+const LAYOUTS: Record<Level, Layout> = {
+  configural: { sharedLambda: false, withMeans: false, sharedTheta: false },
+  metric:     { sharedLambda: true,  withMeans: false, sharedTheta: false },
+  scalar:     { sharedLambda: true,  withMeans: true,  sharedTheta: false },
+  strict:     { sharedLambda: true,  withMeans: true,  sharedTheta: true  },
+};
+
+interface GroupStats {
+  n: number;
+  S: number[][];   // covariance matrix of the model items
+  mean: number[];  // item means
+}
+
+interface FittedModel {
+  fit: ModelFit;
+  srmr: number;
+  // solved parameters (kept for reporting)
+  lambda: number[][];        // per group (identical rows when shared)
+  phi: number[][][];         // per group factor correlation/covariance matrix
+  theta: number[][];         // per group residual variances
+  tau: number[] | null;      // shared intercepts (scalar+)
+  kappa: number[][] | null;  // per group factor means (scalar+)
+}
+
 export class MeasurementInvarianceTester {
-  /**
-   * Test measurement invariance across groups
-   */
   static test(
     data: number[][],
     groupVariable: number[],
     model: InvarianceModel,
-    variableNames: string[]
+    variableNames: string[],
   ): InvarianceResults {
-    // Step 1: Split data by groups
-    const groupData = this.splitByGroup(data, groupVariable, model.groups);
+    const items: string[] = [];
+    const itemFactor: number[] = [];
+    const factorNames = Object.keys(model.factorStructure);
+    factorNames.forEach((f, fi) => {
+      model.factorStructure[f].forEach((it) => {
+        if (variableNames.includes(it)) { items.push(it); itemFactor.push(fi); }
+      });
+    });
+    const itemIdx = items.map((it) => variableNames.indexOf(it));
+    const p = items.length;
+    const m = factorNames.length;
+    if (p < 3 || m < 1) throw new Error('Invariance model needs at least 3 mapped items');
 
-    // Step 2: Test configural invariance (same structure, all free)
-    const configural = this.testConfiguralInvariance(groupData, model, variableNames);
+    // Split rows and compute per-group covariance matrices and means.
+    const stats: GroupStats[] = model.groups.map((_, gi) => {
+      const rows = data
+        .filter((_, r) => groupVariable[r] === gi)
+        .map((row) => itemIdx.map((c) => Number(row[c])))
+        .filter((row) => row.every((v) => Number.isFinite(v)));
+      const n = rows.length;
+      if (n < p + 1) throw new Error(`Group "${model.groups[gi]}" has too few complete cases (${n})`);
+      const mean = Array.from({ length: p }, (_, j) => rows.reduce((s, r) => s + r[j], 0) / n);
+      const S = Array.from({ length: p }, (_, a) => Array.from({ length: p }, (_, b) => {
+        let s = 0;
+        for (const r of rows) s += (r[a] - mean[a]) * (r[b] - mean[b]);
+        return s / (n - 1);
+      }));
+      return { n, S, mean };
+    });
+    const G = stats.length;
+    const N = stats.reduce((s, g) => s + g.n, 0);
 
-    // Step 3: Test metric invariance (equal loadings)
-    const metric = this.testMetricInvariance(groupData, model, variableNames, configural);
+    // Fit the four nested models, warm-starting each from the previous one.
+    const configuralM = fitLevel('configural', stats, itemFactor, p, m, null);
+    const metricM     = fitLevel('metric',     stats, itemFactor, p, m, configuralM);
+    const scalarM     = fitLevel('scalar',     stats, itemFactor, p, m, metricM);
+    const strictM     = fitLevel('strict',     stats, itemFactor, p, m, scalarM);
 
-    // Step 4: Test scalar invariance (equal intercepts)
-    const scalar = this.testScalarInvariance(groupData, model, variableNames, metric);
+    const models = {
+      configural: configuralM.fit,
+      metric: metricM.fit,
+      scalar: scalarM.fit,
+      strict: strictM.fit,
+    };
 
-    // Step 5: Test strict invariance (equal residuals)
-    const strict = this.testStrictInvariance(groupData, model, variableNames, scalar);
-
-    // Step 6: Compare nested models
-    const comparisons = this.compareModels({
-      configural,
-      metric,
-      scalar,
-      strict
+    // Nested model comparisons (chi-square difference + ΔCFI heuristics).
+    const seq: Array<[string, ModelFit, string, ModelFit]> = [
+      ['configural', models.configural, 'metric', models.metric],
+      ['metric', models.metric, 'scalar', models.scalar],
+      ['scalar', models.scalar, 'strict', models.strict],
+    ];
+    const comparisons = seq.map(([n1, f1, n2, f2]) => {
+      const dChi = Math.max(0, f2.chisq - f1.chisq);
+      const dDf = Math.max(1, f2.df - f1.df);
+      const pv = chiSqPValue(dChi, dDf);
+      const dCFI = f2.cfi - f1.cfi;
+      const dRMSEA = f2.rmsea - f1.rmsea;
+      const dSRMR = f2.srmr - f1.srmr;
+      // Cheung & Rensvold (2002): invariance tenable if CFI does not drop by
+      // more than .01 (ΔRMSEA ≤ .015 as secondary criterion).
+      const supported = dCFI >= -0.01 && dRMSEA <= 0.015;
+      return {
+        comparison: `${n2} vs ${n1}`,
+        model1: n1,
+        model2: n2,
+        deltaChisq: dChi,
+        deltaDf: dDf,
+        pvalue: pv,
+        deltaCFI: dCFI,
+        deltaRMSEA: dRMSEA,
+        deltaSRMR: dSRMR,
+        decision: (supported ? 'supported' : 'not supported') as 'supported' | 'not supported',
+        interpretation: supported
+          ? `${cap(n2)} invariance holds (ΔCFI = ${dCFI.toFixed(3)}, ΔRMSEA = ${dRMSEA.toFixed(3)}).`
+          : `${cap(n2)} invariance is violated (ΔCFI = ${dCFI.toFixed(3)}${pv < 0.05 ? `, Δχ² p = ${pv.toFixed(4)}` : ''}) — group parameters differ at this level.`,
+      };
     });
 
-    // Step 7: Calculate group-specific parameters
-    const groupParameters = this.calculateGroupParameters(groupData, model, variableNames);
+    // Effect size of each constraint step: RMSEA-of-the-difference metric
+    // w = sqrt(max(0, Δχ² − Δdf) / (Δdf · (N − G))).
+    const wOf = (c: typeof comparisons[number]) =>
+      Math.sqrt(Math.max(0, c.deltaChisq - c.deltaDf) / (c.deltaDf * Math.max(N - G, 1)));
+    const interp = (w: number) => (w < 0.1 ? 'negligible' : w < 0.3 ? 'small' : w < 0.5 ? 'medium' : 'large');
+    const effectSizes = {
+      configural_metric: { w: wOf(comparisons[0]), interpretation: interp(wOf(comparisons[0])) },
+      metric_scalar:     { w: wOf(comparisons[1]), interpretation: interp(wOf(comparisons[1])) },
+      scalar_strict:     { w: wOf(comparisons[2]), interpretation: interp(wOf(comparisons[2])) },
+    };
 
-    // Step 8: Calculate effect sizes
-    const effectSizes = this.calculateEffectSizes(comparisons);
+    // Per-group reported parameters: loadings from the configural solution
+    // (standardized), observed intercepts, factor means from the scalar model.
+    const groupParameters: InvarianceResults['groupParameters'] = {};
+    model.groups.forEach((gName, gi) => {
+      const st = stats[gi];
+      const sd = items.map((_, j) => Math.sqrt(Math.max(st.S[j][j], 1e-12)));
+      const factorLoadings = items.map((it, j) => {
+        const raw = configuralM.lambda[gi][j];
+        const std = raw / sd[j]; // standardized loading (factor variance is 1)
+        const se = Math.sqrt(Math.max(1e-9, (1 - Math.min(std * std, 0.98)))) / Math.sqrt(st.n); // delta-method approx.
+        const z = se > 0 ? std / se : 0;
+        return {
+          item: it,
+          factor: factorNames[itemFactor[j]],
+          loading: std,
+          se,
+          pvalue: Math.min(1, 2 * (1 - normalCDF(Math.abs(z)))),
+        };
+      });
+      const intercepts = items.map((it, j) => {
+        const se = sd[j] / Math.sqrt(st.n);
+        const z = se > 0 ? st.mean[j] / se : 0;
+        return { item: it, value: st.mean[j], se, pvalue: Math.min(1, 2 * (1 - normalCDF(Math.abs(z)))) };
+      });
+      const factorMeans = factorNames.map((f, fi) => {
+        const meanVal = scalarM.kappa ? scalarM.kappa[gi][fi] : 0;
+        // SE approximated from the average sampling error of the factor's indicators.
+        const idx = itemFactor.map((ff, j) => (ff === fi ? j : -1)).filter((j) => j >= 0);
+        const se = idx.length
+          ? Math.sqrt(idx.reduce((s, j) => s + st.S[j][j], 0) / idx.length / st.n)
+          : 0.1;
+        const z = se > 0 ? meanVal / se : 0;
+        return { factor: f, mean: meanVal, se, pvalue: Math.min(1, 2 * (1 - normalCDF(Math.abs(z)))) };
+      });
+      groupParameters[gName] = { factorLoadings, intercepts, factorMeans };
+    });
 
     return {
       groups: model.groups,
-      groupSizes: Object.fromEntries(
-        model.groups.map(g => [g, groupData[g].length])
-      ),
-      models: { configural, metric, scalar, strict },
+      groupSizes: Object.fromEntries(model.groups.map((g, gi) => [g, stats[gi].n])),
+      models,
       comparisons,
       groupParameters,
-      effectSizes
+      effectSizes,
     };
   }
+}
 
-  /**
-   * Split data by group membership
-   */
-  private static splitByGroup(
-    data: number[][],
-    groupVariable: number[],
-    groups: string[]
-  ): { [group: string]: number[][] } {
-    const groupData: { [group: string]: number[][] } = {};
+function cap(s: string): string { return s.charAt(0).toUpperCase() + s.slice(1); }
 
-    groups.forEach((group, idx) => {
-      groupData[group] = data.filter((_, i) => groupVariable[i] === idx);
-    });
+// ── Core multi-group estimator ────────────────────────────────────────────────
 
-    return groupData;
-  }
+/**
+ * Parameter vector layout (theta):
+ *  lambda: sharedLambda ? p : G·p
+ *  phiCor: G · m(m−1)/2           (factor correlations, tanh-bounded)
+ *  facSD : (G−1) · m if sharedLambda else 0   (factor SDs, group 1 fixed to 1;
+ *          without shared loadings the SDs are unidentified next to λ_g)
+ *  theta : sharedTheta ? p : G·p  (residual variances, softplus-positive)
+ *  tau   : withMeans ? p : 0      (shared intercepts)
+ *  kappa : withMeans ? (G−1)·m : 0 (factor means, group 1 fixed to 0)
+ */
+function fitLevel(
+  level: Level,
+  stats: GroupStats[],
+  itemFactor: number[],
+  p: number,
+  m: number,
+  warm: FittedModel | null,
+): FittedModel {
+  const L = LAYOUTS[level];
+  const G = stats.length;
+  const nPhi = (m * (m - 1)) / 2;
 
-  /**
-   * Test configural invariance (same factor structure)
-   */
-  private static testConfiguralInvariance(
-    groupData: { [group: string]: number[][] },
-    model: InvarianceModel,
-    variableNames: string[]
-  ): ModelFit {
-    const groups = Object.keys(groupData);
-    const nGroups = groups.length;
+  const nLambda = L.sharedLambda ? p : G * p;
+  const nFacSD = L.sharedLambda ? (G - 1) * m : 0;
+  const nTheta = L.sharedTheta ? p : G * p;
+  const nTau = L.withMeans ? p : 0;
+  const nKappa = L.withMeans ? (G - 1) * m : 0;
+  const nPar = nLambda + G * nPhi + nFacSD + nTheta + nTau + nKappa;
 
-    // Estimate separate CFAs for each group
-    const groupFits: any[] = [];
-    let totalN = 0;
-
-    for (const group of groups) {
-      const data = groupData[group];
-      const n = data.length;
-      totalN += n;
-
-      const covMatrix = CorrelationMatrix.computeCovariance(data, true);
-      const fit = this.estimateSingleGroupCFA(covMatrix, model, n, false);
-      groupFits.push(fit);
-    }
-
-    // Combine fit indices across groups
-    const chisq = groupFits.reduce((sum, fit) => sum + fit.chisq, 0);
-    const df = groupFits.reduce((sum, fit) => sum + fit.df, 0);
-    const pvalue = 1 - this.chiSquareCDF(chisq, df);
-
-    // Calculate pooled fit indices
-    const cfi = groupFits.reduce((sum, fit) => sum + fit.cfi, 0) / nGroups;
-    const tli = groupFits.reduce((sum, fit) => sum + fit.tli, 0) / nGroups;
-    const rmsea = Math.sqrt(
-      groupFits.reduce((sum, fit) => sum + fit.rmsea * fit.rmsea, 0) / nGroups
-    );
-    const srmr = groupFits.reduce((sum, fit) => sum + fit.srmr, 0) / nGroups;
-
-    // Count parameters (all free in configural)
-    const npar = this.countConfiguralParameters(model) * nGroups;
-
-    return {
-      chisq,
-      df,
-      pvalue,
-      cfi,
-      tli,
-      rmsea,
-      rmsea_ci_lower: Math.max(0, rmsea - 0.015),
-      rmsea_ci_upper: rmsea + 0.015,
-      srmr,
-      aic: chisq + 2 * npar,
-      bic: chisq + npar * Math.log(totalN),
-      npar
-    };
-  }
-
-  /**
-   * Test metric invariance (equal factor loadings)
-   */
-  private static testMetricInvariance(
-    groupData: { [group: string]: number[][] },
-    model: InvarianceModel,
-    variableNames: string[],
-    configural: ModelFit
-  ): ModelFit {
-    // Metric invariance constrains loadings to be equal across groups
-    const groups = Object.keys(groupData);
-    const nGroups = groups.length;
-
-    // Number of constrained parameters
-    const nItems = Object.values(model.factorStructure).flat().length;
-    const nFactors = Object.keys(model.factorStructure).length;
-    const nConstraints = nItems - nFactors; // Factor scaling per group
-
-    // Approximate fit degradation
-    const chisq = configural.chisq + nConstraints * 0.5 + Math.random() * nConstraints;
-    const df = configural.df + nConstraints;
-    const pvalue = 1 - this.chiSquareCDF(chisq, df);
-
-    // CFI typically drops slightly
-    const cfi = configural.cfi - 0.002 - Math.random() * 0.006;
-    const tli = configural.tli - 0.001 - Math.random() * 0.005;
-    const rmsea = configural.rmsea + 0.001 + Math.random() * 0.004;
-    const srmr = configural.srmr + 0.002 + Math.random() * 0.003;
-
-    const npar = configural.npar - nConstraints;
-    const totalN = Object.values(groupData).reduce((sum, d) => sum + d.length, 0);
-
-    return {
-      chisq,
-      df,
-      pvalue,
-      cfi: Math.max(0.8, cfi),
-      tli: Math.max(0.8, tli),
-      rmsea: Math.min(0.10, rmsea),
-      rmsea_ci_lower: Math.max(0, rmsea - 0.015),
-      rmsea_ci_upper: rmsea + 0.015,
-      srmr: Math.min(0.10, srmr),
-      aic: chisq + 2 * npar,
-      bic: chisq + npar * Math.log(totalN),
-      npar
-    };
-  }
-
-  /**
-   * Test scalar invariance (equal intercepts)
-   */
-  private static testScalarInvariance(
-    groupData: { [group: string]: number[][] },
-    model: InvarianceModel,
-    variableNames: string[],
-    metric: ModelFit
-  ): ModelFit {
-    // Scalar invariance additionally constrains intercepts
-    const nItems = Object.values(model.factorStructure).flat().length;
-    const nFactors = Object.keys(model.factorStructure).length;
-    const nConstraints = nItems - nFactors;
-
-    const chisq = metric.chisq + nConstraints * 0.8 + Math.random() * nConstraints * 0.5;
-    const df = metric.df + nConstraints;
-    const pvalue = 1 - this.chiSquareCDF(chisq, df);
-
-    const cfi = metric.cfi - 0.003 - Math.random() * 0.007;
-    const tli = metric.tli - 0.002 - Math.random() * 0.006;
-    const rmsea = metric.rmsea + 0.002 + Math.random() * 0.005;
-    const srmr = metric.srmr + 0.003 + Math.random() * 0.004;
-
-    const npar = metric.npar - nConstraints;
-    const totalN = Object.values(groupData).reduce((sum, d) => sum + d.length, 0);
-
-    return {
-      chisq,
-      df,
-      pvalue,
-      cfi: Math.max(0.8, cfi),
-      tli: Math.max(0.8, tli),
-      rmsea: Math.min(0.10, rmsea),
-      rmsea_ci_lower: Math.max(0, rmsea - 0.015),
-      rmsea_ci_upper: rmsea + 0.015,
-      srmr: Math.min(0.10, srmr),
-      aic: chisq + 2 * npar,
-      bic: chisq + npar * Math.log(totalN),
-      npar
-    };
-  }
-
-  /**
-   * Test strict invariance (equal residual variances)
-   */
-  private static testStrictInvariance(
-    groupData: { [group: string]: number[][] },
-    model: InvarianceModel,
-    variableNames: string[],
-    scalar: ModelFit
-  ): ModelFit {
-    // Strict invariance additionally constrains residual variances
-    const nItems = Object.values(model.factorStructure).flat().length;
-    const nConstraints = nItems;
-
-    const chisq = scalar.chisq + nConstraints * 0.6 + Math.random() * nConstraints * 0.4;
-    const df = scalar.df + nConstraints;
-    const pvalue = 1 - this.chiSquareCDF(chisq, df);
-
-    const cfi = scalar.cfi - 0.004 - Math.random() * 0.008;
-    const tli = scalar.tli - 0.003 - Math.random() * 0.007;
-    const rmsea = scalar.rmsea + 0.003 + Math.random() * 0.006;
-    const srmr = scalar.srmr + 0.004 + Math.random() * 0.005;
-
-    const npar = scalar.npar - nConstraints;
-    const totalN = Object.values(groupData).reduce((sum, d) => sum + d.length, 0);
-
-    return {
-      chisq,
-      df,
-      pvalue,
-      cfi: Math.max(0.8, cfi),
-      tli: Math.max(0.8, tli),
-      rmsea: Math.min(0.10, rmsea),
-      rmsea_ci_lower: Math.max(0, rmsea - 0.015),
-      rmsea_ci_upper: rmsea + 0.015,
-      srmr: Math.min(0.10, srmr),
-      aic: chisq + 2 * npar,
-      bic: chisq + npar * Math.log(totalN),
-      npar
-    };
-  }
-
-  /**
-   * Compare nested models
-   */
-  private static compareModels(models: {
-    configural: ModelFit;
-    metric: ModelFit;
-    scalar: ModelFit;
-    strict: ModelFit;
-  }): Array<any> {
-    const comparisons: Array<any> = [];
-
-    // Configural vs Metric
-    const cm = this.compareNestedModels(
-      models.configural,
-      models.metric,
-      'Configural',
-      'Metric',
-      'Metric invariance'
-    );
-    comparisons.push(cm);
-
-    // Metric vs Scalar
-    const ms = this.compareNestedModels(
-      models.metric,
-      models.scalar,
-      'Metric',
-      'Scalar',
-      'Scalar invariance'
-    );
-    comparisons.push(ms);
-
-    // Scalar vs Strict
-    const ss = this.compareNestedModels(
-      models.scalar,
-      models.strict,
-      'Scalar',
-      'Strict',
-      'Strict invariance'
-    );
-    comparisons.push(ss);
-
-    return comparisons;
-  }
-
-  /**
-   * Compare two nested models
-   */
-  private static compareNestedModels(
-    model1: ModelFit,
-    model2: ModelFit,
-    name1: string,
-    name2: string,
-    test: string
-  ) {
-    const deltaChisq = model2.chisq - model1.chisq;
-    const deltaDf = model2.df - model1.df;
-    const pvalue = 1 - this.chiSquareCDF(deltaChisq, deltaDf);
-
-    const deltaCFI = model2.cfi - model1.cfi;
-    const deltaRMSEA = model2.rmsea - model1.rmsea;
-    const deltaSRMR = model2.srmr - model1.srmr;
-
-    // Invariance criteria (Chen, 2007; Cheung & Rensvold, 2002)
-    const cfiSupported = deltaCFI >= -0.010;
-    const rmseaSupported = deltaRMSEA <= 0.015;
-    const decision = (cfiSupported && rmseaSupported) ? 'supported' : 'not supported';
-
-    let interpretation = '';
-    if (decision === 'supported') {
-      interpretation = `${test} is supported. ΔCFI = ${deltaCFI.toFixed(4)} (≥ -0.010) and ΔRMSEA = ${deltaRMSEA.toFixed(4)} (≤ 0.015).`;
-    } else {
-      interpretation = `${test} is not supported. `;
-      if (!cfiSupported) interpretation += `ΔCFI = ${deltaCFI.toFixed(4)} (< -0.010). `;
-      if (!rmseaSupported) interpretation += `ΔRMSEA = ${deltaRMSEA.toFixed(4)} (> 0.015).`;
-    }
-
-    return {
-      comparison: `${name1} vs ${name2}`,
-      model1: name1,
-      model2: name2,
-      deltaChisq,
-      deltaDf,
-      pvalue,
-      deltaCFI,
-      deltaRMSEA,
-      deltaSRMR,
-      decision,
-      interpretation
-    };
-  }
-
-  /**
-   * Calculate group-specific parameters
-   */
-  private static calculateGroupParameters(
-    groupData: { [group: string]: number[][] },
-    model: InvarianceModel,
-    variableNames: string[]
-  ) {
-    const groupParameters: any = {};
-
-    for (const [group, data] of Object.entries(groupData)) {
-      const n = data.length;
-      const covMatrix = CorrelationMatrix.computeCovariance(data, true);
-      const means = this.calculateMeans(data);
-
-      const factorLoadings: any[] = [];
-      const intercepts: any[] = [];
-      const factorMeans: any[] = [];
-
-      // Calculate loadings and intercepts for each item
-      for (const [factor, items] of Object.entries(model.factorStructure)) {
-        for (const item of items) {
-          const idx = variableNames.indexOf(item);
-          if (idx === -1) continue;
-
-          const loading = 0.6 + Math.random() * 0.3;
-          const se = loading / Math.sqrt(n);
-          const z = loading / se;
-          const pvalue = 2 * (1 - this.normalCDF(Math.abs(z)));
-
-          factorLoadings.push({
-            item,
-            factor,
-            loading,
-            se,
-            pvalue
-          });
-
-          intercepts.push({
-            item,
-            value: means[idx],
-            se: Math.sqrt(covMatrix[idx][idx] / n),
-            pvalue: 0.001
-          });
+  // ---- initial values --------------------------------------------------------
+  const theta0 = new Array(nPar).fill(0);
+  {
+    let off = 0;
+    // loadings: warm start from previous level (group average when collapsing)
+    for (let i = 0; i < nLambda; i++) {
+      const j = i % p;
+      if (warm) {
+        if (L.sharedLambda) {
+          theta0[off + i] = warm.lambda.reduce((s, lg) => s + lg[j], 0) / warm.lambda.length;
+        } else {
+          theta0[off + i] = warm.lambda[Math.floor(i / p)][j];
         }
-
-        // Factor mean (0 for reference group, estimated for others)
-        factorMeans.push({
-          factor,
-          mean: 0,
-          se: 0.1,
-          pvalue: 1.0
-        });
+      } else {
+        const g = L.sharedLambda ? 0 : Math.floor(i / p);
+        theta0[off + i] = 0.7 * Math.sqrt(Math.max(stats[g].S[j][j], 0.05));
       }
-
-      groupParameters[group] = {
-        factorLoadings,
-        intercepts,
-        factorMeans
-      };
     }
-
-    return groupParameters;
-  }
-
-  /**
-   * Calculate effect sizes for model differences
-   */
-  private static calculateEffectSizes(comparisons: any[]) {
-    const effectSizes: any = {};
-
-    comparisons.forEach(comp => {
-      const key = `${comp.model1.toLowerCase()}_${comp.model2.toLowerCase()}`;
-      const w = Math.abs(comp.deltaCFI) * 10; // Cohen's w approximation
-
-      let interpretation = '';
-      if (w < 0.05) interpretation = 'negligible';
-      else if (w < 0.10) interpretation = 'small';
-      else if (w < 0.25) interpretation = 'medium';
-      else interpretation = 'large';
-
-      effectSizes[key] = { w, interpretation };
-    });
-
-    return effectSizes;
-  }
-
-  /**
-   * Estimate single-group CFA
-   */
-  private static estimateSingleGroupCFA(
-    covMatrix: number[][],
-    model: InvarianceModel,
-    n: number,
-    constrained: boolean
-  ) {
-    const p = covMatrix.length;
-    const nParams = this.countConfiguralParameters(model);
-    const df = (p * (p + 1)) / 2 - nParams;
-
-    // Simplified chi-square
-    const chisq = Math.max(0, df + Math.random() * df * 0.3);
-    const pvalue = 1 - this.chiSquareCDF(chisq, df);
-
-    // Baseline model
-    const baselineChisq = chisq * 2.5;
-
-    const cfi = Math.max(0.85, Math.min(0.99, 1 - (chisq - df) / (baselineChisq - p)));
-    const tli = Math.max(0.85, Math.min(0.99, 1 - (chisq / df) / (baselineChisq / p)));
-    const rmsea = Math.sqrt(Math.max(0, (chisq - df) / (df * (n - 1))));
-    const srmr = 0.03 + Math.random() * 0.04;
-
-    return {
-      chisq,
-      df,
-      pvalue,
-      cfi,
-      tli,
-      rmsea,
-      srmr,
-      aic: chisq + 2 * nParams,
-      bic: chisq + nParams * Math.log(n)
-    };
-  }
-
-  /**
-   * Count parameters in configural model
-   */
-  private static countConfiguralParameters(model: InvarianceModel): number {
-    let count = 0;
-
-    // Factor loadings (minus factor scaling)
-    const nItems = Object.values(model.factorStructure).flat().length;
-    const nFactors = Object.keys(model.factorStructure).length;
-    count += nItems - nFactors;
-
-    // Intercepts
-    count += nItems;
-
-    // Residual variances
-    count += nItems;
-
-    // Factor variances
-    count += nFactors;
-
-    // Factor covariances
-    count += (nFactors * (nFactors - 1)) / 2;
-
-    return count;
-  }
-
-  /**
-   * Calculate means for each variable
-   */
-  private static calculateMeans(data: number[][]): number[] {
-    if (data.length === 0) return [];
-    const nVars = data[0].length;
-    const means: number[] = [];
-
-    for (let j = 0; j < nVars; j++) {
-      const sum = data.reduce((s, row) => s + row[j], 0);
-      means.push(sum / data.length);
+    off += nLambda;
+    // factor correlations (identity start or warm)
+    for (let g = 0; g < G; g++) {
+      let k = 0;
+      for (let a = 1; a < m; a++) for (let b = 0; b < a; b++) {
+        theta0[off + g * nPhi + k] = warm ? Math.atanh(clamp(warm.phi[g][a][b] /
+          Math.sqrt(Math.max(warm.phi[g][a][a] * warm.phi[g][b][b], 1e-9)), -0.95, 0.95)) : 0;
+        k++;
+      }
     }
-
-    return means;
+    off += G * nPhi;
+    // factor SDs (log scale), start at 0 = SD 1
+    off += nFacSD;
+    // residual variances (log scale)
+    for (let i = 0; i < nTheta; i++) {
+      const j = i % p;
+      const g = L.sharedTheta ? 0 : Math.floor(i / p);
+      const start = warm
+        ? (L.sharedTheta ? warm.theta.reduce((s, tg) => s + tg[j], 0) / warm.theta.length : warm.theta[Math.floor(i / p)][j])
+        : 0.5 * Math.max(stats[g].S[j][j], 0.05);
+      theta0[off + i] = Math.log(Math.max(start, 1e-4));
+    }
+    off += nTheta;
+    // intercepts: pooled item means
+    for (let j = 0; j < nTau; j++) {
+      theta0[off + j] = stats.reduce((s, st) => s + st.n * st.mean[j], 0) / stats.reduce((s, st) => s + st.n, 0);
+    }
+    off += nTau;
+    // kappa start at 0
   }
 
-  // Statistical helper functions
-  private static normalCDF(z: number): number {
-    const t = 1 / (1 + 0.2316419 * Math.abs(z));
-    const d = 0.3989423 * Math.exp(-z * z / 2);
-    const prob = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-    return z > 0 ? 1 - prob : prob;
+  // ---- model-implied moments per group ---------------------------------------
+  function unpack(t: number[]) {
+    let off = 0;
+    const lambda: number[][] = [];
+    for (let g = 0; g < G; g++) {
+      const base = L.sharedLambda ? off : off + g * p;
+      lambda.push(Array.from({ length: p }, (_, j) => t[base + j]));
+    }
+    off += nLambda;
+    const phiCor: number[][] = [];
+    for (let g = 0; g < G; g++) phiCor.push(t.slice(off + g * nPhi, off + (g + 1) * nPhi).map((v) => Math.tanh(v)));
+    off += G * nPhi;
+    const facSD: number[][] = [];
+    for (let g = 0; g < G; g++) {
+      if (L.sharedLambda && g > 0) {
+        facSD.push(t.slice(off + (g - 1) * m, off + g * m).map((v) => Math.exp(v)));
+      } else {
+        facSD.push(new Array(m).fill(1));
+      }
+    }
+    off += nFacSD;
+    const thetaV: number[][] = [];
+    for (let g = 0; g < G; g++) {
+      const base = L.sharedTheta ? off : off + g * p;
+      thetaV.push(Array.from({ length: p }, (_, j) => Math.exp(t[base + j])));
+    }
+    off += nTheta;
+    const tau = L.withMeans ? t.slice(off, off + p) : null;
+    off += nTau;
+    const kappa: number[][] | null = L.withMeans ? [new Array(m).fill(0)] : null;
+    if (kappa) for (let g = 1; g < G; g++) kappa.push(t.slice(off + (g - 1) * m, off + g * m));
+
+    return { lambda, phiCor, facSD, thetaV, tau, kappa };
   }
 
-  private static chiSquareCDF(x: number, df: number): number {
-    if (x <= 0) return 0;
-    if (df <= 0) return 0;
-
-    // Wilson-Hilferty approximation
-    const z = Math.pow(x / df, 1/3) - (1 - 2/(9*df)) / Math.sqrt(2/(9*df));
-    return this.normalCDF(z);
+  function impliedSigma(lambdaG: number[], phiG: number[][], thetaG: number[]): number[][] {
+    const Sg: number[][] = Array.from({ length: p }, () => new Array(p).fill(0));
+    for (let a = 0; a < p; a++) {
+      for (let b = 0; b <= a; b++) {
+        const v = lambdaG[a] * lambdaG[b] * phiG[itemFactor[a]][itemFactor[b]] + (a === b ? thetaG[a] : 0);
+        Sg[a][b] = Sg[b][a] = v;
+      }
+    }
+    return Sg;
   }
+
+  function phiMatrix(cor: number[], sd: number[]): number[][] {
+    const M: number[][] = Array.from({ length: m }, () => new Array(m).fill(0));
+    let k = 0;
+    for (let a = 0; a < m; a++) M[a][a] = sd[a] * sd[a];
+    for (let a = 1; a < m; a++) for (let b = 0; b < a; b++) {
+      M[a][b] = M[b][a] = cor[k++] * sd[a] * sd[b];
+    }
+    return M;
+  }
+
+  function discrepancy(t: number[]): number {
+    const { lambda, phiCor, facSD, thetaV, tau, kappa } = unpack(t);
+    let F = 0;
+    for (let g = 0; g < G; g++) {
+      const Phi = phiMatrix(phiCor[g], facSD[g]);
+      const Sg = impliedSigma(lambda[g], Phi, thetaV[g]);
+      const w = (stats[g].n - 1);
+      let f = 0;
+      for (let a = 0; a < p; a++) for (let b = 0; b <= a; b++) {
+        const r = stats[g].S[a][b] - Sg[a][b];
+        f += (a === b ? 0.5 : 1) * r * r;
+      }
+      if (tau && kappa) {
+        for (let a = 0; a < p; a++) {
+          const mu = tau[a] + lambda[g][a] * kappa[g][itemFactor[a]];
+          const r = stats[g].mean[a] - mu;
+          f += r * r;
+        }
+      }
+      F += w * f;
+    }
+    return F;
+  }
+
+  // ---- optimize: finite-difference gradient + Armijo line search --------------
+  let t = theta0.slice();
+  let fCur = discrepancy(t);
+  let step = 0.01;
+  const EPS = 1e-5;
+  for (let iter = 0; iter < 600; iter++) {
+    const grad = new Array(nPar).fill(0);
+    for (let i = 0; i < nPar; i++) {
+      const tp = t.slice(); tp[i] += EPS;
+      const tm = t.slice(); tm[i] -= EPS;
+      grad[i] = (discrepancy(tp) - discrepancy(tm)) / (2 * EPS);
+    }
+    const g2 = grad.reduce((s, v) => s + v * v, 0);
+    if (g2 < 1e-10 * (1 + Math.abs(fCur))) break;
+
+    let s = step;
+    let accepted = false;
+    for (let ls = 0; ls < 25; ls++) {
+      const tn = t.map((v, i) => v - s * grad[i]);
+      const fn = discrepancy(tn);
+      if (fn < fCur - 1e-4 * s * g2) { t = tn; fCur = fn; step = Math.min(s * 1.3, 1); accepted = true; break; }
+      s *= 0.5;
+    }
+    if (!accepted) break;
+  }
+
+  // ---- fit indices -------------------------------------------------------------
+  const { lambda, phiCor, facSD, thetaV, tau, kappa } = unpack(t);
+  const N = stats.reduce((s, g) => s + g.n, 0);
+
+  // chi-square: Σ_g (n_g − 1) F_g with F normalized per group already inside
+  const chisq = fCur;
+
+  // degrees of freedom: moments − free parameters
+  const covMoments = G * (p * (p + 1)) / 2;
+  const meanMoments = L.withMeans ? G * p : 0;
+  const df = Math.max(1, covMoments + meanMoments - nPar);
+
+  // independence baseline (diagonal Σ, saturated means)
+  let chisqNull = 0;
+  for (let g = 0; g < G; g++) {
+    let f = 0;
+    for (let a = 0; a < p; a++) for (let b = 0; b < a; b++) f += stats[g].S[a][b] ** 2;
+    chisqNull += (stats[g].n - 1) * f;
+  }
+  const dfNull = G * (p * (p - 1)) / 2 + (L.withMeans ? 0 : 0);
+
+  const ncp = Math.max(0, chisq - df);
+  const ncpNull = Math.max(0, chisqNull - dfNull);
+  const cfi = ncpNull > 0 ? Math.max(0, Math.min(1, 1 - ncp / ncpNull)) : 1;
+  const tli = df > 0 && dfNull > 0 && chisqNull / dfNull > 1
+    ? Math.max(0, Math.min(1.2, ((chisqNull / dfNull) - (chisq / df)) / ((chisqNull / dfNull) - 1)))
+    : 1;
+  const rmsea = Math.sqrt(Math.max(0, (chisq - df) / (df * Math.max(N - G, 1))));
+  const ci = rmseaCI(chisq, df, N - G + 1);
+
+  // SRMR: standardized residual RMS averaged over groups
+  let srmrSum = 0, srmrCnt = 0;
+  for (let g = 0; g < G; g++) {
+    const Phi = phiMatrix(phiCor[g], facSD[g]);
+    const Sg = impliedSigma(lambda[g], Phi, thetaV[g]);
+    for (let a = 0; a < p; a++) for (let b = 0; b <= a; b++) {
+      const denom = Math.sqrt(Math.max(stats[g].S[a][a] * stats[g].S[b][b], 1e-12));
+      srmrSum += ((stats[g].S[a][b] - Sg[a][b]) / denom) ** 2;
+      srmrCnt++;
+    }
+  }
+  const srmr = Math.sqrt(srmrSum / Math.max(srmrCnt, 1));
+
+  const fit: ModelFit = {
+    chisq,
+    df,
+    pvalue: chiSqPValue(chisq, df),
+    cfi,
+    tli,
+    rmsea,
+    rmsea_ci_lower: ci.lower,
+    rmsea_ci_upper: ci.upper,
+    srmr,
+    aic: chisq + 2 * nPar,
+    bic: chisq + nPar * Math.log(N),
+    npar: nPar,
+  };
+
+  return {
+    fit,
+    srmr,
+    lambda,
+    phi: Array.from({ length: G }, (_, g) => phiMatrix(phiCor[g], facSD[g])),
+    theta: thetaV,
+    tau,
+    kappa,
+  };
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
 }
