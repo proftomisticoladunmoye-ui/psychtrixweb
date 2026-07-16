@@ -102,25 +102,11 @@ export class IRTEstimator {
     maxIterations: number = 100,
     tolerance: number = 0.001
   ): IRTResults {
-    const n = data.length;
-    const k = data[0].length;
-
-    let personAbilities = this.initializeAbilities(data);
-
-    let itemParams = this.initializeItemParameters(data, model);
-
-    for (let iter = 0; iter < maxIterations; iter++) {
-      const oldParams = itemParams.map(p => ({ ...p }));
-
-      personAbilities = this.estimateAbilities(data, itemParams, personAbilities, model);
-
-      itemParams = this.estimateItemParameters(data, personAbilities, itemParams, model);
-
-      const change = this.calculateParameterChange(oldParams, itemParams);
-      if (change < tolerance) {
-        break;
-      }
-    }
+    // Marginal maximum likelihood (Bock & Aitkin, 1981) with EAP scoring —
+    // the same estimation family as IRTPRO/mirt. The previous joint-ML
+    // (alternating Newton) estimator systematically inflated discrimination.
+    const { itemParams, abilities: personAbilities, abilitySEs } =
+      this.mmlEstimate(data, model, maxIterations, tolerance);
 
     const itemResults = itemNames.map((name, i) => {
       const result: any = {
@@ -141,11 +127,11 @@ export class IRTEstimator {
     });
 
     const personResults = personAbilities.map((ability, i) => {
-      const se = this.calculateAbilitySE(ability, itemParams, model);
+      // EAP posterior SD — the standard-error convention IRTPRO/mirt report.
       return {
         person: i + 1,
         ability: parseFloat(ability.toFixed(3)),
-        se: parseFloat(se.toFixed(3))
+        se: parseFloat(abilitySEs[i].toFixed(3))
       };
     });
 
@@ -195,22 +181,7 @@ export class IRTEstimator {
   }
 
   /**
-   * Initialize person abilities using simple scoring
-   */
-  private static initializeAbilities(data: number[][]): number[] {
-    return data.map(row => {
-      const score = row.reduce((sum, val) => sum + val, 0);
-      const proportion = score / row.length;
-
-      if (proportion >= 0.99) return 2.0;
-      if (proportion <= 0.01) return -2.0;
-
-      return Math.log(proportion / (1 - proportion));
-    });
-  }
-
-  /**
-   * Initialize item parameters
+   * Deterministic starting values (no RNG — results must be reproducible).
    */
   private static initializeItemParameters(
     data: number[][],
@@ -227,16 +198,175 @@ export class IRTEstimator {
                         proportion <= 0.01 ? 2.0 :
                         -Math.log(proportion / (1 - proportion));
 
-      const discrimination = model === '1PL' ? 1.0 : 1.0 + Math.random() * 0.5;
-
-      const guessing = (model === '3PL' || model === '4PL') ? 0.1 + Math.random() * 0.15 : 0;
-
-      const slipping = model === '4PL' ? 0.95 + Math.random() * 0.04 : undefined;
+      const discrimination = 1.0;
+      const guessing = (model === '3PL' || model === '4PL') ? 0.15 : 0;
+      const slipping = model === '4PL' ? 0.98 : undefined;
 
       params.push({ discrimination, difficulty, guessing, slipping });
     }
 
     return params;
+  }
+
+  /**
+   * Marginal maximum likelihood via the Bock–Aitkin (1981) EM algorithm.
+   *
+   * E-step: posterior weights over a fixed N(0,1) quadrature grid.
+   * M-step: per-item Newton updates of (a, b) — plus damped updates of c (3PL+)
+   *          and u (4PL) with weak priors for stability.
+   * Scoring: EAP (posterior mean) with posterior SD as the standard error.
+   */
+  private static mmlEstimate(
+    data: number[][],
+    model: '1PL' | '2PL' | '3PL' | '4PL',
+    maxIterations: number,
+    tolerance: number
+  ): { itemParams: IRTParameters[]; abilities: number[]; abilitySEs: number[] } {
+    const n = data.length;
+    const k = data[0].length;
+
+    // Gauss-style grid over N(0,1): 41 equally spaced nodes on [-4, 4].
+    const K = 41;
+    const nodes = Array.from({ length: K }, (_, q) => -4 + (8 * q) / (K - 1));
+    let weights = nodes.map(t => Math.exp(-0.5 * t * t));
+    const wSum = weights.reduce((s, v) => s + v, 0);
+    weights = weights.map(w => w / wSum);
+
+    let params = this.initializeItemParameters(data, model);
+
+    // Cache P_j(theta_q) for current parameters.
+    const probs: number[][] = Array.from({ length: k }, () => new Array(K).fill(0.5));
+    const refreshProbs = () => {
+      for (let j = 0; j < k; j++) {
+        for (let q = 0; q < K; q++) {
+          probs[j][q] = Math.min(1 - 1e-9, Math.max(1e-9,
+            this.calculateProbability(nodes[q], params[j], model)));
+        }
+      }
+    };
+    refreshProbs();
+
+    const posterior: number[][] = Array.from({ length: n }, () => new Array(K).fill(0));
+
+    for (let iter = 0; iter < maxIterations; iter++) {
+      // ---- E-step: person posteriors over the grid (log space) --------------
+      const nq = new Array(K).fill(0);                       // expected persons at node
+      const rjq: number[][] = Array.from({ length: k }, () => new Array(K).fill(0));
+
+      for (let i = 0; i < n; i++) {
+        const logL = new Array(K).fill(0);
+        for (let q = 0; q < K; q++) {
+          let ll = Math.log(weights[q]);
+          for (let j = 0; j < k; j++) {
+            ll += data[i][j] === 1 ? Math.log(probs[j][q]) : Math.log(1 - probs[j][q]);
+          }
+          logL[q] = ll;
+        }
+        const maxLL = Math.max(...logL);
+        let denom = 0;
+        for (let q = 0; q < K; q++) { posterior[i][q] = Math.exp(logL[q] - maxLL); denom += posterior[i][q]; }
+        for (let q = 0; q < K; q++) {
+          posterior[i][q] /= denom;
+          nq[q] += posterior[i][q];
+        }
+        for (let j = 0; j < k; j++) {
+          if (data[i][j] === 1) {
+            for (let q = 0; q < K; q++) rjq[j][q] += posterior[i][q];
+          }
+        }
+      }
+
+      // ---- M-step: per-item Newton on (a, b), damped updates for c, u -------
+      let maxChange = 0;
+      for (let j = 0; j < k; j++) {
+        const p0 = { ...params[j] };
+        for (let inner = 0; inner < 5; inner++) {
+          const a = params[j].discrimination;
+          const b = params[j].difficulty;
+          const c = params[j].guessing;
+          const u = model === '4PL' ? (params[j].slipping ?? 1) : 1;
+
+          let ga = 0, gb = 0, gc = 0, gu = 0;
+          let haa = 0, hbb = 0, hab = 0, hcc = 0, huu = 0;
+
+          for (let q = 0; q < K; q++) {
+            const t = nodes[q];
+            const z = Math.max(-500, Math.min(500, a * (t - b)));
+            const L = 1 / (1 + Math.exp(-z));
+            const P = Math.min(1 - 1e-9, Math.max(1e-9, c + (u - c) * L));
+            const Q = 1 - P;
+            const resid = rjq[j][q] - nq[q] * P;         // observed − expected correct
+            const w = resid / (P * Q);
+
+            const dPda = (u - c) * L * (1 - L) * (t - b);
+            const dPdb = -(u - c) * L * (1 - L) * a;
+            ga += w * dPda;
+            gb += w * dPdb;
+            // Expected information (Fisher scoring)
+            haa -= nq[q] * dPda * dPda / (P * Q);
+            hbb -= nq[q] * dPdb * dPdb / (P * Q);
+            hab -= nq[q] * dPda * dPdb / (P * Q);
+            if (model === '3PL' || model === '4PL') {
+              const dPdc = 1 - L;
+              gc += w * dPdc;
+              hcc -= nq[q] * dPdc * dPdc / (P * Q);
+            }
+            if (model === '4PL') {
+              const dPdu = L;
+              gu += w * dPdu;
+              huu -= nq[q] * dPdu * dPdu / (P * Q);
+            }
+          }
+
+          // Joint 2×2 Newton step for (a, b) — Fisher scoring
+          const det = haa * hbb - hab * hab;
+          if (Math.abs(det) > 1e-10) {
+            const da = (gb * hab - ga * hbb) / det;
+            const db = (ga * hab - gb * haa) / det;
+            // Solving H·δ = −g gives δ = [da, db] as computed above.
+            if (model !== '1PL') {
+              params[j].discrimination = Math.max(0.2, Math.min(4, a + Math.max(-0.5, Math.min(0.5, da))));
+            }
+            params[j].difficulty = Math.max(-4.5, Math.min(4.5, b + Math.max(-0.75, Math.min(0.75, db))));
+          }
+          // Damped c update with a weak prior pulling toward 0.15
+          if ((model === '3PL' || model === '4PL') && hcc < -1e-8) {
+            const prior = -(c - 0.15) * 25; // quadratic penalty gradient
+            const dc = (gc + prior) / (-hcc + 50);
+            params[j].guessing = Math.max(0, Math.min(0.4, c + Math.max(-0.05, Math.min(0.05, dc))));
+          }
+          // Damped u update with a weak prior pulling toward 0.98
+          if (model === '4PL' && huu < -1e-8) {
+            const prior = -(u - 0.98) * 25;
+            const du = (gu + prior) / (-huu + 50);
+            params[j].slipping = Math.max(0.7, Math.min(1, u + Math.max(-0.03, Math.min(0.03, du))));
+          }
+        }
+        maxChange = Math.max(
+          maxChange,
+          Math.abs(params[j].discrimination - p0.discrimination),
+          Math.abs(params[j].difficulty - p0.difficulty),
+          Math.abs(params[j].guessing - p0.guessing)
+        );
+      }
+
+      refreshProbs();
+      if (maxChange < tolerance) break;
+    }
+
+    // ---- EAP scoring -----------------------------------------------------------
+    const abilities = new Array(n).fill(0);
+    const abilitySEs = new Array(n).fill(1);
+    for (let i = 0; i < n; i++) {
+      let m1 = 0;
+      for (let q = 0; q < K; q++) m1 += posterior[i][q] * nodes[q];
+      let v = 0;
+      for (let q = 0; q < K; q++) v += posterior[i][q] * (nodes[q] - m1) ** 2;
+      abilities[i] = m1;
+      abilitySEs[i] = Math.sqrt(Math.max(v, 1e-6));
+    }
+
+    return { itemParams: params, abilities, abilitySEs };
   }
 
   /**
