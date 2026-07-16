@@ -199,6 +199,16 @@ export function partialCorrelationMatrix(correlationMatrix: number[][]): number[
   return partialCorr;
 }
 
+/**
+ * Graphical lasso (Friedman, Hastie & Tibshirani, 2008) — the algorithm behind
+ * R's glasso/qgraph. Blockwise coordinate descent on the covariance estimate W:
+ * each column solves the lasso  min ½βᵀW₁₁β − s₁₂ᵀβ + λ‖β‖₁  by coordinate
+ * descent, then W and (afterwards) the precision matrix Θ are reassembled.
+ *
+ * The previous version inverted submatrices of Θ where the algorithm calls for
+ * W and soft-thresholded a full solve (which is not the lasso solution) —
+ * producing NaNs and impossible edge weights.
+ */
 export function graphicalLassoCoordinate(
   S: number[][],
   lambda: number,
@@ -206,72 +216,71 @@ export function graphicalLassoCoordinate(
   tol: number = 1e-4
 ): number[][] {
   const p = S.length;
-  let Theta: number[][] = Array(p).fill(0).map(() => Array(p).fill(0));
+  const soft = (x: number, t: number) => (x > t ? x - t : x < -t ? x + t : 0);
 
-  for (let i = 0; i < p; i++) {
-    Theta[i][i] = 1 / S[i][i];
-  }
+  // W = current working covariance; start at S with a ridge on the diagonal.
+  const W = S.map((row, i) => row.map((v, j) => (i === j ? v + lambda : v)));
+  const B: number[][] = Array.from({ length: p }, () => new Array(p - 1).fill(0));
 
   for (let iter = 0; iter < maxIter; iter++) {
-    const ThetaOld = Theta.map(row => [...row]);
-
-    for (let j = 0; j < p; j++) {
-      const S11 = S.filter((_, i) => i !== j).map(row => row.filter((_, k) => k !== j));
-      const s12 = S.filter((_, i) => i !== j).map(row => row[j]);
-
-      const W11 = Theta.filter((_, i) => i !== j).map(row => row.filter((_, k) => k !== j));
-
-      try {
-        const W11inv = invertMatrix(W11);
-
-        const beta: number[] = Array(p - 1).fill(0);
-        for (let i = 0; i < p - 1; i++) {
-          let sum = 0;
-          for (let k = 0; k < p - 1; k++) {
-            sum += W11inv[i][k] * s12[k];
-          }
-
-          const threshold = lambda;
-          if (Math.abs(sum) > threshold) {
-            beta[i] = sum > 0 ? sum - threshold : sum + threshold;
-          } else {
-            beta[i] = 0;
-          }
-        }
-
-        let idx = 0;
-        for (let i = 0; i < p; i++) {
-          if (i !== j) {
-            Theta[i][j] = -beta[idx];
-            Theta[j][i] = -beta[idx];
-            idx++;
-          }
-        }
-
-        // Theta[j][j] = 1 / (S[j][j] - s12' * beta)  [Friedman et al. 2008, eq. 9]
-        let s12Beta = 0;
-        for (let i = 0; i < p - 1; i++) {
-          s12Beta += s12[i] * beta[i];
-        }
-        const diagDenom = S[j][j] - s12Beta;
-        Theta[j][j] = Math.abs(diagDenom) > 1e-10 ? 1 / diagDenom : Theta[j][j];
-
-      } catch (e) {
-        continue;
-      }
-    }
-
     let maxDiff = 0;
-    for (let i = 0; i < p; i++) {
-      for (let j = 0; j < p; j++) {
-        const diff = Math.abs(Theta[i][j] - ThetaOld[i][j]);
-        if (diff > maxDiff) maxDiff = diff;
+    for (let j = 0; j < p; j++) {
+      const idx: number[] = [];
+      for (let i = 0; i < p; i++) if (i !== j) idx.push(i);
+      const beta = B[j];
+
+      // Lasso by coordinate descent over the current W11.
+      for (let inner = 0; inner < 100; inner++) {
+        let change = 0;
+        for (let a = 0; a < idx.length; a++) {
+          const i = idx[a];
+          let r = S[i][j];
+          for (let b = 0; b < idx.length; b++) {
+            if (b !== a) r -= W[i][idx[b]] * beta[b];
+          }
+          const denom = Math.max(W[i][i], 1e-12);
+          const nb = soft(r, lambda) / denom;
+          change = Math.max(change, Math.abs(nb - beta[a]));
+          beta[a] = nb;
+        }
+        if (change < tol * 0.1) break;
+      }
+
+      // w12 = W11 · beta
+      for (let a = 0; a < idx.length; a++) {
+        const i = idx[a];
+        let v = 0;
+        for (let b = 0; b < idx.length; b++) v += W[i][idx[b]] * beta[b];
+        maxDiff = Math.max(maxDiff, Math.abs(W[i][j] - v));
+        W[i][j] = v;
+        W[j][i] = v;
       }
     }
-
     if (maxDiff < tol) break;
   }
 
+  // Recover Θ from W and the regression coefficients (Friedman et al., eq. 12–13).
+  const Theta: number[][] = Array.from({ length: p }, () => new Array(p).fill(0));
+  for (let j = 0; j < p; j++) {
+    const idx: number[] = [];
+    for (let i = 0; i < p; i++) if (i !== j) idx.push(i);
+    const beta = B[j];
+    let w12b = 0;
+    for (let a = 0; a < idx.length; a++) w12b += W[idx[a]][j] * beta[a];
+    const thetaJJ = 1 / Math.max(W[j][j] - w12b, 1e-12);
+    Theta[j][j] = thetaJJ;
+    for (let a = 0; a < idx.length; a++) {
+      Theta[idx[a]][j] = -beta[a] * thetaJJ;
+    }
+  }
+  // Symmetrize (the two estimates of each off-diagonal agree at convergence).
+  for (let i = 0; i < p; i++) {
+    for (let j = 0; j < i; j++) {
+      const v = (Theta[i][j] + Theta[j][i]) / 2;
+      Theta[i][j] = v;
+      Theta[j][i] = v;
+    }
+  }
   return Theta;
 }
 
@@ -304,13 +313,10 @@ export function ebicGlasso(
     try {
       const Theta = graphicalLassoCoordinate(S, lambda);
 
-      let logLik = 0;
-      const det = determinant(Theta);
-      if (det > 0) {
-        logLik = n * (Math.log(det) - trace(matrixMultiply(S, Theta)));
-      } else {
-        continue;
-      }
+      const logDet = logDeterminant(Theta);
+      if (!Number.isFinite(logDet)) continue;
+      // Gaussian log-likelihood: (n/2)·(log|Θ| − tr(SΘ))
+      const logLik = (n / 2) * (logDet - trace(matrixMultiply(S, Theta)));
 
       let E = 0;
       for (let i = 0; i < p; i++) {
@@ -321,6 +327,7 @@ export function ebicGlasso(
         }
       }
 
+      // EBIC (Chen & Chen 2008; Foygel & Drton 2010)
       const ebic = -2 * logLik + E * Math.log(n) + 4 * E * gamma * Math.log(p);
 
       if (ebic < bestEBIC) {
@@ -360,19 +367,39 @@ export function ebicGlasso(
   };
 }
 
-function determinant(matrix: number[][]): number {
+/**
+ * log|M| via LU decomposition with partial pivoting — O(n³). Returns NaN for
+ * matrices that are not positive definite (negative determinant), which the
+ * EBIC loop treats as "skip this lambda". The previous cofactor-expansion
+ * determinant was O(n!) and would hang for networks beyond ~12 nodes.
+ */
+function logDeterminant(matrix: number[][]): number {
   const n = matrix.length;
-  if (n === 1) return matrix[0][0];
-  if (n === 2) return matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+  const a = matrix.map(row => [...row]);
+  let swaps = 0;
+  let logAbs = 0;
+  let sign = 1;
 
-  let det = 0;
-  for (let j = 0; j < n; j++) {
-    const minor = matrix.slice(1).map(row =>
-      row.filter((_, colIdx) => colIdx !== j)
-    );
-    det += Math.pow(-1, j) * matrix[0][j] * determinant(minor);
+  for (let col = 0; col < n; col++) {
+    let maxRow = col;
+    for (let row = col + 1; row < n; row++) {
+      if (Math.abs(a[row][col]) > Math.abs(a[maxRow][col])) maxRow = row;
+    }
+    if (maxRow !== col) {
+      [a[col], a[maxRow]] = [a[maxRow], a[col]];
+      swaps++;
+    }
+    const pivot = a[col][col];
+    if (Math.abs(pivot) < 1e-300) return NaN;
+    logAbs += Math.log(Math.abs(pivot));
+    if (pivot < 0) sign = -sign;
+    for (let row = col + 1; row < n; row++) {
+      const f = a[row][col] / pivot;
+      for (let k = col; k < n; k++) a[row][k] -= f * a[col][k];
+    }
   }
-  return det;
+  if (swaps % 2 === 1) sign = -sign;
+  return sign > 0 ? logAbs : NaN;
 }
 
 function trace(matrix: number[][]): number {

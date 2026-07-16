@@ -15,44 +15,46 @@ export function detectCommunitiesWalktrap(
 
   const distances = calculateRandomWalkDistances(adjacency, steps);
 
-  const communities: number[] = Array(n).fill(0).map((_, i) => i);
+  let communities: number[] = Array(n).fill(0).map((_, i) => i);
 
-  const mergeHistory: Array<{ c1: number; c2: number; dist: number }> = [];
+  // Agglomerate all the way to one community, keeping a snapshot at every
+  // level; the returned partition is the cut with MAXIMUM modularity
+  // (Pons & Latapy, 2005) — not an arbitrary fixed community count.
+  const snapshots: number[][] = [communities.slice()];
 
-  while (true) {
+  while (new Set(communities).size > 1) {
     let minDist = Infinity;
     let bestPair: [number, number] = [-1, -1];
 
     const uniqueCommunities = [...new Set(communities)];
-
-    if (uniqueCommunities.length <= 1) break;
-
     for (let i = 0; i < uniqueCommunities.length; i++) {
       for (let j = i + 1; j < uniqueCommunities.length; j++) {
-        const c1 = uniqueCommunities[i];
-        const c2 = uniqueCommunities[j];
-
-        const dist = calculateCommunityDistance(distances, communities, c1, c2);
-
+        const dist = calculateCommunityDistance(distances, communities, uniqueCommunities[i], uniqueCommunities[j]);
         if (dist < minDist) {
           minDist = dist;
-          bestPair = [c1, c2];
+          bestPair = [uniqueCommunities[i], uniqueCommunities[j]];
         }
       }
     }
-
     if (bestPair[0] === -1) break;
 
-    for (let i = 0; i < n; i++) {
-      if (communities[i] === bestPair[1]) {
-        communities[i] = bestPair[0];
-      }
-    }
-
-    mergeHistory.push({ c1: bestPair[0], c2: bestPair[1], dist: minDist });
-
-    if (uniqueCommunities.length <= 3) break;
+    communities = communities.map(c => (c === bestPair[1] ? bestPair[0] : c));
+    snapshots.push(communities.slice());
   }
+
+  // Pick the max-modularity level.
+  const modularityOf = (assign: number[]): number => {
+    const map: { [node: string]: number } = {};
+    nodes.forEach((node, idx) => { map[node] = assign[idx]; });
+    return calculateModularity(adjacency, map, nodes);
+  };
+  let best = snapshots[0];
+  let bestQ = -Infinity;
+  for (const snap of snapshots) {
+    const q = modularityOf(snap);
+    if (q > bestQ) { bestQ = q; best = snap; }
+  }
+  communities = best;
 
   const communityMap: { [node: string]: number } = {};
   const uniqueComms = [...new Set(communities)];
@@ -97,7 +99,10 @@ function calculateRandomWalkDistances(adjacency: number[][], steps: number): num
   // Precompute degrees once
   const degrees = adjacency.map(row => row.reduce((sum, w) => sum + Math.abs(w), 0));
 
-  // Walktrap distance: r(i,j) = sqrt( Σ_k d_k * (P^t[i,k]/sqrt(d_i) - P^t[j,k]/sqrt(d_j))^2 )
+  // Walktrap distance (Pons & Latapy, 2005, eq. 3):
+  //   r(i,j) = sqrt( Σ_k (P^t[i,k] − P^t[j,k])² / d(k) )
+  // The previous version multiplied by d(k) and rescaled the rows by sqrt(d),
+  // which distorts the metric and produces wrong merges.
   const distances: number[][] = Array(n).fill(0).map(() => Array(n).fill(0));
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
@@ -107,8 +112,8 @@ function calculateRandomWalkDistances(adjacency: number[][], steps: number): num
       let rij = 0;
       for (let k = 0; k < n; k++) {
         if (degrees[k] === 0) continue;
-        const diff = Pk[i][k] / Math.sqrt(degrees[i]) - Pk[j][k] / Math.sqrt(degrees[j]);
-        rij += degrees[k] * diff * diff;
+        const diff = Pk[i][k] - Pk[j][k];
+        rij += (diff * diff) / degrees[k];
       }
       distances[i][j] = Math.sqrt(rij);
     }
@@ -185,6 +190,9 @@ export function detectCommunitiesLouvain(
     sum + row.slice(i + 1).reduce((s, w) => s + Math.abs(w), 0), 0
   );
 
+  // Node degrees (sum of absolute edge weights).
+  const k = adjacency.map(row => row.reduce((s, w) => s + Math.abs(w), 0));
+
   let improved = true;
   let iteration = 0;
 
@@ -194,31 +202,39 @@ export function detectCommunitiesLouvain(
 
     for (let i = 0; i < n; i++) {
       const currentCommunity = communities[i];
-      let bestCommunity = currentCommunity;
-      let bestGain = 0;
 
-      const neighborCommunities = new Set<number>();
+      // Standard Louvain move: take the node OUT of its community first, then
+      // evaluate the modularity gain of inserting it into each candidate
+      // community (including the one it came from). The previous version only
+      // scored joining and ignored the cost of leaving, so moves were wrong.
+      communities[i] = -1;
+
+      const candidates = new Set<number>([currentCommunity]);
       for (let j = 0; j < n; j++) {
-        if (Math.abs(adjacency[i][j]) > 1e-6) {
-          neighborCommunities.add(communities[j]);
-        }
+        if (j !== i && Math.abs(adjacency[i][j]) > 1e-6) candidates.add(communities[j]);
       }
+      candidates.delete(-1);
 
-      for (const targetCommunity of neighborCommunities) {
-        if (targetCommunity === currentCommunity) continue;
-
-        const gain = modularityGain(adjacency, communities, i, targetCommunity, m, resolution);
-
-        if (gain > bestGain) {
+      let bestCommunity = currentCommunity;
+      let bestGain = -Infinity;
+      for (const c of candidates) {
+        let kiIn = 0;
+        let sigmaTot = 0;
+        for (let j = 0; j < n; j++) {
+          if (communities[j] === c) {
+            kiIn += Math.abs(adjacency[i][j]);
+            sigmaTot += k[j];
+          }
+        }
+        const gain = m > 0 ? kiIn - (resolution * sigmaTot * k[i]) / (2 * m) : 0;
+        if (gain > bestGain + 1e-12) {
           bestGain = gain;
-          bestCommunity = targetCommunity;
+          bestCommunity = c;
         }
       }
 
-      if (bestCommunity !== currentCommunity) {
-        communities[i] = bestCommunity;
-        improved = true;
-      }
+      communities[i] = bestCommunity;
+      if (bestCommunity !== currentCommunity) improved = true;
     }
   }
 
@@ -249,35 +265,6 @@ export function detectCommunitiesLouvain(
     algorithm: 'louvain',
     communityLabels,
   };
-}
-
-function modularityGain(
-  adjacency: number[][],
-  communities: number[],
-  node: number,
-  targetCommunity: number,
-  m: number,
-  resolution: number
-): number {
-  const n = adjacency.length;
-  const ki = adjacency[node].reduce((sum, w) => sum + Math.abs(w), 0);
-
-  let sigmaTot = 0;
-  let kiIn = 0;
-
-  for (let j = 0; j < n; j++) {
-    if (communities[j] === targetCommunity) {
-      sigmaTot += adjacency[j].reduce((sum, w) => sum + Math.abs(w), 0);
-
-      if (Math.abs(adjacency[node][j]) > 1e-6) {
-        kiIn += Math.abs(adjacency[node][j]);
-      }
-    }
-  }
-
-  if (m === 0) return 0;
-
-  return (kiIn - resolution * sigmaTot * ki / (2 * m)) / (2 * m);
 }
 
 export function calculateModularity(
