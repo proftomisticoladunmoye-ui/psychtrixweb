@@ -11,6 +11,7 @@ import {
   calculateCronbachAlpha,
   calculateItemTotalCorrelation,
   calculateCorrectedItemTotalCorrelation,
+  calculateSplitHalfReliability,
   calculateInterItemCorrelationMatrix,
   calculateItemDifficulty,
   calculateItemDiscrimination,
@@ -60,10 +61,12 @@ interface Project {
 interface ValidationResults {
   reliability: {
     cronbach_alpha: number;
+    alpha_ci: [number, number];
     omega_total: number;
     split_half: number;
     sem: number;
   };
+  subscaleReliability: Array<{ subscale: string; nItems: number; alpha: number }>;
   itemAnalysis: Array<{
     itemId: string;
     mean: number;
@@ -77,6 +80,8 @@ interface ValidationResults {
     sd: number;
     min: number;
     max: number;
+    floorPct: number;
+    ceilingPct: number;
   };
   percentiles: { [key: number]: number };
 }
@@ -294,17 +299,47 @@ export function EnhancedPsychometricsSandbox() {
         return;
       }
 
-      const responseMatrix: number[][] = responses.map(r => r.responses);
+      // Reverse-score flagged items BEFORE any statistics — analyzing raw
+      // values silently corrupts reliability for scales with reversed items.
+      const scaleMin = currentProject.response_scale?.min ?? 1;
+      const scaleMax = currentProject.response_scale?.max ?? 5;
+      const responseMatrix: number[][] = responses.map(r =>
+        (r.responses as number[]).map((v, idx) =>
+          currentProject.items[idx]?.reversed ? scaleMin + scaleMax - v : v
+        )
+      );
 
       const alpha = calculateCronbachAlpha(responseMatrix);
-      const omega = alpha * 1.05;
-      const splitHalf = 0.75 + Math.random() * 0.20;
+      // Real estimators (omega was previously alpha*1.05 and split-half was
+      // literally Math.random()).
+      const omega = calculateMcDonaldOmega(responseMatrix);
+      const splitHalf = calculateSplitHalfReliability(responseMatrix);
+      const ciResult = bootstrapConfidenceInterval(responseMatrix, 1000, 0.05);
+      const alphaCI: [number, number] = [ciResult.lower, ciResult.upper];
+
+      // Per-subscale alpha (subscales with at least 2 items)
+      const subscaleReliability = (currentProject.subscales ?? [])
+        .map(sub => {
+          const idxs = currentProject.items
+            .map((item, i) => (item.subscale === sub ? i : -1))
+            .filter(i => i >= 0);
+          if (idxs.length < 2) return null;
+          const subMatrix = responseMatrix.map(r => idxs.map(i => r[i]));
+          return { subscale: sub, nItems: idxs.length, alpha: calculateCronbachAlpha(subMatrix) };
+        })
+        .filter((s): s is { subscale: string; nItems: number; alpha: number } => s !== null);
 
       const numItems = currentProject.items.length;
       const totalScores = responseMatrix.map(r => r.reduce((sum, s) => sum + s, 0));
       const totalMean = totalScores.reduce((sum, s) => sum + s, 0) / totalScores.length;
-      const totalVariance = totalScores.reduce((sum, s) => sum + Math.pow(s - totalMean, 2), 0) / totalScores.length;
-      const sem = Math.sqrt(totalVariance) * Math.sqrt(1 - alpha);
+      const totalVariance = totalScores.reduce((sum, s) => sum + Math.pow(s - totalMean, 2), 0) / Math.max(totalScores.length - 1, 1);
+      const sem = Math.sqrt(totalVariance) * Math.sqrt(Math.max(0, 1 - alpha));
+
+      // Floor/ceiling effects (Terwee et al., 2007: flag when > 15%)
+      const minPossible = numItems * scaleMin;
+      const maxPossible = numItems * scaleMax;
+      const floorPct = (totalScores.filter(s => s === minPossible).length / totalScores.length) * 100;
+      const ceilingPct = (totalScores.filter(s => s === maxPossible).length / totalScores.length) * 100;
 
       const itemAnalysis = currentProject.items.map((item, idx) => {
         const itemScores = responseMatrix.map(r => r[idx]);
@@ -335,10 +370,12 @@ export function EnhancedPsychometricsSandbox() {
       const results: ValidationResults = {
         reliability: {
           cronbach_alpha: alpha,
+          alpha_ci: alphaCI,
           omega_total: omega,
           split_half: splitHalf,
           sem,
         },
+        subscaleReliability,
         itemAnalysis,
         descriptives: {
           n: responses.length,
@@ -346,6 +383,8 @@ export function EnhancedPsychometricsSandbox() {
           sd: totalSD,
           min: totalMin,
           max: totalMax,
+          floorPct,
+          ceilingPct,
         },
         percentiles,
       };
@@ -593,6 +632,7 @@ export function EnhancedPsychometricsSandbox() {
             <p className="text-sm text-gray-600">Cronbach's α</p>
             <p className="text-3xl font-bold text-gray-900">{validationResults.reliability.cronbach_alpha.toFixed(3)}</p>
             <p className="text-xs text-gray-600 mt-1">
+              95% CI [{validationResults.reliability.alpha_ci[0].toFixed(3)}, {validationResults.reliability.alpha_ci[1].toFixed(3)}] ·{' '}
               {validationResults.reliability.cronbach_alpha >= 0.9 ? 'Excellent' :
                validationResults.reliability.cronbach_alpha >= 0.8 ? 'Good' :
                validationResults.reliability.cronbach_alpha >= 0.7 ? 'Acceptable' : 'Questionable'}
@@ -603,7 +643,7 @@ export function EnhancedPsychometricsSandbox() {
             <Target className="w-8 h-8 text-green-600 mb-2" />
             <p className="text-sm text-gray-600">McDonald's ω</p>
             <p className="text-3xl font-bold text-gray-900">{validationResults.reliability.omega_total.toFixed(3)}</p>
-            <p className="text-xs text-gray-600 mt-1">Composite reliability</p>
+            <p className="text-xs text-gray-600 mt-1">Split-half: {validationResults.reliability.split_half.toFixed(3)}</p>
           </div>
 
           <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-xl p-6 border border-purple-200">
@@ -676,8 +716,42 @@ export function EnhancedPsychometricsSandbox() {
                 {validationResults.descriptives.min} - {validationResults.descriptives.max}
               </p>
             </div>
+            <div className={`p-4 rounded ${validationResults.descriptives.floorPct > 15 ? 'bg-red-50' : 'bg-gray-50'}`}>
+              <p className="text-sm text-gray-600 mb-1">Floor Effect</p>
+              <p className="text-2xl font-bold text-gray-900">{validationResults.descriptives.floorPct.toFixed(1)}%</p>
+              <p className="text-xs text-gray-500">{validationResults.descriptives.floorPct > 15 ? '⚠ Above 15% threshold' : 'OK (≤15%, Terwee 2007)'}</p>
+            </div>
+            <div className={`p-4 rounded ${validationResults.descriptives.ceilingPct > 15 ? 'bg-red-50' : 'bg-gray-50'}`}>
+              <p className="text-sm text-gray-600 mb-1">Ceiling Effect</p>
+              <p className="text-2xl font-bold text-gray-900">{validationResults.descriptives.ceilingPct.toFixed(1)}%</p>
+              <p className="text-xs text-gray-500">{validationResults.descriptives.ceilingPct > 15 ? '⚠ Above 15% threshold' : 'OK (≤15%, Terwee 2007)'}</p>
+            </div>
           </div>
         </div>
+
+        {validationResults.subscaleReliability.length > 0 && (
+          <div className="bg-white rounded-xl border border-gray-200 p-6">
+            <h4 className="text-lg font-bold text-gray-900 mb-4">Subscale Reliability</h4>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b text-left text-gray-600">
+                  <th className="py-2 pr-4">Subscale</th>
+                  <th className="py-2 pr-4">Items</th>
+                  <th className="py-2 pr-4">Cronbach's α</th>
+                </tr>
+              </thead>
+              <tbody>
+                {validationResults.subscaleReliability.map(s => (
+                  <tr key={s.subscale} className="border-b">
+                    <td className="py-2 pr-4 font-medium">{s.subscale}</td>
+                    <td className="py-2 pr-4">{s.nItems}</td>
+                    <td className="py-2 pr-4 font-mono">{s.alpha.toFixed(3)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
 
         <div className="bg-white rounded-xl border border-gray-200 p-6">
           <h4 className="text-lg font-bold text-gray-900 mb-4">Percentile Norms</h4>
