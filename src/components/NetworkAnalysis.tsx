@@ -99,6 +99,7 @@ export function NetworkAnalysis() {
     nBootstraps: 1000,
     communityAlgorithm: 'walktrap' as 'walktrap' | 'louvain',
     threshold: 0,
+    correlationMethod: 'spearman' as 'spearman' | 'pearson',
   });
 
   const [isProcessing, setIsProcessing] = useState(false);
@@ -270,7 +271,7 @@ export function NetworkAnalysis() {
       setProgress({ percent: 10, stage: 'Estimating network...' });
 
       const estimatedNetwork = settings.method === 'ebicglasso'
-        ? ebicGlasso(data, variables, settings.gamma)
+        ? ebicGlasso(data, variables, settings.gamma, 50, settings.correlationMethod)
         : estimateIsingModel(data, variables, settings.gamma);
 
       setNetwork(estimatedNetwork);
@@ -476,6 +477,7 @@ export function NetworkAnalysis() {
                   <th className="text-right py-3 px-3">Betweenness</th>
                   <th className="text-right py-3 px-3">Closeness</th>
                   <th className="text-right py-3 px-3">Exp. Influence</th>
+                  {network && 'predictability' in network && <th className="text-right py-3 px-3">Predictability (R²)</th>}
                   {communities && <th className="text-center py-3 px-3">Community</th>}
                 </tr>
               </thead>
@@ -487,6 +489,11 @@ export function NetworkAnalysis() {
                     <td className="py-2 px-3 text-right font-mono">{c.betweenness.toFixed(3)}</td>
                     <td className="py-2 px-3 text-right font-mono">{c.closeness.toFixed(3)}</td>
                     <td className="py-2 px-3 text-right font-mono">{c.expectedInfluence.toFixed(3)}</td>
+                    {network && 'predictability' in network && (
+                      <td className="py-2 px-3 text-right font-mono">
+                        {((network as EBICglassoResult).predictability[network.nodes.indexOf(c.node)] ?? 0).toFixed(3)}
+                      </td>
+                    )}
                     {communities && (
                       <td className="py-2 px-3 text-center">
                         <span className="px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-xs font-medium">
@@ -622,6 +629,19 @@ export function NetworkAnalysis() {
                 className="w-full" />
               <p className="text-xs text-gray-500 mt-1">Higher = sparser network. Recommended: 0.5</p>
             </div>
+
+            {settings.method === 'ebicglasso' && (
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Correlation Input</label>
+                <select value={settings.correlationMethod}
+                  onChange={e => setSettings({ ...settings, correlationMethod: e.target.value as any })}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm">
+                  <option value="spearman">Spearman rank — recommended for ordinal/Likert data</option>
+                  <option value="pearson">Pearson — continuous, normally distributed data</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-1">Likert/ordinal items violate Pearson assumptions; Spearman avoids edge attenuation (cf. qgraph cor_auto)</p>
+              </div>
+            )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>

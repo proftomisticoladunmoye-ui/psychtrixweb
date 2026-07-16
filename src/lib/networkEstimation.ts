@@ -8,6 +8,10 @@ export interface EBICglassoResult extends NetworkMatrix {
   lambda: number;
   ebic: number;
   gamma: number;
+  correlationMethod: 'pearson' | 'spearman';
+  /** mgm-style node predictability: share of each node's variance explained
+   *  by its neighbors, R²_i = 1 − 1/θ_ii on the correlation scale. */
+  predictability: number[];
 }
 
 export interface IsingResult extends NetworkMatrix {
@@ -115,6 +119,32 @@ export function calculateCorrelationMatrix(data: number[][]): number[][] {
   }
 
   return corr;
+}
+
+/**
+ * Spearman rank correlation matrix — the recommended input for ordinal/Likert
+ * data (cf. qgraph's cor_auto): rank-transform each column (midranks for
+ * ties), then Pearson on the ranks.
+ */
+export function calculateSpearmanMatrix(data: number[][]): number[][] {
+  const n = data.length;
+  const p = data[0].length;
+
+  const ranked: number[][] = Array.from({ length: n }, () => new Array(p).fill(0));
+  for (let j = 0; j < p; j++) {
+    const order = data
+      .map((row, i) => ({ v: row[j], i }))
+      .sort((a, b) => a.v - b.v);
+    let k = 0;
+    while (k < n) {
+      let end = k;
+      while (end + 1 < n && order[end + 1].v === order[k].v) end++;
+      const midrank = (k + end) / 2 + 1; // average rank for ties
+      for (let t = k; t <= end; t++) ranked[order[t].i][j] = midrank;
+      k = end + 1;
+    }
+  }
+  return calculateCorrelationMatrix(ranked);
 }
 
 export function calculateCovarianceMatrix(data: number[][]): number[][] {
@@ -288,10 +318,12 @@ export function ebicGlasso(
   data: number[][],
   variables: string[],
   gamma: number = 0.5,
-  nLambda: number = 50
+  nLambda: number = 50,
+  correlationMethod: 'pearson' | 'spearman' = 'spearman'
 ): EBICglassoResult {
-  const standardized = standardizeData(data);
-  const S = calculateCorrelationMatrix(data);
+  const S = correlationMethod === 'spearman'
+    ? calculateSpearmanMatrix(data)
+    : calculateCorrelationMatrix(data);
   const n = data.length;
   const p = variables.length;
 
@@ -357,6 +389,14 @@ export function ebicGlasso(
   }
   const sparsity = 1 - (2 * edgeCount) / (p * (p - 1));
 
+  // Node predictability (Haslbeck & Waldorp, 2018): on the correlation scale
+  // the residual variance of node i given all others is 1/θ_ii, so
+  // R²_i = 1 − 1/θ_ii  (clamped to [0, 1]).
+  const predictability = variables.map((_, i) => {
+    const thetaII = bestTheta[i]?.[i] ?? 1;
+    return Math.max(0, Math.min(1, 1 - 1 / Math.max(thetaII, 1)));
+  });
+
   return {
     nodes: variables,
     adjacency,
@@ -364,6 +404,8 @@ export function ebicGlasso(
     ebic: bestEBIC,
     gamma,
     sparsity,
+    correlationMethod,
+    predictability,
   };
 }
 
