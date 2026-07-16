@@ -188,6 +188,43 @@ export function performEFA(
   };
 }
 
+/**
+ * One-factor principal-axis loadings: iterate communalities on the reduced
+ * correlation matrix (SMC start). PCA loadings overstate common variance;
+ * McDonald's omega requires COMMON-FACTOR loadings (McDonald 1999; the psych
+ * package does the same).
+ */
+function principalAxisLoadings(R: number[][], maxIter: number = 100): number[] {
+  const p = R.length;
+
+  // Start communalities at squared multiple correlations: 1 − 1/diag(R⁻¹).
+  let h2: number[];
+  try {
+    const Rinv = MatrixOps.inverse(R.map(row => [...row]));
+    h2 = Rinv.map((row, i) => Math.max(0.05, Math.min(0.95, 1 - 1 / Math.max(row[i], 1.0001))));
+  } catch {
+    h2 = new Array(p).fill(0.5);
+  }
+
+  let lambdas = new Array(p).fill(0.5);
+  for (let iter = 0; iter < maxIter; iter++) {
+    const Rh = R.map((row, i) => row.map((v, j) => (i === j ? h2[i] : v)));
+    const eigen = EigenDecomposition.compute(Rh, 300, 1e-9);
+    const e1 = Math.max(eigen.values[0] ?? 0, 1e-9);
+    const v1 = eigen.vectors[0] ?? new Array(p).fill(0);
+    const next = v1.map(v => v * Math.sqrt(e1));
+    // Sign convention: majority-positive loadings.
+    const flip = next.reduce((s, v) => s + v, 0) < 0 ? -1 : 1;
+    const newLambdas = next.map(v => flip * v);
+    const newH2 = newLambdas.map(l => Math.max(0.001, Math.min(0.98, l * l)));
+    const change = Math.max(...newH2.map((v, i) => Math.abs(v - h2[i])));
+    lambdas = newLambdas;
+    h2 = newH2;
+    if (change < 1e-6) break;
+  }
+  return lambdas;
+}
+
 export function calculateMcDonaldOmega(
   responses: number[][],
   factorLoadings?: number[][]
@@ -201,10 +238,8 @@ export function calculateMcDonaldOmega(
     // Use first-factor loadings
     lambdas = factorLoadings.map(row => row[0] ?? 0);
   } else {
-    // Run single-factor EFA internally
     const R = calculateInterItemCorrelationMatrix(responses);
-    const efa = performEFA(R, 1);
-    lambdas = efa.loadings.map(row => row[0] ?? 0);
+    lambdas = principalAxisLoadings(R);
   }
 
   const sumL = lambdas.reduce((s, v) => s + v, 0);

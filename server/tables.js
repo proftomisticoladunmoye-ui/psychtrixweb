@@ -12,7 +12,10 @@ export const TABLES = {
   analyses:                      { owner: 'user_id' },
   projects:                      { owner: 'user_id' },
   reports:                       { owner: 'user_id' },
-  sandbox_scale_projects:        { owner: 'user_id' },
+  // publicReadBy: anonymous SELECT is allowed only when filtered by this
+  // column (capability-URL pattern — the public survey page loads a project
+  // by its unguessable shareable_link token).
+  sandbox_scale_projects:        { owner: 'user_id', publicReadBy: 'shareable_link' },
   scale_responses:               { owner: null, publicInsert: true }, // public survey submissions
   expert_ratings:                { owner: null, publicInsert: true },
   analysis_history:              { owner: 'user_id' },
@@ -98,7 +101,10 @@ export async function selectRows(table, user, params) {
   const { clauses, values, nextIndex } = buildFilters(params.filters ?? {});
   let i = nextIndex;
 
-  if (cfg.owner && !cfg.readAll) {
+  const anonymousByToken =
+    !user && cfg.publicReadBy && Object.prototype.hasOwnProperty.call(params.filters ?? {}, `eq.${cfg.publicReadBy}`);
+
+  if (cfg.owner && !cfg.readAll && !anonymousByToken) {
     if (!user) throw Object.assign(new Error('Not signed in'), { status: 401 });
     clauses.push(`"${cfg.owner}" = $${i++}`);
     values.push(user.id);

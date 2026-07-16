@@ -9,6 +9,7 @@ import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON } from '../lib/exportUtils';
 import {
   calculateCronbachAlpha,
+  calculateItemTotalCorrelation,
   calculateCorrectedItemTotalCorrelation,
   calculateInterItemCorrelationMatrix,
   calculateItemDifficulty,
