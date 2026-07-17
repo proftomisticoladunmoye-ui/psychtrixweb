@@ -1,9 +1,83 @@
+import { MeasurementInvarianceTester } from './measurementInvariance';
+import { chiSqPValue, normalCDF, noncentralChisqCDF } from './statDistributions';
+
 export interface GroupData {
   id: string;
   name: string;
   language: string;
   responses: number[][];
   sampleSize: number;
+}
+
+// ── Small OLS helper for the regression-based DIF models ─────────────────────
+function olsRSS(y: number[], X: number[][]): { rss: number; beta: number[] } {
+  const n = y.length;
+  const p = X[0].length + 1;
+  const D = X.map(row => [1, ...row]);
+  const XtX: number[][] = Array.from({ length: p }, () => new Array(p).fill(0));
+  const Xty: number[] = new Array(p).fill(0);
+  for (let i = 0; i < n; i++) {
+    for (let a = 0; a < p; a++) {
+      Xty[a] += D[i][a] * y[i];
+      for (let b = 0; b < p; b++) XtX[a][b] += D[i][a] * D[i][b];
+    }
+  }
+  // Solve XtX beta = Xty (Gaussian elimination with pivoting)
+  const aug = XtX.map((row, i) => [...row, Xty[i]]);
+  for (let c = 0; c < p; c++) {
+    let mr = c;
+    for (let r = c + 1; r < p; r++) if (Math.abs(aug[r][c]) > Math.abs(aug[mr][c])) mr = r;
+    [aug[c], aug[mr]] = [aug[mr], aug[c]];
+    if (Math.abs(aug[c][c]) < 1e-12) continue;
+    for (let r = 0; r < p; r++) {
+      if (r === c) continue;
+      const f = aug[r][c] / aug[c][c];
+      for (let k = c; k <= p; k++) aug[r][k] -= f * aug[c][k];
+    }
+  }
+  const beta = aug.map((row, i) => (Math.abs(row[i]) > 1e-12 ? row[p] / row[i] : 0));
+  let rss = 0;
+  for (let i = 0; i < n; i++) {
+    const pred = D[i].reduce((s, v, j) => s + v * beta[j], 0);
+    rss += (y[i] - pred) ** 2;
+  }
+  return { rss, beta };
+}
+
+/**
+ * Regression-based DIF for ordinal/Likert items (Zumbo, 1999, OLS variant):
+ *   M0: item ~ restScore              (matching on ability)
+ *   M2: item ~ restScore + group + group×restScore
+ * Chi-square = n·ln(RSS0/RSS2) with 2 df (likelihood-ratio form);
+ * effect size = ΔR² with Jodoin & Gierl (2001) thresholds (.035/.070).
+ * The rest score (total minus the studied item) avoids contaminating the
+ * matching criterion with the item under test.
+ */
+export function regressionDIF(
+  focalResponses: number[][],
+  referenceResponses: number[][],
+  itemIndex: number
+): { chiSq: number; pValue: number; deltaR2: number; classification: 'A' | 'B' | 'C' } {
+  const all = [...focalResponses, ...referenceResponses];
+  const group = [...focalResponses.map(() => 1), ...referenceResponses.map(() => 0)];
+  const y = all.map(r => r[itemIndex]);
+  const rest = all.map(r => r.reduce((s, v, j) => s + (j === itemIndex ? 0 : v), 0));
+  const n = y.length;
+
+  const m0 = olsRSS(y, rest.map(v => [v]));
+  const m2 = olsRSS(y, rest.map((v, i) => [v, group[i], v * group[i]]));
+
+  const yMean = y.reduce((s, v) => s + v, 0) / n;
+  const tss = y.reduce((s, v) => s + (v - yMean) ** 2, 0);
+  const r20 = tss > 0 ? 1 - m0.rss / tss : 0;
+  const r22 = tss > 0 ? 1 - m2.rss / tss : 0;
+  const deltaR2 = Math.max(0, r22 - r20);
+
+  const chiSq = m2.rss > 0 ? n * Math.log(Math.max(m0.rss, 1e-12) / Math.max(m2.rss, 1e-12)) : 0;
+  const pValue = chiSqPValue(chiSq, 2);
+
+  const classification: 'A' | 'B' | 'C' = deltaR2 < 0.035 ? 'A' : deltaR2 < 0.07 ? 'B' : 'C';
+  return { chiSq, pValue, deltaR2, classification };
 }
 
 export interface DIFResult {
@@ -79,102 +153,33 @@ export function calculateMantelHaenszelDIF(
   return { mhStatistic, pValue, alpha };
 }
 
+/**
+ * Uniform + non-uniform DIF via the regression approach. Previously this used
+ * HARDCODED regression coefficients (slope .1, group effect .2) and a
+ * hardcoded p-value (.01 or .5); it now fits the actual models.
+ */
 export function calculateLogisticDIF(
   focalResponses: number[][],
   referenceResponses: number[][],
   itemIndex: number
 ): { r2Difference: number; pValue: number; classification: 'A' | 'B' | 'C' } {
-  const focalItem = focalResponses.map(r => r[itemIndex]);
-  const refItem = referenceResponses.map(r => r[itemIndex]);
-
-  const focalTotal = focalResponses.map(r => r.reduce((sum, val) => sum + val, 0));
-  const refTotal = referenceResponses.map(r => r.reduce((sum, val) => sum + val, 0));
-
-  const allItems = [...focalItem, ...refItem];
-  const allTotals = [...focalTotal, ...refTotal];
-  const groups = [...Array(focalItem.length).fill(1), ...Array(refItem.length).fill(0)];
-
-  const baseR2 = calculatePseudoR2(allItems, allTotals);
-
-  const fullR2 = calculatePseudoR2WithGroup(allItems, allTotals, groups);
-
-  const r2Difference = fullR2 - baseR2;
-
-  const pValue = r2Difference > 0.035 ? 0.01 : 0.5;
-
-  let classification: 'A' | 'B' | 'C';
-  if (r2Difference < 0.035) {
-    classification = 'A';
-  } else if (r2Difference < 0.070) {
-    classification = 'B';
-  } else {
-    classification = 'C';
-  }
-
-  return { r2Difference, pValue, classification };
+  const res = regressionDIF(focalResponses, referenceResponses, itemIndex);
+  return { r2Difference: res.deltaR2, pValue: res.pValue, classification: res.classification };
 }
 
-function calculatePseudoR2(items: number[], totals: number[]): number {
-  const mean = items.reduce((sum, val) => sum + val, 0) / items.length;
-  const nullDeviance = items.reduce((sum, val) => {
-    const p = mean;
-    return sum + (val === 1 ? Math.log(p) : Math.log(1 - p));
-  }, 0);
-
-  const predictions = totals.map(total => 1 / (1 + Math.exp(-0.1 * (total - mean * totals.length))));
-  const modelDeviance = items.reduce((sum, val, i) => {
-    const p = Math.max(0.001, Math.min(0.999, predictions[i]));
-    return sum + (val === 1 ? Math.log(p) : Math.log(1 - p));
-  }, 0);
-
-  return 1 - (modelDeviance / nullDeviance);
-}
-
-function calculatePseudoR2WithGroup(items: number[], totals: number[], groups: number[]): number {
-  const mean = items.reduce((sum, val) => sum + val, 0) / items.length;
-
-  const predictions = totals.map((total, i) => {
-    const groupEffect = groups[i] * 0.2;
-    return 1 / (1 + Math.exp(-0.1 * (total - mean * totals.length) - groupEffect));
-  });
-
-  const modelDeviance = items.reduce((sum, val, i) => {
-    const p = Math.max(0.001, Math.min(0.999, predictions[i]));
-    return sum + (val === 1 ? Math.log(p) : Math.log(1 - p));
-  }, 0);
-
-  const nullDeviance = items.reduce((sum, val) => {
-    const p = mean;
-    return sum + (val === 1 ? Math.log(p) : Math.log(1 - p));
-  }, 0);
-
-  return 1 - (modelDeviance / nullDeviance);
-}
-
+/**
+ * Ability-conditioned group comparison (2-df test of group main effect and
+ * group×ability interaction). The previous version compared RAW item means —
+ * no ability conditioning — which confounds DIF with true group differences.
+ */
 export function calculateLordDIF(
   focalResponses: number[][],
   referenceResponses: number[][],
   itemIndex: number
 ): { chiSq: number; pValue: number; effectSize: number } {
-  const focalItem = focalResponses.map(r => r[itemIndex]);
-  const refItem = referenceResponses.map(r => r[itemIndex]);
-
-  const focalMean = focalItem.reduce((sum, val) => sum + val, 0) / focalItem.length;
-  const refMean = refItem.reduce((sum, val) => sum + val, 0) / refItem.length;
-
-  const focalVar = focalItem.reduce((sum, val) => sum + Math.pow(val - focalMean, 2), 0) / focalItem.length;
-  const refVar = refItem.reduce((sum, val) => sum + Math.pow(val - refMean, 2), 0) / refItem.length;
-
-  const pooledVar = ((focalItem.length - 1) * focalVar + (refItem.length - 1) * refVar) /
-                    (focalItem.length + refItem.length - 2);
-
-  const chiSq = Math.pow(focalMean - refMean, 2) / (pooledVar * (1/focalItem.length + 1/refItem.length));
-
-  const pValue = 1 - chiSquareCDF(chiSq, 1);
-
-  const effectSize = (focalMean - refMean) / Math.sqrt(pooledVar);
-
-  return { chiSq, pValue, effectSize };
+  const res = regressionDIF(focalResponses, referenceResponses, itemIndex);
+  // Report ΔR² rescaled to an SMD-like magnitude for continuity with the UI.
+  return { chiSq: res.chiSq, pValue: res.pValue, effectSize: Math.sqrt(Math.max(0, res.deltaR2) * 10) };
 }
 
 export function performDIFAnalysis(
@@ -186,35 +191,32 @@ export function performDIFAnalysis(
   const results: DIFResult[] = [];
   const numItems = focalGroup.responses[0].length;
 
+  // Mantel–Haenszel assumes dichotomous (0/1) items; for ordinal/Likert data
+  // the regression approach is the appropriate default.
+  const isBinary = [...focalGroup.responses, ...referenceGroup.responses]
+    .every(r => r.every(v => v === 0 || v === 1));
+
   for (let i = 0; i < numItems; i++) {
     let difMagnitude = 0;
     let pValue = 0;
+    let classification: 'negligible' | 'moderate' | 'large';
     let effectSize = 0;
 
-    if (method === 'mantel-haenszel' || method === 'all') {
+    if (isBinary && (method === 'mantel-haenszel' || method === 'all')) {
       const mh = calculateMantelHaenszelDIF(focalGroup.responses, referenceGroup.responses, i);
       difMagnitude = Math.abs(Math.log(mh.alpha));
       pValue = mh.pValue;
-      effectSize = Math.abs(Math.log(mh.alpha)) / 0.426;
-    } else if (method === 'logistic') {
-      const lr = calculateLogisticDIF(focalGroup.responses, referenceGroup.responses, i);
-      difMagnitude = lr.r2Difference;
-      pValue = lr.pValue;
-      effectSize = lr.r2Difference * 10;
-    } else if (method === 'lord') {
-      const lord = calculateLordDIF(focalGroup.responses, referenceGroup.responses, i);
-      difMagnitude = Math.abs(lord.effectSize);
-      pValue = lord.pValue;
-      effectSize = Math.abs(lord.effectSize);
-    }
-
-    let classification: 'negligible' | 'moderate' | 'large';
-    if (effectSize < 0.35) {
-      classification = 'negligible';
-    } else if (effectSize < 0.64) {
-      classification = 'moderate';
+      // ETS delta scale: ΔMH = −2.35·ln(αMH); |Δ|<1 = A, 1–1.5 = B, >1.5 = C.
+      const etsDelta = 2.35 * Math.abs(Math.log(mh.alpha));
+      effectSize = etsDelta;
+      classification = etsDelta < 1 ? 'negligible' : etsDelta < 1.5 ? 'moderate' : 'large';
     } else {
-      classification = 'large';
+      const reg = regressionDIF(focalGroup.responses, referenceGroup.responses, i);
+      difMagnitude = reg.deltaR2;
+      pValue = reg.pValue;
+      effectSize = reg.deltaR2;
+      // Jodoin & Gierl (2001) ΔR² thresholds
+      classification = reg.deltaR2 < 0.035 ? 'negligible' : reg.deltaR2 < 0.07 ? 'moderate' : 'large';
     }
 
     let interpretation = '';
@@ -242,70 +244,58 @@ export function performDIFAnalysis(
   return results;
 }
 
+/**
+ * Real multi-group invariance testing — delegates to the constrained ULS
+ * estimator in measurementInvariance.ts (a one-factor model over all items).
+ * This function previously fabricated every fit index with Math.random().
+ */
+function runRealInvariance(group1: GroupData, group2: GroupData) {
+  const numItems = group1.responses[0]?.length || 0;
+  const itemNames = Array.from({ length: numItems }, (_, i) => `item${i + 1}`);
+  const data = [...group1.responses, ...group2.responses];
+  const groupVariable = [
+    ...group1.responses.map(() => 0),
+    ...group2.responses.map(() => 1),
+  ];
+  return MeasurementInvarianceTester.test(
+    data,
+    groupVariable,
+    { factorStructure: { Factor1: itemNames }, groups: [group1.name || 'Group1', group2.name || 'Group2'] },
+    itemNames,
+  );
+}
+
+function toInvarianceResult(
+  level: 'configural' | 'metric' | 'scalar' | 'strict',
+  fit: { chisq: number; df: number; pvalue: number; cfi: number; rmsea: number; srmr: number },
+): InvarianceResult {
+  let conclusion: 'supported' | 'not_supported' | 'partial';
+  if (fit.cfi >= 0.95 && fit.rmsea <= 0.06 && fit.srmr <= 0.08) {
+    conclusion = 'supported';
+  } else if (fit.cfi >= 0.90 && fit.rmsea <= 0.08) {
+    conclusion = 'partial';
+  } else {
+    conclusion = 'not_supported';
+  }
+  return {
+    level,
+    chisq: fit.chisq,
+    df: fit.df,
+    pValue: fit.pvalue,
+    cfi: fit.cfi,
+    rmsea: fit.rmsea,
+    srmr: fit.srmr,
+    conclusion,
+  };
+}
+
 export function testMeasurementInvariance(
   group1: GroupData,
   group2: GroupData,
   level: 'configural' | 'metric' | 'scalar' | 'strict' = 'scalar'
 ): InvarianceResult {
-  const n1 = group1.sampleSize;
-  const n2 = group2.sampleSize;
-  const totalN = n1 + n2;
-
-  const numItems = group1.responses[0]?.length || 0;
-
-  let chisq = 0;
-  let df = 0;
-  let cfi = 0;
-  let rmsea = 0;
-  let srmr = 0;
-
-  if (level === 'configural') {
-    df = numItems * 2;
-    chisq = df * (1 + Math.random() * 0.3);
-    cfi = 0.95 + Math.random() * 0.04;
-    rmsea = 0.03 + Math.random() * 0.03;
-    srmr = 0.04 + Math.random() * 0.03;
-  } else if (level === 'metric') {
-    df = numItems * 3;
-    chisq = df * (1.1 + Math.random() * 0.4);
-    cfi = 0.93 + Math.random() * 0.05;
-    rmsea = 0.04 + Math.random() * 0.03;
-    srmr = 0.05 + Math.random() * 0.03;
-  } else if (level === 'scalar') {
-    df = numItems * 4;
-    chisq = df * (1.2 + Math.random() * 0.5);
-    cfi = 0.90 + Math.random() * 0.06;
-    rmsea = 0.05 + Math.random() * 0.04;
-    srmr = 0.06 + Math.random() * 0.04;
-  } else {
-    df = numItems * 5;
-    chisq = df * (1.3 + Math.random() * 0.6);
-    cfi = 0.88 + Math.random() * 0.07;
-    rmsea = 0.06 + Math.random() * 0.04;
-    srmr = 0.07 + Math.random() * 0.04;
-  }
-
-  const pValue = 1 - chiSquareCDF(chisq, df);
-
-  let conclusion: 'supported' | 'not_supported' | 'partial';
-  if (cfi >= 0.95 && rmsea <= 0.06 && srmr <= 0.08) {
-    conclusion = 'supported';
-  } else if (cfi >= 0.90 && rmsea <= 0.08) {
-    conclusion = 'partial';
-  } else {
-    conclusion = 'not_supported';
-  }
-
-  return {
-    level,
-    chisq,
-    df,
-    pValue,
-    cfi,
-    rmsea,
-    srmr,
-    conclusion,
-  };
+  const res = runRealInvariance(group1, group2);
+  return toInvarianceResult(level, res.models[level]);
 }
 
 export function testInvarianceSequence(
@@ -317,22 +307,27 @@ export function testInvarianceSequence(
   scalar: InvarianceResult & { deltaCFI: number; deltaRMSEA: number };
   recommendation: string;
 } {
-  const configural = testMeasurementInvariance(group1, group2, 'configural');
-  const metric = testMeasurementInvariance(group1, group2, 'metric');
-  const scalar = testMeasurementInvariance(group1, group2, 'scalar');
+  const res = runRealInvariance(group1, group2);
+  const configural = toInvarianceResult('configural', res.models.configural);
+  const metric = toInvarianceResult('metric', res.models.metric);
+  const scalar = toInvarianceResult('scalar', res.models.scalar);
 
+  // Nested-model deltas from the real fits (Cheung & Rensvold decision rule:
+  // a CFI drop > .01 means the added constraints are violated).
   const deltaCFI_metric = configural.cfi - metric.cfi;
   const deltaRMSEA_metric = metric.rmsea - configural.rmsea;
-
   const deltaCFI_scalar = metric.cfi - scalar.cfi;
   const deltaRMSEA_scalar = scalar.rmsea - metric.rmsea;
 
+  const metricHolds = deltaCFI_metric <= 0.01 && deltaRMSEA_metric <= 0.015;
+  const scalarHolds = metricHolds && deltaCFI_scalar <= 0.01 && deltaRMSEA_scalar <= 0.015;
+
   let recommendation = '';
-  if (scalar.conclusion === 'supported') {
+  if (scalarHolds && scalar.conclusion !== 'not_supported') {
     recommendation = 'Full scalar invariance achieved. Groups can be meaningfully compared on mean scores.';
-  } else if (metric.conclusion === 'supported') {
+  } else if (metricHolds && metric.conclusion !== 'not_supported') {
     recommendation = 'Metric invariance achieved. Relationships between variables can be compared, but not mean scores.';
-  } else if (configural.conclusion === 'supported') {
+  } else if (configural.conclusion !== 'not_supported') {
     recommendation = 'Only configural invariance achieved. Factor structure is similar but comparisons should be made with caution.';
   } else {
     recommendation = 'Invariance not achieved. Groups may have fundamentally different constructs. Do not compare scores.';
@@ -347,23 +342,8 @@ export function testInvarianceSequence(
 }
 
 function chiSquareCDF(x: number, df: number): number {
-  if (x <= 0) return 0;
-  if (df <= 0) return 0;
-
-  const k = df / 2;
-  let sum = 0;
-  let term = Math.pow(x / 2, k) * Math.exp(-x / 2);
-
-  for (let i = 0; i < k; i++) {
-    term /= (k + i);
-  }
-
-  for (let i = 0; i < 20; i++) {
-    sum += term;
-    term *= x / (2 * (k + i + 1));
-  }
-
-  return Math.min(1, Math.max(0, sum));
+  // Exact CDF via the shared regularized incomplete gamma implementation.
+  return 1 - chiSqPValue(x, df);
 }
 
 export function calculateCohensD(
@@ -506,84 +486,24 @@ export function performMultigroupCFA(
   group2: GroupData,
   model: 'configural' | 'metric' | 'scalar'
 ): MultigroupCFAResult {
-  const numItems = group1.responses[0]?.length || 0;
-  const n1 = group1.sampleSize;
-  const n2 = group2.sampleSize;
-  const totalN = n1 + n2;
+  // Real multi-group estimation (previously fabricated with Math.random()).
+  const res = runRealInvariance(group1, group2);
+  const fit = res.models[model];
 
-  let df = 0;
-  let chisq = 0;
-  let cfi = 0;
-  let rmsea = 0;
-  let srmr = 0;
-  let aic = 0;
-  let bic = 0;
-
-  if (model === 'configural') {
-    df = numItems * 2 - 4;
-    chisq = df * (0.9 + Math.random() * 0.3);
-    cfi = 0.95 + Math.random() * 0.04;
-    rmsea = 0.03 + Math.random() * 0.03;
-    srmr = 0.04 + Math.random() * 0.02;
-  } else if (model === 'metric') {
-    df = numItems * 2 + (numItems - 1) - 4;
-    chisq = df * (1.0 + Math.random() * 0.4);
-    cfi = 0.93 + Math.random() * 0.05;
-    rmsea = 0.04 + Math.random() * 0.03;
-    srmr = 0.05 + Math.random() * 0.03;
-  } else {
-    df = numItems * 3 - 4;
-    chisq = df * (1.1 + Math.random() * 0.5);
-    cfi = 0.91 + Math.random() * 0.06;
-    rmsea = 0.05 + Math.random() * 0.04;
-    srmr = 0.06 + Math.random() * 0.03;
-  }
-
-  const nParams = numItems * 3 + 2;
-  aic = chisq + 2 * nParams;
-  bic = chisq + nParams * Math.log(totalN);
-
-  const pValue = 1 - chiSquareCDF(chisq, df);
-
-  const modificationIndices: Array<{
-    parameter: string;
-    mi: number;
-    expectedChange: number;
-    recommendation: string;
-  }> = [];
-
-  for (let i = 0; i < Math.min(5, numItems); i++) {
-    const mi = 5 + Math.random() * 15;
-    const expectedChange = 0.1 + Math.random() * 0.3;
-
-    let recommendation = '';
-    if (mi > 10) {
-      recommendation = 'High MI - consider freeing parameter across groups';
-    } else if (mi > 6.64) {
-      recommendation = 'Moderate MI - review parameter equality assumption';
-    } else {
-      recommendation = 'Low MI - parameter constraint appears reasonable';
-    }
-
-    modificationIndices.push({
-      parameter: `Item ${i + 1} loading (Group 2)`,
-      mi,
-      expectedChange,
-      recommendation,
-    });
-  }
-
+  // Modification indices require per-constraint release refits, which the
+  // engine does not expose yet — return an empty list rather than invented
+  // numbers. The UI hides the section when empty.
   return {
     model,
-    chisq,
-    df,
-    pValue,
-    cfi,
-    rmsea,
-    srmr,
-    aic,
-    bic,
-    modificationIndices,
+    chisq: fit.chisq,
+    df: fit.df,
+    pValue: fit.pvalue,
+    cfi: fit.cfi,
+    rmsea: fit.rmsea,
+    srmr: fit.srmr,
+    aic: fit.aic,
+    bic: fit.bic,
+    modificationIndices: [],
   };
 }
 
@@ -596,32 +516,81 @@ export interface AlignmentResult {
   recommendation: string;
 }
 
+/**
+ * Approximate-invariance diagnostics (previously fabricated). Uses the REAL
+ * configural solution: per-item loading differences between groups and
+ * standardized item-mean differences. Parameters beyond threshold
+ * (|Δλ| > .10 standardized, |Δmean| > .25 SD) are flagged.
+ * "simplicity" = the observed fraction of parameters within threshold;
+ * r2 = squared correlation of the two groups' item-mean profiles;
+ * scaleDifference = |Cohen's d| of total scores.
+ */
 export function performAlignmentOptimization(
   group1: GroupData,
   group2: GroupData
 ): AlignmentResult {
   const numItems = group1.responses[0]?.length || 0;
-
-  const simplicity = 0.7 + Math.random() * 0.25;
-  const r2 = 0.85 + Math.random() * 0.12;
-  const scaleDifference = 0.1 + Math.random() * 0.3;
+  const res = runRealInvariance(group1, group2);
+  const g1 = res.groups[0];
+  const g2 = res.groups[1];
+  const p1 = res.groupParameters[g1];
+  const p2 = res.groupParameters[g2];
 
   const noninvariantParameters: string[] = [];
-  const numNoninvariant = Math.floor(numItems * (1 - simplicity));
+  let totalParams = 0;
+  let invariantParams = 0;
 
-  for (let i = 0; i < numNoninvariant; i++) {
-    const itemNum = Math.floor(Math.random() * numItems) + 1;
-    const paramType = Math.random() > 0.5 ? 'loading' : 'intercept';
-    noninvariantParameters.push(`Item ${itemNum} ${paramType}`);
+  for (let i = 0; i < numItems; i++) {
+    const l1 = p1?.factorLoadings?.[i]?.loading ?? 0;
+    const l2 = p2?.factorLoadings?.[i]?.loading ?? 0;
+    totalParams++;
+    if (Math.abs(l1 - l2) > 0.10) {
+      noninvariantParameters.push(`Item ${i + 1} loading (Δλ = ${(l2 - l1).toFixed(3)})`);
+    } else {
+      invariantParams++;
+    }
+
+    // Standardized item-mean difference (pooled item SD)
+    const m1 = group1.responses.reduce((s, r) => s + r[i], 0) / group1.responses.length;
+    const m2 = group2.responses.reduce((s, r) => s + r[i], 0) / group2.responses.length;
+    const v1 = group1.responses.reduce((s, r) => s + (r[i] - m1) ** 2, 0) / Math.max(group1.responses.length - 1, 1);
+    const v2 = group2.responses.reduce((s, r) => s + (r[i] - m2) ** 2, 0) / Math.max(group2.responses.length - 1, 1);
+    const sd = Math.sqrt((v1 + v2) / 2) || 1;
+    totalParams++;
+    if (Math.abs(m2 - m1) / sd > 0.25) {
+      noninvariantParameters.push(`Item ${i + 1} intercept (Δ = ${((m2 - m1) / sd).toFixed(3)} SD)`);
+    } else {
+      invariantParams++;
+    }
   }
+
+  const simplicity = totalParams > 0 ? invariantParams / totalParams : 1;
+
+  // Profile similarity of item means across groups
+  const means1 = Array.from({ length: numItems }, (_, i) => group1.responses.reduce((s, r) => s + r[i], 0) / group1.responses.length);
+  const means2 = Array.from({ length: numItems }, (_, i) => group2.responses.reduce((s, r) => s + r[i], 0) / group2.responses.length);
+  const mm1 = means1.reduce((s, v) => s + v, 0) / numItems;
+  const mm2 = means2.reduce((s, v) => s + v, 0) / numItems;
+  let num = 0, d1 = 0, d2 = 0;
+  for (let i = 0; i < numItems; i++) {
+    num += (means1[i] - mm1) * (means2[i] - mm2);
+    d1 += (means1[i] - mm1) ** 2;
+    d2 += (means2[i] - mm2) ** 2;
+  }
+  const r = d1 > 0 && d2 > 0 ? num / Math.sqrt(d1 * d2) : 0;
+  const r2 = r * r;
+
+  const totals1 = group1.responses.map(row => row.reduce((s, v) => s + v, 0));
+  const totals2 = group2.responses.map(row => row.reduce((s, v) => s + v, 0));
+  const scaleDifference = Math.abs(calculateCohensD(totals1, totals2));
 
   let recommendation = '';
   if (simplicity > 0.90) {
-    recommendation = 'High simplicity achieved. Strong evidence for approximate invariance. Groups can be compared.';
+    recommendation = 'High parameter agreement across groups. Strong evidence for approximate invariance. Groups can be compared.';
   } else if (simplicity > 0.75) {
-    recommendation = 'Moderate simplicity. Partial invariance detected. Comparisons appropriate with caution.';
+    recommendation = 'Moderate parameter agreement. Partial invariance likely. Comparisons appropriate with caution.';
   } else {
-    recommendation = 'Low simplicity. Substantial noninvariance detected. Consider item-level adjustments before comparison.';
+    recommendation = 'Low parameter agreement. Substantial noninvariance detected. Consider item-level adjustments before comparison.';
   }
 
   return {
@@ -685,36 +654,41 @@ export function detectPartialInvariance(
   let partialMetric = { ...fullInvariance.metric };
   let partialScalar = { ...fullInvariance.scalar };
 
-  if (metricFailed && noninvariantItems.length > 0) {
-    partialMetric = {
-      ...fullInvariance.metric,
-      conclusion: 'partial' as const,
-      deltaCFI: 0.008,
-      deltaRMSEA: 0.012
-    };
+  // REAL partial-invariance models: refit the invariance sequence with the
+  // DIF-flagged items removed (equivalent to freeing their parameters, in the
+  // strict sense of exempting them from the cross-group constraints).
+  const invariantIdx = Array.from({ length: numItems }, (_, i) => i)
+    .filter(i => !noninvariantItems.includes(i));
 
-    noninvariantItems.forEach(idx => {
-      freedParameters.push(`loading_item${idx + 1}`);
+  if ((metricFailed || scalarFailed) && noninvariantItems.length > 0 && invariantIdx.length >= 3) {
+    const subset = (g: GroupData): GroupData => ({
+      ...g,
+      responses: g.responses.map(row => invariantIdx.map(i => row[i])),
     });
+    const partialFit = testInvarianceSequence(subset(group1), subset(group2));
 
-    recommendation += `Partial metric invariance: ${noninvariantItems.length} item(s) freed (${noninvariantItemNames.join(', ')}). `;
-  }
-
-  if (scalarFailed && noninvariantItems.length > 0) {
-    partialScalar = {
-      ...fullInvariance.scalar,
-      conclusion: 'partial' as const,
-      deltaCFI: 0.009,
-      deltaRMSEA: 0.013
-    };
-
-    noninvariantItems.forEach(idx => {
-      if (!freedParameters.includes(`intercept_item${idx + 1}`)) {
-        freedParameters.push(`intercept_item${idx + 1}`);
-      }
-    });
-
-    recommendation += `Partial scalar invariance: ${noninvariantItems.length} item intercept(s) freed. `;
+    if (metricFailed) {
+      partialMetric = {
+        ...partialFit.metric,
+        conclusion: partialFit.metric.conclusion === 'not_supported' ? 'not_supported' : 'partial',
+      };
+      noninvariantItems.forEach(idx => freedParameters.push(`loading_item${idx + 1}`));
+      recommendation += `Partial metric invariance: ${noninvariantItems.length} item(s) freed (${noninvariantItemNames.join(', ')}). `;
+    }
+    if (scalarFailed) {
+      partialScalar = {
+        ...partialFit.scalar,
+        conclusion: partialFit.scalar.conclusion === 'not_supported' ? 'not_supported' : 'partial',
+      };
+      noninvariantItems.forEach(idx => {
+        if (!freedParameters.includes(`intercept_item${idx + 1}`)) {
+          freedParameters.push(`intercept_item${idx + 1}`);
+        }
+      });
+      recommendation += `Partial scalar invariance: ${noninvariantItems.length} item intercept(s) freed. `;
+    }
+  } else if ((metricFailed || scalarFailed) && invariantIdx.length < 3) {
+    recommendation += 'Too few invariant items remain for a partial-invariance refit. ';
   }
 
   if (noninvariantItems.length <= numItems * 0.2) {
@@ -750,22 +724,18 @@ export function calculateDIFPower(
   expectedEffectSize: number,
   alpha: number = 0.05
 ): PowerAnalysisResult {
-  const criticalValue = 1.96;
-
-  const ncp = expectedEffectSize * Math.sqrt(sampleSize / 2);
-
-  let power = 0;
-  if (ncp > criticalValue) {
-    const z = (ncp - criticalValue) / Math.sqrt(2);
-    power = 0.5 + 0.5 * Math.tanh(z);
-  }
-  power = Math.min(0.99, Math.max(0.05, power));
+  // Two-group comparison of a standardized effect d with n per group:
+  // z = d / sqrt(2/n); power = Φ(z − z_crit) + Φ(−z − z_crit).
+  const zCrit = 1.959963985; // z_{alpha/2} for alpha = .05
+  const z = Math.abs(expectedEffectSize) / Math.sqrt(2 / Math.max(sampleSize, 2));
+  let power = normalCDF(z - zCrit) + normalCDF(-z - zCrit);
+  power = Math.min(0.999, Math.max(0.001, power));
 
   const targetPower = 0.80;
   let recommendedN = sampleSize;
   if (power < targetPower) {
-    recommendedN = Math.ceil(2 * Math.pow((criticalValue + 1.96) / expectedEffectSize, 2));
-    recommendedN = Math.max(recommendedN, 200);
+    const zBeta = 0.8416212; // z for 80% power
+    recommendedN = Math.ceil(2 * Math.pow((zCrit + zBeta) / Math.max(Math.abs(expectedEffectSize), 1e-6), 2));
   }
 
   const adequate = power >= 0.80;
@@ -799,23 +769,34 @@ export function calculateInvariancePower(
   expectedRMSEADiff: number = 0.015,
   alpha: number = 0.05
 ): PowerAnalysisResult {
-  const df = numItems * 2;
+  // MacCallum, Browne & Sugawara (1996): the constrained-vs-free comparison is
+  // a chi-square test with df = number of added constraints (≈ items − 1 for
+  // metric invariance); non-centrality λ = (N − 2) · df · ε² where ε is the
+  // RMSEA-scale misfit of the constraints.
+  const df = Math.max(numItems - 1, 1);
   const totalN = sampleSizePerGroup * 2;
 
-  const ncp = expectedRMSEADiff * Math.sqrt(totalN * df);
+  const powerAtN = (nTotal: number): number => {
+    const ncp = Math.max(0, (nTotal - 2) * df * expectedRMSEADiff * expectedRMSEADiff);
+    // Critical value of the central chi-square at 1 − alpha (bisection).
+    let lo = 0, hi = df + 200;
+    while (chiSqPValue(hi, df) > alpha) hi *= 2;
+    for (let i = 0; i < 80; i++) {
+      const mid = (lo + hi) / 2;
+      if (chiSqPValue(mid, df) > alpha) lo = mid; else hi = mid;
+    }
+    const crit = (lo + hi) / 2;
+    return Math.min(0.999, Math.max(0.001, 1 - noncentralChisqCDF(crit, df, ncp)));
+  };
 
-  let power = 0;
-  if (ncp > 0) {
-    const z = ncp / Math.sqrt(2);
-    power = 0.5 + 0.5 * Math.tanh(z * 0.5);
-  }
-  power = Math.min(0.99, Math.max(0.05, power));
+  const power = powerAtN(totalN);
 
   const targetPower = 0.80;
   let recommendedN = sampleSizePerGroup;
   if (power < targetPower) {
-    recommendedN = Math.ceil((1.96 + 1.28) ** 2 / (expectedRMSEADiff ** 2 * df));
-    recommendedN = Math.max(recommendedN, 300);
+    let n = sampleSizePerGroup;
+    while (powerAtN(n * 2) < targetPower && n < 100000) n = Math.ceil(n * 1.25);
+    recommendedN = n;
   }
 
   const adequate = power >= 0.80;

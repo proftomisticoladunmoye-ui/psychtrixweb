@@ -374,12 +374,6 @@ export function CulturalAdaptation() {
     }
   };
 
-  const generateMockResponses = (n: number, numItems: number): number[][] => {
-    return Array.from({ length: n }, () =>
-      Array.from({ length: numItems }, () => Math.floor(Math.random() * 2))
-    );
-  };
-
   const runAlignmentOptimization = async () => {
     if (!selectedGroups.focal || !selectedGroups.reference) {
       setError('Please select both groups for alignment optimization');
