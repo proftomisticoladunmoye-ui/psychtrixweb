@@ -19,6 +19,9 @@ import {
 import { Bar, Line } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON } from '../lib/exportUtils';
 import { SEMPathDiagram } from './SEMPathDiagram';
+import { SEMEstimator } from '../lib/structuralEquationModeling';
+import { MeasurementInvarianceTester } from '../lib/measurementInvariance';
+import { normalCDF, chiSqPValue } from '../lib/statDistributions';
 
 interface Dataset {
   id: string;
@@ -208,71 +211,61 @@ export function EnhancedMultiGroupSEM({ datasets, selectedDataset, onDatasetChan
     setResults(null);
 
     try {
-      const mockGroups = ['Group1', 'Group2'];
+      // Let the spinner render before the heavy synchronous estimation starts.
+      await new Promise(resolve => setTimeout(resolve, 30));
+
+      // ── Split the dataset by the two largest levels of the group variable ──
+      const allInds = [...new Set(Object.values(measurementModel).flat())];
+      const levelMap = new Map<string, number[][]>();
+      for (const row of currentDataset.data) {
+        const g = String(row[groupVariable] ?? '').trim();
+        if (!g) continue;
+        const vals = allInds.map(c => Number(row[c]));
+        if (!vals.every(Number.isFinite)) continue;
+        if (!levelMap.has(g)) levelMap.set(g, []);
+        levelMap.get(g)!.push(vals);
+      }
+      const sortedLevels = [...levelMap.entries()].sort((a, b) => b[1].length - a[1].length);
+      if (sortedLevels.length < 2) {
+        throw new Error(`Grouping variable "${groupVariable}" needs at least 2 groups with data`);
+      }
+      const [g1Name, m1] = sortedLevels[0];
+      const [g2Name, m2] = sortedLevels[1];
+      const minN = allInds.length + 2;
+      if (m1.length < minN || m2.length < minN) {
+        throw new Error(`Each group needs at least ${minN} complete cases (got ${m1.length} and ${m2.length})`);
+      }
+      const mockGroups = [g1Name, g2Name];
+
+      // ── Real per-group SEM estimation ──────────────────────────────────────
+      const semModel = { measurementModel, structuralPaths };
+      const semByGroup: { [g: string]: ReturnType<typeof SEMEstimator.estimate> } = {
+        [g1Name]: SEMEstimator.estimate(m1, semModel, allInds),
+        [g2Name]: SEMEstimator.estimate(m2, semModel, allInds),
+      };
+
+      // ── Real invariance ladder over the measurement model ──────────────────
+      // configural = unconstrained; metric = equal loadings (measurement);
+      // scalar = + equal intercepts (structural comparability); strict = +
+      // equal residuals (fully constrained measurement).
+      const inv = MeasurementInvarianceTester.test(
+        [...m1, ...m2],
+        [...m1.map(() => 0), ...m2.map(() => 1)],
+        { factorStructure: measurementModel, groups: [g1Name, g2Name] },
+        allInds,
+      );
 
       const mockResults: MultiGroupSEMResults = {
         groups: mockGroups,
         groupSizes: {
-          'Group1': 250,
-          'Group2': 230,
+          [g1Name]: m1.length,
+          [g2Name]: m2.length,
         },
         models: {
-          unconstrained: {
-            chisq: 284.53,
-            df: 112,
-            pvalue: 0.000,
-            cfi: 0.962,
-            tli: 0.951,
-            rmsea: 0.058,
-            rmsea_ci_lower: 0.050,
-            rmsea_ci_upper: 0.066,
-            srmr: 0.052,
-            aic: 18456.78,
-            bic: 18689.34,
-            npar: 84,
-          },
-          measurementConstrained: {
-            chisq: 296.82,
-            df: 118,
-            pvalue: 0.000,
-            cfi: 0.960,
-            tli: 0.952,
-            rmsea: 0.057,
-            rmsea_ci_lower: 0.049,
-            rmsea_ci_upper: 0.065,
-            srmr: 0.054,
-            aic: 18452.82,
-            bic: 18665.23,
-            npar: 78,
-          },
-          structuralConstrained: {
-            chisq: 312.45,
-            df: 122,
-            pvalue: 0.000,
-            cfi: 0.957,
-            tli: 0.950,
-            rmsea: 0.058,
-            rmsea_ci_lower: 0.051,
-            rmsea_ci_upper: 0.066,
-            srmr: 0.057,
-            aic: 18456.45,
-            bic: 18652.34,
-            npar: 74,
-          },
-          fullyConstrained: {
-            chisq: 328.67,
-            df: 128,
-            pvalue: 0.000,
-            cfi: 0.953,
-            tli: 0.948,
-            rmsea: 0.059,
-            rmsea_ci_lower: 0.052,
-            rmsea_ci_upper: 0.067,
-            srmr: 0.061,
-            aic: 18460.67,
-            bic: 18638.45,
-            npar: 68,
-          },
+          unconstrained: inv.models.configural,
+          measurementConstrained: inv.models.metric,
+          structuralConstrained: inv.models.scalar,
+          fullyConstrained: inv.models.strict,
         },
         comparisons: [],
         groupParameters: {},
@@ -281,22 +274,22 @@ export function EnhancedMultiGroupSEM({ datasets, selectedDataset, onDatasetChan
       };
 
       const modelPairs = [
-        { model1: 'unconstrained', model2: 'measurementConstrained', label: 'Unconstrained vs Measurement Constrained' },
-        { model1: 'measurementConstrained', model2: 'structuralConstrained', label: 'Measurement vs Structural Constrained' },
-        { model1: 'structuralConstrained', model2: 'fullyConstrained', label: 'Structural vs Fully Constrained' },
+        { model1: 'unconstrained', model2: 'measurementConstrained', label: 'Configural vs Metric (equal loadings)' },
+        { model1: 'measurementConstrained', model2: 'structuralConstrained', label: 'Metric vs Scalar (equal intercepts)' },
+        { model1: 'structuralConstrained', model2: 'fullyConstrained', label: 'Scalar vs Strict (equal residuals)' },
       ];
 
       modelPairs.forEach((pair) => {
         const m1 = mockResults.models[pair.model1 as keyof typeof mockResults.models];
         const m2 = mockResults.models[pair.model2 as keyof typeof mockResults.models];
 
-        const deltaChisq = m2.chisq - m1.chisq;
-        const deltaDf = m2.df - m1.df;
+        const deltaChisq = Math.max(0, m2.chisq - m1.chisq);
+        const deltaDf = Math.max(1, m2.df - m1.df);
         const deltaCFI = m2.cfi - m1.cfi;
         const deltaRMSEA = m2.rmsea - m1.rmsea;
         const deltaSRMR = m2.srmr - m1.srmr;
 
-        const pvalue = deltaChisq / deltaDf < 2 ? 0.12 : 0.002;
+        const pvalue = chiSqPValue(deltaChisq, deltaDf);
         const cfiSupported = Math.abs(deltaCFI) <= advancedOptions.deltaCFICutoff;
         const rmseaSupported = Math.abs(deltaRMSEA) <= advancedOptions.deltaRMSEACutoff;
         const decision = cfiSupported && rmseaSupported ? 'supported' : 'not supported';
@@ -323,88 +316,62 @@ export function EnhancedMultiGroupSEM({ datasets, selectedDataset, onDatasetChan
         });
       });
 
-      mockGroups.forEach((group, groupIdx) => {
+      // Per-group parameters straight from the real per-group SEM fits
+      // (previously these were all Math.random()).
+      mockGroups.forEach((group) => {
+        const sem = semByGroup[group];
+
         mockResults.groupParameters[group] = {
           measurementModel: {
-            factorLoadings: [],
-            reliability: {},
+            factorLoadings: sem.measurementModel.factorLoadings.map(l => ({
+              item: l.item,
+              factor: l.factor,
+              loading: l.std_loading,
+              se: l.se,
+              z: l.z,
+              pvalue: l.pvalue,
+            })),
+            reliability: Object.fromEntries(
+              Object.entries(sem.measurementModel.reliability).map(([factor, rel]) => [
+                factor,
+                {
+                  cronbach_alpha: rel.cronbach_alpha,
+                  composite_reliability: rel.composite_reliability,
+                  ave: rel.ave,
+                },
+              ])
+            ),
           },
           structuralModel: {
-            paths: [],
-            rSquared: {},
+            paths: sem.structuralModel.paths.map(p => ({
+              from: p.from,
+              to: p.to,
+              coefficient: p.coefficient,
+              se: p.se,
+              z: p.z,
+              pvalue: p.pvalue,
+              std_coefficient: p.std_coefficient,
+            })),
+            rSquared: { ...sem.structuralModel.rSquared },
           },
         };
-
-        Object.entries(measurementModel).forEach(([factor, items]) => {
-          const loadings: number[] = [];
-
-          items.forEach((item) => {
-            const baseLoading = 0.6 + Math.random() * 0.35;
-            const groupVariation = groupIdx === 0 ? 0 : (Math.random() - 0.5) * 0.08;
-            const loading = baseLoading + groupVariation;
-            const se = 0.03 + Math.random() * 0.02;
-            const z = loading / se;
-
-            mockResults.groupParameters[group].measurementModel.factorLoadings.push({
-              item,
-              factor,
-              loading,
-              se,
-              z,
-              pvalue: 0.001,
-            });
-
-            loadings.push(loading);
-          });
-
-          const sumSqLoading = loadings.reduce((sum, l) => sum + l * l, 0);
-          const errorVar = items.length - sumSqLoading;
-
-          mockResults.groupParameters[group].measurementModel.reliability[factor] = {
-            cronbach_alpha: 0.78 + Math.random() * 0.18,
-            composite_reliability: sumSqLoading / (sumSqLoading + errorVar),
-            ave: sumSqLoading / items.length,
-          };
-        });
-
-        structuralPaths.forEach((path) => {
-          const baseCoef = 0.25 + Math.random() * 0.50;
-          const groupVariation = groupIdx === 0 ? 0.1 : -0.1;
-          const coef = baseCoef + groupVariation;
-          const se = 0.04 + Math.random() * 0.03;
-          const z = coef / se;
-
-          mockResults.groupParameters[group].structuralModel.paths.push({
-            from: path.from,
-            to: path.to,
-            coefficient: coef,
-            se,
-            z,
-            pvalue: 0.001,
-            std_coefficient: coef,
-          });
-        });
-
-        const endogenous = [...new Set(structuralPaths.map(p => p.to))];
-        endogenous.forEach(variable => {
-          mockResults.groupParameters[group].structuralModel.rSquared[variable] = 0.25 + Math.random() * 0.55;
-        });
       });
 
       if (advancedOptions.computeCriticalRatios) {
+        // AMOS-style critical ratios for path differences: z = Δb / √(SE₁² + SE₂²)
         structuralPaths.forEach((path) => {
-          const group1Path = mockResults.groupParameters['Group1'].structuralModel.paths.find(
+          const group1Path = mockResults.groupParameters[g1Name].structuralModel.paths.find(
             p => p.from === path.from && p.to === path.to
           );
-          const group2Path = mockResults.groupParameters['Group2'].structuralModel.paths.find(
+          const group2Path = mockResults.groupParameters[g2Name].structuralModel.paths.find(
             p => p.from === path.from && p.to === path.to
           );
 
           if (group1Path && group2Path) {
             const difference = group1Path.coefficient - group2Path.coefficient;
             const seDiff = Math.sqrt(group1Path.se ** 2 + group2Path.se ** 2);
-            const criticalRatio = difference / seDiff;
-            const pvalue = 2 * (1 - 0.5 * (1 + Math.sign(criticalRatio) * Math.sqrt(1 - Math.exp(-criticalRatio * criticalRatio * 2 / Math.PI))));
+            const criticalRatio = seDiff > 0 ? difference / seDiff : 0;
+            const pvalue = Math.min(1, 2 * (1 - normalCDF(Math.abs(criticalRatio))));
 
             mockResults.pathComparisons.push({
               from: path.from,
