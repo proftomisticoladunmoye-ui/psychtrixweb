@@ -319,7 +319,8 @@ export function ebicGlasso(
   variables: string[],
   gamma: number = 0.5,
   nLambda: number = 50,
-  correlationMethod: 'pearson' | 'spearman' = 'spearman'
+  correlationMethod: 'pearson' | 'spearman' = 'spearman',
+  fixedLambda?: number
 ): EBICglassoResult {
   const S = correlationMethod === 'spearman'
     ? calculateSpearmanMatrix(data)
@@ -332,9 +333,15 @@ export function ebicGlasso(
   ));
 
   const minLambda = 0.01;
+  // Bootstrap replications reuse the lambda selected on the original sample
+  // (bootnet convention) — a single fit instead of the full EBIC path.
   const lambdaSeq: number[] = [];
-  for (let i = 0; i < nLambda; i++) {
-    lambdaSeq.push(maxLambda * Math.pow(minLambda / maxLambda, i / (nLambda - 1)));
+  if (fixedLambda !== undefined) {
+    lambdaSeq.push(fixedLambda);
+  } else {
+    for (let i = 0; i < nLambda; i++) {
+      lambdaSeq.push(maxLambda * Math.pow(minLambda / maxLambda, i / (nLambda - 1)));
+    }
   }
 
   let bestLambda = lambdaSeq[0];
@@ -370,6 +377,15 @@ export function ebicGlasso(
     } catch (e) {
       continue;
     }
+  }
+
+  // Guard: if every lambda failed (non-PD solutions), return an empty network
+  // rather than crashing — callers (especially bootstrap replications) skip it.
+  if (bestTheta.length === 0) {
+    bestTheta = Array.from({ length: p }, (_, i) =>
+      Array.from({ length: p }, (_, j) => (i === j ? 1 : 0))
+    );
+    bestLambda = fixedLambda ?? lambdaSeq[0];
   }
 
   const adjacency: number[][] = Array(p).fill(0).map(() => Array(p).fill(0));

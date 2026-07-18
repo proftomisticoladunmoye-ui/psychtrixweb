@@ -257,59 +257,62 @@ export function NetworkAnalysis() {
     setIsProcessing(true);
     setProgress({ percent: 0, stage: 'Validating data...' });
 
-    try {
-      const validation = validateNetworkData(data, variables);
-      if (!validation.valid) {
-        setError(validation.errors.join('. '));
-        setIsProcessing(false);
-        return;
-      }
-      if (validation.warnings.length > 0) {
-        console.warn('Validation warnings:', validation.warnings);
-      }
-
-      setProgress({ percent: 10, stage: 'Estimating network...' });
-
-      const estimatedNetwork = settings.method === 'ebicglasso'
-        ? ebicGlasso(data, variables, settings.gamma, 50, settings.correlationMethod)
-        : estimateIsingModel(data, variables, settings.gamma);
-
-      setNetwork(estimatedNetwork);
-      setProgress({ percent: 30, stage: 'Calculating centrality...' });
-
-      const centralityMetrics = calculateAllCentrality(estimatedNetwork.adjacency, variables);
-      setCentrality(centralityMetrics);
-
-      setProgress({ percent: 50, stage: 'Detecting communities...' });
-
-      const communityResult = settings.communityAlgorithm === 'walktrap'
-        ? detectCommunitiesWalktrap(estimatedNetwork.adjacency, variables)
-        : detectCommunitiesLouvain(estimatedNetwork.adjacency, variables);
-      setCommunities(communityResult);
-
-      setProgress({ percent: 60, stage: 'Running bootstrap stability analysis...' });
-
-      const bootstrapResult = await performFullBootstrapAnalysis(
-        data,
-        variables,
-        settings.method,
-        settings.gamma,
-        settings.nBootstraps,
-        (percent, stage) => {
-          setProgress({ percent: 60 + percent * 0.4, stage });
-        }
-      );
-      setBootstrap(bootstrapResult);
-
-      await saveToDatabase(estimatedNetwork, centralityMetrics, communityResult, bootstrapResult);
-
-      setProgress({ percent: 100, stage: 'Complete!' });
+    const validation = validateNetworkData(data, variables);
+    if (!validation.valid) {
+      setError(validation.errors.join('. '));
       setIsProcessing(false);
-      setView('results');
-    } catch (err: any) {
-      setError(err.message);
-      setIsProcessing(false);
+      return;
     }
+    if (validation.warnings.length > 0) {
+      console.warn('Validation warnings:', validation.warnings);
+    }
+
+    // All heavy computation runs in a Web Worker so the page stays responsive
+    // (estimation + 1000-replication bootstrap froze the tab when run inline).
+    const worker = new Worker(new URL('../workers/networkWorker.ts', import.meta.url), { type: 'module' });
+
+    worker.onmessage = async (e: MessageEvent) => {
+      const msg = e.data;
+      if (msg.type === 'progress') {
+        setProgress({ percent: msg.percent, stage: msg.stage });
+      } else if (msg.type === 'result') {
+        worker.terminate();
+        setNetwork(msg.network);
+        setCentrality(msg.centrality);
+        setCommunities(msg.communities);
+        setBootstrap(msg.bootstrap);
+        try {
+          await saveToDatabase(msg.network, msg.centrality, msg.communities, msg.bootstrap);
+        } catch (saveErr: any) {
+          console.warn('Failed to save results:', saveErr?.message);
+        }
+        setProgress({ percent: 100, stage: 'Complete!' });
+        setIsProcessing(false);
+        setView('results');
+      } else if (msg.type === 'error') {
+        worker.terminate();
+        setError(msg.message);
+        setIsProcessing(false);
+      }
+    };
+
+    worker.onerror = (err) => {
+      worker.terminate();
+      setError(`Worker error: ${err.message}`);
+      setIsProcessing(false);
+    };
+
+    worker.postMessage({
+      data,
+      variables,
+      settings: {
+        method: settings.method,
+        gamma: settings.gamma,
+        nBootstraps: settings.nBootstraps,
+        communityAlgorithm: settings.communityAlgorithm,
+        correlationMethod: settings.correlationMethod,
+      },
+    });
   };
 
   const saveToDatabase = async (

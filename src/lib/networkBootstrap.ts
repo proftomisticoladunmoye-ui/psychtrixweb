@@ -32,14 +32,21 @@ export function bootstrapEdgeWeights(
   method: 'ebicglasso' | 'ising',
   nBootstraps: number = 1000,
   ciLevel: number = 0.95,
-  gamma: number = 0.5
+  gamma: number = 0.5,
+  correlationMethod: 'pearson' | 'spearman' = 'spearman',
+  onProgress?: (fraction: number) => void
 ): EdgeAccuracyResult[] {
   const n = data.length;
   const p = variables.length;
 
   const originalResult = method === 'ebicglasso'
-    ? ebicGlasso(data, variables, gamma)
+    ? ebicGlasso(data, variables, gamma, 50, correlationMethod)
     : estimateIsingModel(data, variables, gamma);
+
+  // bootnet convention: bootstrap replications refit at the lambda selected on
+  // the ORIGINAL sample — a single glasso fit each instead of the full EBIC
+  // path (~50x faster, and the statistically standard choice).
+  const fixedLambda = method === 'ebicglasso' ? (originalResult as { lambda: number }).lambda : undefined;
 
   const bootstrapWeights: number[][][] = [];
 
@@ -53,13 +60,14 @@ export function bootstrapEdgeWeights(
 
     try {
       const bootResult = method === 'ebicglasso'
-        ? ebicGlasso(bootData, variables, gamma)
+        ? ebicGlasso(bootData, variables, gamma, 50, correlationMethod, fixedLambda)
         : estimateIsingModel(bootData, variables, gamma);
 
       bootstrapWeights.push(bootResult.adjacency);
     } catch (e) {
       continue;
     }
+    if (onProgress && b % 25 === 0) onProgress(b / nBootstraps);
   }
 
   const edgeAccuracy: EdgeAccuracyResult[] = [];
@@ -103,13 +111,16 @@ export function caseDropBootstrap(
   method: 'ebicglasso' | 'ising',
   sampleProportions: number[] = [0.25, 0.5, 0.75],
   nBootstraps: number = 100,
-  gamma: number = 0.5
+  gamma: number = 0.5,
+  correlationMethod: 'pearson' | 'spearman' = 'spearman',
+  onProgress?: (fraction: number) => void
 ): CentralityStabilityResult[] {
   const n = data.length;
 
   const originalResult = method === 'ebicglasso'
-    ? ebicGlasso(data, variables, gamma)
+    ? ebicGlasso(data, variables, gamma, 50, correlationMethod)
     : estimateIsingModel(data, variables, gamma);
+  const fixedLambda = method === 'ebicglasso' ? (originalResult as { lambda: number }).lambda : undefined;
 
   const originalCentrality = calculateAllCentrality(originalResult.adjacency, variables);
 
@@ -120,46 +131,60 @@ export function caseDropBootstrap(
     'expectedInfluence'
   ];
 
+  // One network fit per subsample, correlations for ALL metrics from that fit
+  // (the previous version refit the network separately for every metric — a
+  // 4x waste of the most expensive step).
+  const corrSums = new Map<string, number[]>();
+  const corrCounts = new Map<string, number[]>();
+  metrics.forEach(m => {
+    corrSums.set(m, sampleProportions.map(() => 0));
+    corrCounts.set(m, sampleProportions.map(() => 0));
+  });
+
+  const totalFits = sampleProportions.length * nBootstraps;
+  let done = 0;
+
+  sampleProportions.forEach((proportion, pi) => {
+    const subsampleSize = Math.floor(n * proportion);
+
+    for (let b = 0; b < nBootstraps; b++) {
+      const indices = Array.from({ length: n }, (_, i) => i);
+      // Fisher-Yates shuffle for unbiased random permutation
+      for (let k = indices.length - 1; k > 0; k--) {
+        const r = Math.floor(Math.random() * (k + 1));
+        [indices[k], indices[r]] = [indices[r], indices[k]];
+      }
+      const subsampleData = indices.slice(0, subsampleSize).map(idx => [...data[idx]]);
+
+      try {
+        const subsampleResult = method === 'ebicglasso'
+          ? ebicGlasso(subsampleData, variables, gamma, 50, correlationMethod, fixedLambda)
+          : estimateIsingModel(subsampleData, variables, gamma);
+
+        const subsampleCentrality = calculateAllCentrality(subsampleResult.adjacency, variables);
+
+        for (const metric of metrics) {
+          const originalValues = originalCentrality.map(c => c[metric] as number);
+          const subsampleValues = subsampleCentrality.map(c => c[metric] as number);
+          const corr = calculateCorrelation(originalValues, subsampleValues);
+          corrSums.get(metric)![pi] += corr;
+          corrCounts.get(metric)![pi] += 1;
+        }
+      } catch (e) {
+        // skip failed replication
+      }
+      done++;
+      if (onProgress && done % 20 === 0) onProgress(done / totalFits);
+    }
+  });
+
   const stabilityResults: CentralityStabilityResult[] = [];
 
   for (const metric of metrics) {
-    const correlations: number[] = [];
-
-    for (const proportion of sampleProportions) {
-      const subsampleSize = Math.floor(n * proportion);
-      const subsampleCorrelations: number[] = [];
-
-      for (let b = 0; b < nBootstraps; b++) {
-        const indices = Array.from({ length: n }, (_, i) => i);
-        // Fisher-Yates shuffle for unbiased random permutation
-        for (let k = indices.length - 1; k > 0; k--) {
-          const r = Math.floor(Math.random() * (k + 1));
-          [indices[k], indices[r]] = [indices[r], indices[k]];
-        }
-        const subsampleIndices = indices.slice(0, subsampleSize);
-
-        const subsampleData = subsampleIndices.map(idx => [...data[idx]]);
-
-        try {
-          const subsampleResult = method === 'ebicglasso'
-            ? ebicGlasso(subsampleData, variables, gamma)
-            : estimateIsingModel(subsampleData, variables, gamma);
-
-          const subsampleCentrality = calculateAllCentrality(subsampleResult.adjacency, variables);
-
-          const originalValues = originalCentrality.map(c => c[metric] as number);
-          const subsampleValues = subsampleCentrality.map(c => c[metric] as number);
-
-          const corr = calculateCorrelation(originalValues, subsampleValues);
-          subsampleCorrelations.push(corr);
-        } catch (e) {
-          continue;
-        }
-      }
-
-      const avgCorr = subsampleCorrelations.reduce((a, b) => a + b, 0) / subsampleCorrelations.length;
-      correlations.push(avgCorr);
-    }
+    const correlations = sampleProportions.map((_, pi) => {
+      const cnt = corrCounts.get(metric)![pi];
+      return cnt > 0 ? corrSums.get(metric)![pi] / cnt : 0;
+    });
 
     let csCoefficient = 0;
     for (let i = 0; i < correlations.length; i++) {
@@ -219,7 +244,8 @@ export function performFullBootstrapAnalysis(
   method: 'ebicglasso' | 'ising',
   gamma: number = 0.5,
   nBootstraps: number = 1000,
-  onProgress?: (progress: number, stage: string) => void
+  onProgress?: (progress: number, stage: string) => void,
+  correlationMethod: 'pearson' | 'spearman' = 'spearman'
 ): BootstrapResult {
   onProgress?.(0, 'Computing edge accuracy...');
 
@@ -229,7 +255,9 @@ export function performFullBootstrapAnalysis(
     method,
     nBootstraps,
     0.95,
-    gamma
+    gamma,
+    correlationMethod,
+    (f) => onProgress?.(f * 50, `Edge accuracy bootstrap (${Math.round(f * 100)}%)...`)
   );
 
   onProgress?.(50, 'Computing centrality stability...');
@@ -240,7 +268,9 @@ export function performFullBootstrapAnalysis(
     method,
     [0.25, 0.5, 0.75],
     Math.min(100, nBootstraps / 10),
-    gamma
+    gamma,
+    correlationMethod,
+    (f) => onProgress?.(50 + f * 50, `Centrality stability bootstrap (${Math.round(f * 100)}%)...`)
   );
 
   onProgress?.(100, 'Bootstrap analysis complete');
