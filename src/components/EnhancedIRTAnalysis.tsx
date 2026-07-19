@@ -358,24 +358,6 @@ export function EnhancedIRTAnalysis() {
           IRT Model Configuration
         </h3>
 
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={useRBackend}
-              onChange={(e) => setUseRBackend(e.target.checked)}
-              className="rounded"
-            />
-            <span className="text-sm font-medium text-gray-900">Use R Backend (mirt package)</span>
-            <AlertCircle className="w-4 h-4 text-blue-600" title="Uses mirt package in R for publication-grade IRT estimation" />
-          </label>
-          {useRBackend && (
-            <p className="text-xs text-blue-700 mt-2">
-              Analysis will use the mirt package in R, providing publication-quality parameter estimates, fit indices, and diagnostic plots (ICC, TIF, IIF).
-            </p>
-          )}
-        </div>
-
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">

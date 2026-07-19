@@ -2863,17 +2863,8 @@ export function PathAnalysis() {
                 <p className="font-semibold text-xs">Full Model</p>
                 <p className="text-xs opacity-80">All</p>
               </button>
-              <button
-                onClick={() => setAnalysisType('custom-lavaan')}
-                className={`px-3 py-2 rounded-lg border-2 transition ${
-                  analysisType === 'custom-lavaan'
-                    ? 'border-gray-700 bg-gray-900 text-white'
-                    : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400'
-                }`}
-              >
-                <p className="font-semibold text-xs">lavaan Syntax</p>
-                <p className="text-xs opacity-80">Custom</p>
-              </button>
+              {/* lavaan Syntax mode removed — it required the R backend, which
+                  is not deployed. Restore the button when an R service exists. */}
             </div>
           </div>
 

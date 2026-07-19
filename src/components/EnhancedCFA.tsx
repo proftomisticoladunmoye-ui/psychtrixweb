@@ -932,24 +932,6 @@ export function EnhancedCFA({ datasets, selectedDataset, onDatasetChange }: Enha
             <div className="border border-gray-200 rounded-lg p-4 space-y-4 bg-gray-50">
               <h4 className="font-semibold text-gray-900">Advanced Estimation Options</h4>
 
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={advancedOptions.useRBackend}
-                    onChange={(e) => setAdvancedOptions({ ...advancedOptions, useRBackend: e.target.checked })}
-                    className="rounded"
-                  />
-                  <span className="text-sm font-medium text-gray-900">Use R Backend (lavaan)</span>
-                  <Info className="w-4 h-4 text-blue-600" title="Uses lavaan package in R for more accurate CFA estimation" />
-                </label>
-                {advancedOptions.useRBackend && (
-                  <p className="text-xs text-blue-700 mt-2">
-                    Analysis will be performed using the lavaan package in R, providing publication-grade results with proper fit indices and modification indices.
-                  </p>
-                )}
-              </div>
-
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Estimator</label>

@@ -15,8 +15,7 @@ import {
   HelpCircle,
   ChevronLeft,
   MessageCircle,
-  Share2,
-  Code
+  Share2
 } from 'lucide-react';
 import { ViewType } from '../App';
 
@@ -43,7 +42,6 @@ const navItems: NavItem[] = [
   { id: 'pls-sem', icon: Network, label: 'PLS-SEM' },
   { id: 'adaptive-testing', icon: Zap, label: 'Adaptive Testing' },
   { id: 'network-analysis', icon: Share2, label: 'Network Analysis' },
-  { id: 'r-backend', icon: Code, label: 'R Backend' },
   { id: 'sandbox', icon: FlaskConical, label: 'Scale Sandbox' },
   { id: 'cultural-adaptation', icon: Globe, label: 'Cultural Adaptation' },
   { id: 'forum', icon: MessageCircle, label: 'Community Forum' },
@@ -71,11 +69,11 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
 
       {/* Sidebar */}
       <aside
-        className={`fixed left-0 top-0 h-full bg-gray-900 border-r border-gray-800 transition-all duration-300 z-50 ${
+        className={`fixed left-0 top-0 h-full bg-gray-900 border-r border-gray-800 transition-all duration-300 z-50 flex flex-col ${
           collapsed ? 'w-16 -translate-x-full lg:translate-x-0' : 'w-64 translate-x-0'
         } lg:w-${collapsed ? '16' : '64'}`}
       >
-        <div className="h-16 flex items-center justify-between px-4 border-b border-gray-800">
+        <div className="h-16 flex-shrink-0 flex items-center justify-between px-4 border-b border-gray-800">
           {!collapsed && (
             <span className="text-lg font-semibold text-white">Navigation</span>
           )}
@@ -87,7 +85,8 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
           </button>
         </div>
 
-        <nav className="p-3 space-y-1 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 4rem)' }}>
+        {/* Scrollable nav — flex-1 so it never runs underneath the pinned footer */}
+        <nav className="flex-1 min-h-0 p-3 space-y-1 overflow-y-auto">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = currentView === item.id;
@@ -110,8 +109,8 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
           })}
         </nav>
 
-        {/* Bottom section with Settings and Help */}
-        <div className="absolute bottom-0 left-0 right-0 p-3 space-y-1 border-t border-gray-800 bg-gray-900">
+        {/* Bottom section with Settings and Help — in normal flow, no overlap */}
+        <div className="flex-shrink-0 p-3 space-y-1 border-t border-gray-800 bg-gray-900">
           <button
             onClick={() => handleNavClick('settings')}
             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${

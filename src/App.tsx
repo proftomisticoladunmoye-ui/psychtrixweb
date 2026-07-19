@@ -19,9 +19,8 @@ import { EnhancedPathAnalysis } from './components/EnhancedPathAnalysis';
 import { CommunityForum } from './components/CommunityForum';
 import { PLSSEM } from './components/PLSSEM';
 import { NetworkAnalysis } from './components/NetworkAnalysis';
-import { RAnalysisDashboard } from './components/RAnalysisDashboard';
 
-export type ViewType = 'dashboard' | 'data-import' | 'ctt-analysis' | 'validity-analysis' | 'irt-analysis' | 'path-analysis' | 'pls-sem' | 'adaptive-testing' | 'network-analysis' | 'r-backend' | 'sandbox' | 'cultural-adaptation' | 'forum' | 'reports' | 'settings' | 'help';
+export type ViewType = 'dashboard' | 'data-import' | 'ctt-analysis' | 'validity-analysis' | 'irt-analysis' | 'path-analysis' | 'pls-sem' | 'adaptive-testing' | 'network-analysis' | 'sandbox' | 'cultural-adaptation' | 'forum' | 'reports' | 'settings' | 'help';
 
 function App() {
   const { user, loading } = useAuth();
@@ -80,8 +79,6 @@ function App() {
         return <EnhancedAdaptiveTesting />;
       case 'network-analysis':
         return <NetworkAnalysis />;
-      case 'r-backend':
-        return <RAnalysisDashboard />;
       case 'sandbox':
         return <EnhancedPsychometricsSandbox />;
       case 'cultural-adaptation':
