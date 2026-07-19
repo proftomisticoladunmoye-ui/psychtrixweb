@@ -30,6 +30,15 @@ export interface SecondOrderFactor {
   loadings?: { factor: string; loading: number }[];
 }
 
+export interface DiagramFitIndices {
+  chisq?: number;
+  df?: number;
+  cfi?: number;
+  tli?: number;
+  rmsea?: number;
+  srmr?: number;
+}
+
 export interface AdvancedPathDiagramProps {
   factorStructure: { [factor: string]: string[] };
   factorLoadings: FactorLoading[];
@@ -41,19 +50,33 @@ export interface AdvancedPathDiagramProps {
   latentLabels?: { [key: string]: string };
   onLabelChange?: (key: string, value: string) => void;
   theme?: 'amos' | 'smartpls' | 'journal';
+  /** Rendered in the Model Fit Summary box (top right), AMOS style. */
+  fitIndices?: DiagramFitIndices;
+  /** Footer note, e.g. "Maximum Likelihood" — defaults to the app's estimator. */
+  estimationLabel?: string;
+  /** Diagram title; defaults to "CFA Model — N-Factor Model". */
+  title?: string;
 }
 
 interface NodePos { x: number; y: number; locked?: boolean }
 type HistoryEntry = { factorPos: Record<string, NodePos>; indicatorPos: Record<string, NodePos> };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+// Classic AMOS textbook layout: error circles far left → indicator rectangles
+// in one vertical column → factor ellipses to their right → covariance arcs
+// bowing out on the far right, fit summary box top-right.
 
-const FRX = 64, FRY = 34;          // factor ellipse radii
-const IND_W = 78, IND_H = 32;      // indicator rectangle size
-const ERR_R = 14;                   // error circle radius
-const SO_RX = 58, SO_RY = 28;      // second-order ellipse radii
-const IND_GAP = 54;                 // vertical gap between indicator centers
-const FACTOR_COL_W = 300;          // horizontal column width per factor
+const FRX = 78, FRY = 40;          // factor ellipse radii
+const IND_W = 112, IND_H = 34;     // indicator rectangle size
+const ERR_R = 15;                   // error circle radius
+const SO_RX = 66, SO_RY = 34;      // second-order ellipse radii
+const IND_GAP = 50;                 // vertical gap between indicator centers
+const GROUP_GAP = 44;               // extra gap between factor indicator groups
+const ERR_X = 64;                   // error-circle column x
+const IND_X = 220;                  // indicator column x (center)
+const FACT_X = 560;                 // factor ellipse column x (center)
+const TOP_MARGIN = 88;              // room for the title
+const BOTTOM_MARGIN = 70;           // room for the estimation footer
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -113,34 +136,30 @@ function drawValueLabel(ctx: CanvasRenderingContext2D, text: string, x: number, 
 
 function computeCFAPositions(
   factorStructure: Record<string, string[]>,
-  modelType: string,
-  canvasW: number,
-  canvasH: number,
+  _modelType: string,
+  _canvasW: number,
+  _canvasH: number,
 ): { factorPos: Record<string, NodePos>; indicatorPos: Record<string, NodePos> } {
   const factors = Object.keys(factorStructure);
   const n = factors.length;
   if (n === 0) return { factorPos: {}, indicatorPos: {} };
 
-  const hasSecondOrder = modelType === 'second-order';
-  const marginX = 80;
-  const factorY = hasSecondOrder ? canvasH * 0.45 : canvasH * 0.32;
-
-  const colW = (canvasW - marginX * 2) / Math.max(n, 1);
-
+  // Vertical AMOS layout: one column of indicators grouped by factor; each
+  // factor ellipse sits to the RIGHT, vertically centered on its group.
   const factorPos: Record<string, NodePos> = {};
-  factors.forEach((f, i) => {
-    factorPos[f] = { x: marginX + colW * i + colW / 2, y: factorY };
-  });
-
   const indicatorPos: Record<string, NodePos> = {};
+
+  let y = TOP_MARGIN + IND_H / 2;
   factors.forEach(f => {
-    const fp = factorPos[f];
     const items = factorStructure[f] || [];
-    const totalH = Math.max(items.length - 1, 0) * IND_GAP;
-    const startY = fp.y + FRY + 48;
-    items.forEach((item, k) => {
-      indicatorPos[item] = { x: fp.x, y: startY + k * IND_GAP };
+    const groupTop = y;
+    items.forEach(item => {
+      indicatorPos[item] = { x: IND_X, y };
+      y += IND_GAP;
     });
+    const groupBottom = y - IND_GAP;
+    factorPos[f] = { x: FACT_X, y: items.length ? (groupTop + groupBottom) / 2 : y };
+    y += GROUP_GAP;
   });
 
   return { factorPos, indicatorPos };
@@ -195,19 +214,30 @@ export function AdvancedPathDiagram({
   latentLabels = {},
   onLabelChange,
   theme = 'amos',
+  fitIndices,
+  estimationLabel = 'Unweighted Least Squares (ULS)',
+  title,
 }: AdvancedPathDiagramProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const factors = useMemo(() => Object.keys(factorStructure), [factorStructure]);
   const allItems = useMemo(() => factors.flatMap(f => factorStructure[f] || []), [factors, factorStructure]);
 
-  // Dynamic canvas size
-  const canvasW = useMemo(() => Math.max(800, factors.length * FACTOR_COL_W), [factors]);
+  // Dynamic canvas size for the vertical AMOS layout: height grows with the
+  // total number of indicators; width leaves room for covariance arcs on the
+  // right plus the fit summary box.
+  const canvasW = useMemo(() => {
+    const arcMax = 56 + 52 * Math.max(factors.length - 1, 1);
+    const soExtra = modelType === 'second-order' ? 320 : 0;
+    return Math.max(960, FACT_X + FRX + arcMax + soExtra + 280);
+  }, [factors, modelType]);
   const canvasH = useMemo(() => {
-    const maxInds = Math.max(...factors.map(f => (factorStructure[f] || []).length), 1);
-    const soExtra = modelType === 'second-order' ? 120 : 0;
-    return Math.max(600, soExtra + 120 + maxInds * IND_GAP + 180);
-  }, [factors, factorStructure, modelType]);
+    const totalItems = allItems.length;
+    return Math.max(
+      520,
+      TOP_MARGIN + totalItems * IND_GAP + Math.max(factors.length - 1, 0) * GROUP_GAP + BOTTOM_MARGIN
+    );
+  }, [allItems, factors]);
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -299,19 +329,9 @@ export function AdvancedPathDiagram({
     ctx.scale(dpr * zoom, dpr * zoom);
     ctx.translate(pan.x, pan.y);
 
-    // Background
-    ctx.fillStyle = '#fafafa';
-    ctx.fillRect(-pan.x, -pan.y, canvasW, canvasH);
-
-    // Grid
-    ctx.strokeStyle = pal.gridColor;
-    ctx.lineWidth = 0.5;
-    for (let gx = 0; gx < canvasW; gx += 40) {
-      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, canvasH); ctx.stroke();
-    }
-    for (let gy = 0; gy < canvasH; gy += 40) {
-      ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(canvasW, gy); ctx.stroke();
-    }
+    // Plain white background — publication/AMOS convention (no grid).
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-pan.x, -pan.y, canvasW + Math.abs(pan.x) * 2, canvasH + Math.abs(pan.y) * 2);
 
     // ── Group/invariance badge ───────────────────────────────────────────────
     if (groupName || invarianceLevel) {
@@ -334,51 +354,56 @@ export function AdvancedPathDiagram({
       ctx.restore();
     }
 
-    // ── 1. Double-headed factor correlation arcs ─────────────────────────────
+    // ── 1. Double-headed factor covariance arcs (bowing RIGHT, AMOS style) ───
+    // Arc depth grows with the vertical distance between the pair so that
+    // adjacent-factor arcs stay tight and distant pairs bow further out.
+    const factorOrder = new Map(factors.map((f, i) => [f, i]));
     factorCorrelations.forEach(fc => {
       const p1 = factorPos[fc.factor1], p2 = factorPos[fc.factor2];
       if (!p1 || !p2) return;
 
       ctx.save();
       ctx.strokeStyle = pal.corrColor;
-      ctx.lineWidth = 1.8;
+      ctx.lineWidth = 1.6;
       ctx.setLineDash([]);
 
-      // Determine arc direction: curve above (smaller y = higher on screen)
-      const midX = (p1.x + p2.x) / 2;
-      const arcLift = Math.abs(p2.x - p1.x) * 0.35 + 40;
-      const cpY = Math.min(p1.y, p2.y) - arcLift;
+      const span = Math.abs((factorOrder.get(fc.factor1) ?? 0) - (factorOrder.get(fc.factor2) ?? 0));
+      const bow = 52 + 52 * Math.max(span - 1, 0) + 18 * Math.min(span, 1);
+      const cpX = Math.max(p1.x, p2.x) + FRX + bow;
+      const midY = (p1.y + p2.y) / 2;
 
-      // Start/end angles — top of each ellipse, slightly inward
-      const a1 = Math.atan2(cpY - p1.y, midX - p1.x);
-      const a2 = Math.atan2(cpY - p2.y, midX - p2.x);
+      // Anchor on the right edge of each ellipse, angled toward the control point
+      const a1 = Math.atan2(midY - p1.y, cpX - p1.x);
+      const a2 = Math.atan2(midY - p2.y, cpX - p2.x);
       const [sx, sy] = ellipseEdge(p1.x, p1.y, FRX, FRY, a1);
       const [ex, ey] = ellipseEdge(p2.x, p2.y, FRX, FRY, a2);
 
       ctx.beginPath();
       ctx.moveTo(sx, sy);
-      ctx.quadraticCurveTo(midX, cpY, ex, ey);
+      ctx.quadraticCurveTo(cpX, midY, ex, ey);
       ctx.stroke();
 
-      // Double arrowheads at both ends
-      const t = 0.05;
-      const q1x = (1 - t) * (1 - t) * sx + 2 * (1 - t) * t * midX + t * t * ex;
-      const q1y = (1 - t) * (1 - t) * sy + 2 * (1 - t) * t * cpY + t * t * ey;
-      const q2x = (1 - (1 - t)) * (1 - (1 - t)) * sx + 2 * (1 - (1 - t)) * (1 - t) * midX + (1 - t) * (1 - t) * ex;
-      const q2y = (1 - (1 - t)) * (1 - (1 - t)) * sy + 2 * (1 - (1 - t)) * (1 - t) * cpY + (1 - t) * (1 - t) * ey;
+      // Double arrowheads pointing INTO each ellipse
+      const t = 0.06;
+      const q1x = (1 - t) * (1 - t) * sx + 2 * (1 - t) * t * cpX + t * t * ex;
+      const q1y = (1 - t) * (1 - t) * sy + 2 * (1 - t) * t * midY + t * t * ey;
+      const s2 = 1 - t;
+      const q2x = (1 - s2) * (1 - s2) * sx + 2 * (1 - s2) * s2 * cpX + s2 * s2 * ex;
+      const q2y = (1 - s2) * (1 - s2) * sy + 2 * (1 - s2) * s2 * midY + s2 * s2 * ey;
 
       arrowhead(ctx, sx, sy, Math.atan2(sy - q1y, sx - q1x), pal.corrColor, 9);
       arrowhead(ctx, ex, ey, Math.atan2(ey - q2y, ex - q2x), pal.corrColor, 9);
 
-      // φ label at arc midpoint
-      const phiX = midX, phiY = cpY + 8;
-      const label = `φ=${fc.correlation.toFixed(3)}${pStar(fc.pvalue)}`;
-      drawValueLabel(ctx, label, phiX, phiY, pal.corrColor);
+      // Correlation label at the arc's outermost point (curve midpoint)
+      const labX = 0.25 * sx + 0.5 * cpX + 0.25 * ex + 16;
+      const labY = 0.25 * sy + 0.5 * midY + 0.25 * ey;
+      drawValueLabel(ctx, fc.correlation.toFixed(2).replace(/^(-?)0\./, '$1.') + pStar(fc.pvalue), labX, labY, pal.corrColor);
 
       ctx.restore();
     });
 
-    // ── 2. Measurement paths (factor → indicator) ────────────────────────────
+    // ── 2. Measurement paths (factor → indicator, pointing LEFT) ─────────────
+    const itemIndex = new Map(allItems.map((it, i) => [it, i]));
     factors.forEach(factor => {
       const fp = factorPos[factor];
       if (!fp) return;
@@ -393,74 +418,78 @@ export function AdvancedPathDiagram({
 
         ctx.save();
         ctx.strokeStyle = pal.arrowColor;
-        ctx.lineWidth = 1.8;
+        ctx.lineWidth = 1.6;
         ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
         arrowhead(ctx, ex, ey, angle, pal.arrowColor, 8);
 
         if (showLoadings) {
           const fl = loadingMap.get(`${factor}::${item}`);
           if (fl !== undefined) {
-            const mx = (sx + ex) / 2 - Math.sin(angle) * 14;
-            const my = (sy + ey) / 2 + Math.cos(angle) * 14;
+            // AMOS convention: coefficient near the indicator end, above the arrow
+            const t = 0.30;
+            const mx = ex + (sx - ex) * t;
+            const my = ey + (sy - ey) * t - 12;
             const sig = fl.pvalue === undefined || fl.pvalue < 0.05;
-            const lcolor = sig ? pal.arrowColor : '#9ca3af';
-            drawValueLabel(ctx, fl.std_loading.toFixed(3) + pStar(fl.pvalue), mx, my, lcolor);
+            const lcolor = sig ? pal.coefColor : '#9ca3af';
+            drawValueLabel(ctx, fl.std_loading.toFixed(2).replace(/^(-?)0\./, '$1.') + pStar(fl.pvalue), mx, my, lcolor);
           }
         }
         ctx.restore();
 
-        // Error term: circle to the right of indicator
+        // Error term: circle on the FAR LEFT, arrow pointing right into the item
         if (showErrors) {
-          const errX = ip.x + IND_W / 2 + ERR_R + 8;
+          const errX = ERR_X;
           const errY = ip.y;
-          const errAngle = Math.atan2(ip.y - errY, ip.x - errX);
-          const esx = errX + Math.cos(errAngle) * ERR_R;
-          const esy = errY + Math.sin(errAngle) * ERR_R;
-          const [eex, eey] = rectEdge(ip.x, ip.y, errAngle + Math.PI);
+          const esx = errX + ERR_R;
+          const eex = ip.x - IND_W / 2;
 
           ctx.save();
           ctx.strokeStyle = pal.errStroke;
           ctx.lineWidth = 1.4;
-          ctx.beginPath(); ctx.moveTo(esx, esy); ctx.lineTo(eex, eey); ctx.stroke();
-          arrowhead(ctx, eex, eey, errAngle, pal.errStroke, 7);
+          ctx.beginPath(); ctx.moveTo(esx, errY); ctx.lineTo(eex, errY); ctx.stroke();
+          arrowhead(ctx, eex, errY, 0, pal.errStroke, 7);
 
           ctx.beginPath(); ctx.arc(errX, errY, ERR_R, 0, Math.PI * 2);
           ctx.fillStyle = pal.errFill; ctx.fill();
           ctx.strokeStyle = pal.errStroke; ctx.lineWidth = 1.4; ctx.stroke();
 
           ctx.fillStyle = pal.errText;
-          ctx.font = 'bold 9px system-ui,Arial,sans-serif';
+          ctx.font = 'bold 9.5px system-ui,Arial,sans-serif';
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-          ctx.fillText('ε', errX, errY);
+          ctx.fillText(`e${(itemIndex.get(item) ?? 0) + 1}`, errX, errY);
           ctx.restore();
         }
       });
     });
 
-    // ── 3. Second-order factors ──────────────────────────────────────────────
+    // ── 3. Second-order factors (further right, arrows pointing left) ────────
     if (modelType === 'second-order' && secondOrderFactors.length > 0) {
-      const soY = 60;
-      const soSpacing = canvasW / (secondOrderFactors.length + 1);
+      const soX = FACT_X + FRX + 240;
 
-      secondOrderFactors.forEach((sof, idx) => {
-        const sx = soSpacing * (idx + 1);
+      secondOrderFactors.forEach(sof => {
+        const memberYs = sof.firstOrderFactors
+          .map(f => factorPos[f]?.y)
+          .filter((v): v is number => v !== undefined);
+        const soY = memberYs.length
+          ? memberYs.reduce((s, v) => s + v, 0) / memberYs.length
+          : canvasH / 2;
 
-        // Paths to first-order factors
+        // Paths into first-order factors
         sof.firstOrderFactors.forEach(fof => {
           const fp = factorPos[fof];
           if (!fp) return;
-          const angle = Math.atan2(fp.y - soY, fp.x - sx);
+          const angle = Math.atan2(fp.y - soY, fp.x - soX);
+          const [ssx, ssy] = ellipseEdge(soX, soY, SO_RX, SO_RY, angle);
           const [ex, ey] = ellipseEdge(fp.x, fp.y, FRX, FRY, angle + Math.PI);
-          const startY = soY + SO_RY;
 
           ctx.save();
           ctx.strokeStyle = pal.soStroke ?? '#7c3aed';
           ctx.lineWidth = 2;
-          ctx.beginPath(); ctx.moveTo(sx, startY); ctx.lineTo(ex, ey); ctx.stroke();
-          arrowhead(ctx, ex, ey, Math.atan2(ey - startY, ex - sx), pal.soStroke ?? '#7c3aed', 9);
+          ctx.beginPath(); ctx.moveTo(ssx, ssy); ctx.lineTo(ex, ey); ctx.stroke();
+          arrowhead(ctx, ex, ey, angle, pal.soStroke ?? '#7c3aed', 9);
           const lv = sof.loadings?.find(l => l.factor === fof)?.loading;
           if (lv !== undefined) {
-            drawValueLabel(ctx, lv.toFixed(3), (sx + ex) / 2, (startY + ey) / 2 - 8, pal.soStroke ?? '#7c3aed');
+            drawValueLabel(ctx, lv.toFixed(2).replace(/^(-?)0\./, '$1.'), (ssx + ex) / 2, (ssy + ey) / 2 - 11, pal.soStroke ?? '#7c3aed');
           }
           ctx.restore();
         });
@@ -469,7 +498,7 @@ export function AdvancedPathDiagram({
         ctx.save();
         ctx.shadowColor = 'rgba(0,0,0,0.10)'; ctx.shadowBlur = 6; ctx.shadowOffsetY = 2;
         ctx.beginPath();
-        ctx.ellipse(sx, soY, SO_RX, SO_RY, 0, 0, Math.PI * 2);
+        ctx.ellipse(soX, soY, SO_RX, SO_RY, 0, 0, Math.PI * 2);
         ctx.fillStyle = pal.soFill ?? '#ede9fe';
         ctx.fill();
         ctx.shadowBlur = 0;
@@ -479,8 +508,8 @@ export function AdvancedPathDiagram({
         ctx.fillStyle = pal.soText ?? '#4c1d95';
         ctx.font = 'bold 11px system-ui,Arial,sans-serif';
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        const soName = sof.name.length > 12 ? sof.name.slice(0, 11) + '…' : sof.name;
-        ctx.fillText(soName, sx, soY);
+        const soName = sof.name.length > 14 ? sof.name.slice(0, 13) + '…' : sof.name;
+        ctx.fillText(soName, soX, soY);
         ctx.restore();
       });
     }
@@ -517,12 +546,10 @@ export function AdvancedPathDiagram({
       const displayName = latentLabels[factor] || factor;
 
       ctx.save();
-      ctx.shadowColor = 'rgba(0,0,0,0.12)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 3;
       ctx.beginPath();
       ctx.ellipse(fp.x, fp.y, FRX, FRY, 0, 0, Math.PI * 2);
       ctx.fillStyle = pal.factorFill;
       ctx.fill();
-      ctx.shadowBlur = 0;
       ctx.strokeStyle = pal.factorStroke;
       ctx.lineWidth = 2.5;
       ctx.stroke();
@@ -547,24 +574,79 @@ export function AdvancedPathDiagram({
       ctx.restore();
     });
 
-    // ── 6. Legend ────────────────────────────────────────────────────────────
+    // ── 6. Title (top center) ────────────────────────────────────────────────
     ctx.save();
-    const lx = 12, ly = canvasH - 56;
-    ctx.fillStyle = 'rgba(255,255,255,0.92)';
-    ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
-    (ctx as any).roundRect?.(lx, ly, 360, 44, 5) ?? ctx.rect(lx, ly, 360, 44);
-    ctx.fill(); ctx.stroke();
-    ctx.font = '8.5px system-ui,Arial,sans-serif'; ctx.fillStyle = '#64748b';
+    ctx.fillStyle = '#111827';
+    ctx.font = 'bold 19px system-ui,Arial,sans-serif';
+    ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('* p<.05  ** p<.01  *** p<.001', lx + 8, ly + 12);
-    ctx.fillText('Double-click to rename latent  |  Drag to reposition', lx + 8, ly + 30);
+    const nWords = ['Zero', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten'];
+    const defaultTitle = `CFA Model — ${nWords[factors.length] ?? factors.length} Factor Model`;
+    ctx.fillText(title || defaultTitle, canvasW / 2, 32);
+    ctx.restore();
+
+    // ── 7. Model Fit Summary box (top right, AMOS style) ─────────────────────
+    if (fitIndices) {
+      const rows: Array<[string, string]> = [];
+      if (fitIndices.chisq !== undefined) rows.push(['Chi-square (χ²)', fitIndices.chisq.toFixed(2)]);
+      if (fitIndices.df !== undefined) rows.push(['df', String(fitIndices.df)]);
+      if (fitIndices.chisq !== undefined && fitIndices.df) rows.push(['χ²/df', (fitIndices.chisq / fitIndices.df).toFixed(2)]);
+      if (fitIndices.cfi !== undefined) rows.push(['CFI', fitIndices.cfi.toFixed(2)]);
+      if (fitIndices.tli !== undefined) rows.push(['TLI', fitIndices.tli.toFixed(2)]);
+      if (fitIndices.rmsea !== undefined) rows.push(['RMSEA', fitIndices.rmsea.toFixed(3)]);
+      if (fitIndices.srmr !== undefined) rows.push(['SRMR', fitIndices.srmr.toFixed(3)]);
+
+      if (rows.length > 0) {
+        const boxW = 218;
+        const boxH = 30 + rows.length * 19;
+        const bx = canvasW - boxW - 20;
+        const by = 22;
+
+        ctx.save();
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = '#374151';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath(); // without this, the previous shape's path leaks into the box fill
+        (ctx as any).roundRect?.(bx, by, boxW, boxH, 6) ?? ctx.rect(bx, by, boxW, boxH);
+        ctx.fill(); ctx.stroke();
+
+        ctx.fillStyle = '#111827';
+        ctx.font = 'bold 12px system-ui,Arial,sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('Model Fit Summary', bx + boxW / 2, by + 15);
+
+        ctx.font = '11px system-ui,Arial,sans-serif';
+        rows.forEach(([k, v], i) => {
+          const ry = by + 34 + i * 19;
+          ctx.textAlign = 'left';
+          ctx.fillText(k, bx + 12, ry);
+          ctx.textAlign = 'center';
+          ctx.fillText('=', bx + boxW - 62, ry);
+          ctx.textAlign = 'right';
+          ctx.fillText(v, bx + boxW - 12, ry);
+        });
+        ctx.restore();
+      }
+    }
+
+    // ── 8. Estimation footer + significance legend ───────────────────────────
+    ctx.save();
+    ctx.fillStyle = '#374151';
+    ctx.font = '12px system-ui,Arial,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`Estimation Method: ${estimationLabel}`, canvasW / 2, canvasH - 26);
+    ctx.font = '8.5px system-ui,Arial,sans-serif';
+    ctx.fillStyle = '#9ca3af';
+    ctx.textAlign = 'left';
+    ctx.fillText('* p<.05  ** p<.01  *** p<.001   |   Double-click ellipse to rename  ·  Drag to reposition', 14, canvasH - 10);
     ctx.restore();
 
     ctx.restore();
   }, [factorPos, indicatorPos, factorStructure, factorCorrelations, factorLoadings,
       secondOrderFactors, modelType, showLoadings, showErrors, zoom, pan,
       canvasW, canvasH, factors, allItems, loadingMap, pal,
-      latentLabels, groupName, invarianceLevel]);
+      latentLabels, groupName, invarianceLevel, fitIndices, estimationLabel, title]);
 
   useEffect(() => { draw(); }, [draw]);
 

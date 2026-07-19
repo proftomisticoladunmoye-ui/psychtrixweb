@@ -597,6 +597,15 @@ export function EnhancedCFA({ datasets, selectedDataset, onDatasetChange }: Enha
             factorCorrelations={results.factorCorrelations}
             secondOrderFactors={secondOrderFactors}
             modelType={modelType}
+            fitIndices={{
+              chisq: results.fitIndices?.chisq,
+              df: results.fitIndices?.df,
+              cfi: results.fitIndices?.cfi,
+              tli: results.fitIndices?.tli,
+              rmsea: results.fitIndices?.rmsea,
+              srmr: results.fitIndices?.srmr,
+            }}
+            estimationLabel="Unweighted Least Squares (ULS)"
           />
         </div>
 
