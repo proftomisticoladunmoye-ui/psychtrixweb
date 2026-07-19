@@ -120,7 +120,17 @@ export async function selectRows(table, user, params) {
     if (params.head) return { rows: [], count };
   }
 
-  let sql = `SELECT * FROM "${assertIdent(table)}"${where}`;
+  // Column projection: without it every query returns full rows, and dataset
+  // rows carry multi-megabyte jsonb blobs that list views don't need.
+  let cols = '*';
+  if (params.select && params.select !== '*') {
+    const names = String(params.select).split(',').map((c) => c.trim()).filter(Boolean);
+    if (names.length && names.every((c) => IDENT.test(c))) {
+      cols = names.map((c) => `"${c}"`).join(', ');
+    }
+  }
+
+  let sql = `SELECT ${cols} FROM "${assertIdent(table)}"${where}`;
   if (params.order) {
     const [col, dir] = String(params.order).split('.');
     sql += ` ORDER BY "${assertIdent(col)}" ${dir === 'desc' ? 'DESC' : 'ASC'}`;

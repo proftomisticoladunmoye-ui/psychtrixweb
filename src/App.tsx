@@ -1,24 +1,33 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { useAuth } from './components/AuthProvider';
 import { LoginForm } from './components/LoginForm';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
-import { Dashboard } from './components/Dashboard';
-import { PublicSurvey } from './components/PublicSurvey';
-import { EnhancedDataImport } from './components/EnhancedDataImport';
-import { EnhancedCTTAnalysis } from './components/EnhancedCTTAnalysis';
-import ValidityAnalysisTabs from './components/ValidityAnalysisTabs';
-import { EnhancedIRTAnalysis } from './components/EnhancedIRTAnalysis';
-import { ReportGenerator } from './components/ReportGenerator';
-import { Settings } from './components/Settings';
-import { EnhancedAdaptiveTesting } from './components/EnhancedAdaptiveTesting';
-import { EnhancedPsychometricsSandbox } from './components/PublicationGradeSandbox';
-import { CulturalAdaptation } from './components/CulturalAdaptation';
-import { Help } from './components/Help';
-import { EnhancedPathAnalysis } from './components/EnhancedPathAnalysis';
-import { CommunityForum } from './components/CommunityForum';
-import { PLSSEM } from './components/PLSSEM';
-import { NetworkAnalysis } from './components/NetworkAnalysis';
+
+// Route-level code splitting: each module loads on first visit instead of
+// shipping one 1.6 MB bundle before the login screen can even paint.
+const Dashboard = lazy(() => import('./components/Dashboard').then(m => ({ default: m.Dashboard })));
+const PublicSurvey = lazy(() => import('./components/PublicSurvey').then(m => ({ default: m.PublicSurvey })));
+const EnhancedDataImport = lazy(() => import('./components/EnhancedDataImport').then(m => ({ default: m.EnhancedDataImport })));
+const EnhancedCTTAnalysis = lazy(() => import('./components/EnhancedCTTAnalysis').then(m => ({ default: m.EnhancedCTTAnalysis })));
+const ValidityAnalysisTabs = lazy(() => import('./components/ValidityAnalysisTabs'));
+const EnhancedIRTAnalysis = lazy(() => import('./components/EnhancedIRTAnalysis').then(m => ({ default: m.EnhancedIRTAnalysis })));
+const ReportGenerator = lazy(() => import('./components/ReportGenerator').then(m => ({ default: m.ReportGenerator })));
+const Settings = lazy(() => import('./components/Settings').then(m => ({ default: m.Settings })));
+const EnhancedAdaptiveTesting = lazy(() => import('./components/EnhancedAdaptiveTesting').then(m => ({ default: m.EnhancedAdaptiveTesting })));
+const EnhancedPsychometricsSandbox = lazy(() => import('./components/PublicationGradeSandbox').then(m => ({ default: m.EnhancedPsychometricsSandbox })));
+const CulturalAdaptation = lazy(() => import('./components/CulturalAdaptation').then(m => ({ default: m.CulturalAdaptation })));
+const Help = lazy(() => import('./components/Help').then(m => ({ default: m.Help })));
+const EnhancedPathAnalysis = lazy(() => import('./components/EnhancedPathAnalysis').then(m => ({ default: m.EnhancedPathAnalysis })));
+const CommunityForum = lazy(() => import('./components/CommunityForum').then(m => ({ default: m.CommunityForum })));
+const PLSSEM = lazy(() => import('./components/PLSSEM').then(m => ({ default: m.PLSSEM })));
+const NetworkAnalysis = lazy(() => import('./components/NetworkAnalysis').then(m => ({ default: m.NetworkAnalysis })));
+
+const ViewLoader = () => (
+  <div className="flex items-center justify-center py-24">
+    <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+  </div>
+);
 
 export type ViewType = 'dashboard' | 'data-import' | 'ctt-analysis' | 'validity-analysis' | 'irt-analysis' | 'path-analysis' | 'pls-sem' | 'adaptive-testing' | 'network-analysis' | 'sandbox' | 'cultural-adaptation' | 'forum' | 'reports' | 'settings' | 'help';
 
@@ -39,7 +48,11 @@ function App() {
   // Public survey route: /survey/:token — no auth required
   const surveyMatch = window.location.pathname.match(/^\/survey\/([^/]+)$/);
   if (surveyMatch) {
-    return <PublicSurvey token={surveyMatch[1]} />;
+    return (
+      <Suspense fallback={<ViewLoader />}>
+        <PublicSurvey token={surveyMatch[1]} />
+      </Suspense>
+    );
   }
 
   // Show loading spinner while checking auth
@@ -119,7 +132,9 @@ function App() {
 
         <main className="flex-1 px-4 py-6 lg:px-8 lg:py-8 overflow-auto">
           <div className="max-w-screen-2xl mx-auto">
-            {renderCurrentView()}
+            <Suspense fallback={<ViewLoader />}>
+              {renderCurrentView()}
+            </Suspense>
           </div>
         </main>
       </div>

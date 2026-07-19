@@ -65,14 +65,14 @@ export function Dashboard({ onNavigate }: DashboardProps) {
         supabase.from('reports').select('id', { count: 'exact', head: true }).eq('user_id', user.id),
         supabase.from('reports').select('id', { count: 'exact', head: true }).eq('user_id', user.id).gte('created_at', monthAgo),
         supabase.from('sandbox_scale_projects').select('id', { count: 'exact', head: true }).eq('user_id', user.id),
-        supabase.from('datasets').select('data').eq('user_id', user.id),
+        // file_size only — downloading every dataset's full data blob just to
+        // sum sizes made the dashboard load scale with total stored data.
+        supabase.from('datasets').select('file_size').eq('user_id', user.id),
       ]);
 
       let totalSize = 0;
       if (datasetsData.data) {
-        totalSize = datasetsData.data.reduce((acc, ds) => {
-          return acc + (JSON.stringify(ds.data || []).length);
-        }, 0);
+        totalSize = datasetsData.data.reduce((acc, ds) => acc + (Number(ds.file_size) || 0), 0);
       }
 
       const formatSize = (bytes: number) => {

@@ -103,9 +103,11 @@ export function ReportGenerator() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
+      // Metadata only — full data blobs are never needed here (row counts
+      // come from the stored rows_count column).
       const { data, error } = await supabase
         .from('datasets')
-        .select('id, name, columns, data')
+        .select('id, name, columns, rows_count')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false });
 
@@ -354,7 +356,7 @@ export function ReportGenerator() {
               <option value="">Select a dataset...</option>
               {datasets.map((dataset) => (
                 <option key={dataset.id} value={dataset.id}>
-                  {dataset.name} ({dataset.data?.length || 0} rows)
+                  {dataset.name} ({(dataset as any).rows_count ?? dataset.data?.length ?? 0} rows)
                 </option>
               ))}
             </select>

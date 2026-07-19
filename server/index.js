@@ -79,8 +79,8 @@ app.post('/api/auth/update', requireUser, wrap(async (req, res) => {
 
 // ---- generic table CRUD (Supabase .from() replacement) --------------------
 function splitParams(queryParams) {
-  const { order, limit, count, head, upsert, ...rest } = queryParams;
-  return { filters: rest, order, limit, count, head, upsert };
+  const { order, limit, count, head, upsert, select, ...rest } = queryParams;
+  return { filters: rest, order, limit, count, head, upsert, select };
 }
 
 app.get('/api/db/:table', wrap(async (req, res) => {

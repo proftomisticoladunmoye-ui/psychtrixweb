@@ -85,14 +85,16 @@ export function EnhancedDataImport() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
+      // Metadata only — the full data blob is fetched on demand when a
+      // dataset is opened or downloaded.
       const { data, error } = await supabase
         .from('datasets')
-        .select('*')
+        .select('id, name, file_name, file_size, columns, rows_count, metadata, created_at')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
-      setDatasets(data || []);
+      setDatasets((data || []).map((d: any) => ({ ...d, data: d.data ?? [] })));
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -300,13 +302,30 @@ export function EnhancedDataImport() {
     return report;
   };
 
-  const handleViewDataset = (dataset: Dataset) => {
-    setViewingDataset(dataset);
-    setDataView('spreadsheet');
-    const report = generateQualityReport(dataset);
-    setQualityReport(report);
-    setCleanedData(null);
-    setReverseCodeColumns([]);
+  // The list holds metadata only; pull the full rows for one dataset on demand.
+  const fetchFullDataset = async (dataset: Dataset): Promise<Dataset> => {
+    if (dataset.data && dataset.data.length > 0) return dataset;
+    const { data, error } = await supabase
+      .from('datasets')
+      .select('data')
+      .eq('id', dataset.id)
+      .single();
+    if (error) throw error;
+    return { ...dataset, data: (data as any)?.data ?? [] };
+  };
+
+  const handleViewDataset = async (dataset: Dataset) => {
+    try {
+      const full = await fetchFullDataset(dataset);
+      setViewingDataset(full);
+      setDataView('spreadsheet');
+      const report = generateQualityReport(full);
+      setQualityReport(report);
+      setCleanedData(null);
+      setReverseCodeColumns([]);
+    } catch (err: any) {
+      setError(err.message);
+    }
   };
 
   const handleReverseCode = () => {
@@ -802,15 +821,20 @@ export function EnhancedDataImport() {
                       <Eye className="w-5 h-5 text-blue-600" />
                     </button>
                     <button
-                      onClick={() => {
-                        const csv = Papa.unparse(dataset.data);
-                        const blob = new Blob([csv], { type: 'text/csv' });
-                        const url = URL.createObjectURL(blob);
-                        const link = document.createElement('a');
-                        link.href = url;
-                        link.download = dataset.file_name;
-                        link.click();
-                        URL.revokeObjectURL(url);
+                      onClick={async () => {
+                        try {
+                          const full = await fetchFullDataset(dataset);
+                          const csv = Papa.unparse(full.data);
+                          const blob = new Blob([csv], { type: 'text/csv' });
+                          const url = URL.createObjectURL(blob);
+                          const link = document.createElement('a');
+                          link.href = url;
+                          link.download = dataset.file_name;
+                          link.click();
+                          URL.revokeObjectURL(url);
+                        } catch (err: any) {
+                          setError(err.message);
+                        }
                       }}
                       className="p-2 hover:bg-green-50 rounded-lg transition"
                       title="Download"

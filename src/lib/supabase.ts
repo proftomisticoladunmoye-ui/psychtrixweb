@@ -134,13 +134,20 @@ class QueryBuilder implements PromiseLike<Result> {
   private countMode: string | null = null;
   private headOnly = false;
   private isUpsert = false;
+  private columns: string | null = null;
 
   constructor(table: string) { this.table = table; }
 
-  select(_columns?: string, opts?: { count?: string; head?: boolean }) {
+  select(columns?: string, opts?: { count?: string; head?: boolean }) {
     if (this.action === 'select' || !this.payload) this.action = this.action === 'select' ? 'select' : this.action;
     if (opts?.count) this.countMode = opts.count;
     if (opts?.head) this.headOnly = true;
+    // Column projection — dataset rows carry large jsonb blobs, so list views
+    // must be able to fetch metadata only. Nested selects (parentheses) are
+    // not supported by the backend and fall back to all columns.
+    if (columns && columns !== '*' && !columns.includes('(')) {
+      this.columns = columns.split(',').map(c => c.trim()).filter(Boolean).join(',');
+    }
     return this;
   }
 
@@ -174,6 +181,7 @@ class QueryBuilder implements PromiseLike<Result> {
     if (this.countMode) params.set('count', this.countMode);
     if (this.headOnly) params.set('head', 'true');
     if (this.isUpsert) params.set('upsert', 'true');
+    if (this.columns && this.action === 'select') params.set('select', this.columns);
     const qs = params.toString();
     return qs ? `?${qs}` : '';
   }
