@@ -416,7 +416,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
           onLabelChange={handleLabelChange}
           theme={diagramTheme}
           title="Structural Equation Model"
-          estimationLabel="Two-stage least squares (composite-based)"
+          estimationLabel="Unweighted Least Squares (ULS)"
           fitIndices={{
             chisq: results.fitIndices?.chisq,
             df: results.fitIndices?.df,

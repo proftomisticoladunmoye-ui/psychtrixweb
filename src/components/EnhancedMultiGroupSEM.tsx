@@ -850,7 +850,7 @@ export function EnhancedMultiGroupSEM({ datasets, selectedDataset, onDatasetChan
                 item: fl.item, factor: fl.factor, std_loading: fl.loading, pvalue: fl.pvalue,
               }))}
               title={`Multi-Group SEM — ${selectedGroupForDiagram}`}
-              estimationLabel="Two-stage least squares (composite-based)"
+              estimationLabel="Unweighted Least Squares (ULS)"
             />
           )}
         </div>

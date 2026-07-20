@@ -1,12 +1,20 @@
 /**
- * Structural Equation Modeling (SEM) — Two-stage estimator
+ * Structural Equation Modeling (SEM) — full-information ULS estimator
  *
- * Stage 1 – Measurement model: Pearson r of each indicator with its
- *           unit-weighted, standardised composite factor score.
- * Stage 2 – Structural model: OLS on standardised factor scores.
+ * All parameters (loadings, structural coefficients, exogenous factor
+ * correlations) are estimated simultaneously by minimising the ULS
+ * discrepancy F = ½·tr[(S − Σ(θ))²] on the observed correlation matrix,
+ * exactly as in the CFA engine (confirmatoryFactorAnalysis.ts).
  *
- * Fit indices: ULS discrepancy on the correlation matrix.
- * Σ = Λ · Φ · Λᵀ  (standardised solution, unit diagonal).
+ * Parameterisation (standardised solution, fixed-factor-variance
+ * identification): every latent variance is 1, so estimates are directly
+ * the standardised loadings/coefficients. The latent correlation matrix
+ * Φ is derived from the structural model by path tracing in topological
+ * order; endogenous disturbances ψₑ = 1 − explained variance are implied,
+ * not free. χ² = (n−1)·F_ULS, matching the CFA/invariance modules.
+ *
+ * The former two-stage estimates (item–composite correlations, OLS on
+ * unit-weighted factor scores) are retained only as starting values.
  */
 
 import { MatrixOps } from './psychometricStats';
@@ -123,46 +131,48 @@ export class SEMEstimator {
       )
     );
 
-    // 2. Factor scores
+    // 2. Warm starts: unit-weighted factor scores, item–composite loadings,
+    //    OLS structural coefficients (the former two-stage estimates)
     const factorNames  = Object.keys(model.measurementModel);
     const factorScores = this.buildFactorScores(data, model, variableNames);
+    const warmMeas   = this.estimateMeasurementModel(data, model.measurementModel, variableNames, n);
+    const warmStruct = this.estimateStructuralModel(factorScores, model.structuralPaths, factorNames, n);
+    const PhiScores  = this.buildFactorCorrelation(factorScores, factorNames);
 
-    // 3. Measurement model (loadings, reliability)
-    const measResult = this.estimateMeasurementModel(data, model.measurementModel, variableNames, n);
-
-    // 4. Structural model (OLS on factor scores)
-    const structResult = this.estimateStructuralModel(factorScores, model.structuralPaths, factorNames, n);
-
-    // 5. Factor correlation matrix (empirical from factor scores)
-    const Phi = this.buildFactorCorrelation(factorScores, factorNames);
-
-    // 6. Extended reliability (MSV, ASV) using Phi
-    const reliabilityExt = this.extendReliability(measResult.reliability, Phi, factorNames);
-
-    // 7. HTMT
-    const htmt = this.computeHTMT(allInds, model.measurementModel, S, factorNames);
-
-    // 8. Model-implied correlation matrix Σ = Λ·Φ·Λᵀ
-    const Sigma = this.buildImpliedCorrelation(
-      allInds, model.measurementModel, measResult.factorLoadings, Phi, factorNames, p
+    // 3. Full-information ULS estimation of the complete SEM
+    const fitted = this.fitULS(
+      S, model, allInds, factorNames,
+      warmMeas.factorLoadings, warmStruct.paths, PhiScores, n
     );
 
-    // 9. Fit indices
+    // 4. Measurement model output — CR/AVE from fitted loadings, α from raw data
+    const reliability    = this.rebuildReliability(warmMeas.reliability, fitted.factorLoadings, factorNames);
+    const reliabilityExt = this.extendReliability(reliability, fitted.Phi, factorNames);
+    const htmt = this.computeHTMT(allInds, model.measurementModel, S, factorNames);
+
+    // 5. Structural model output from the simultaneous fit
+    const structResult: SEMResults['structuralModel'] = {
+      paths: fitted.paths,
+      rSquared: fitted.rSquared,
+      effects: this.decomposeEffects(fitted.paths),
+    };
+
+    // 6. Fit indices on the fitted implied matrix
     const nParams  = this.countParameters(model);
-    const fitIndices = this.computeFitIndices(S, Sigma, n, nParams, p);
+    const fitIndices = this.computeFitIndices(S, fitted.Sigma, n, nParams, p);
 
-    // 10. Mediation
-    const mediation = this.analyzeMediation(structResult.paths, model.structuralPaths);
+    // 7. Mediation
+    const mediation = this.analyzeMediation(fitted.paths, model.structuralPaths);
 
-    // 11. Diagnostics
+    // 8. Diagnostics
     const diagnostics = this.computeDiagnostics(
-      S, Sigma, allInds, model, measResult.factorLoadings, factorNames, factorScores, p, n
+      S, fitted.Sigma, allInds, model, fitted.factorLoadings, factorNames, factorScores, p, n
     );
 
     return {
       fitIndices,
       measurementModel: {
-        factorLoadings: measResult.factorLoadings,
+        factorLoadings: fitted.factorLoadings,
         reliability: reliabilityExt,
         htmt,
       },
@@ -185,6 +195,248 @@ export class SEMEstimator {
         return (!a || !b) ? 0 : pearsonR(a, b);
       })
     );
+  }
+
+  // ── Full-information ULS fit ─────────────────────────────────────────────────
+  //
+  // θ = [λ₁…λ_p, b₁…b_q, φ₁…φ_r]
+  //   λ — one loading per indicator (all free; latent variances fixed to 1)
+  //   b — standardised structural coefficient per path
+  //   φ — correlation per exogenous-factor pair
+  // Φ(b, φ) is built by path tracing in topological order; for each endogenous
+  // factor e with predictors P: Φ(e,g) = Σᵢ bᵢ·Φ(Pᵢ,g) and its disturbance
+  // ψₑ = 1 − ΣᵢΣⱼ bᵢbⱼΦ(Pᵢ,Pⱼ) is implied so Var(e) = 1.
+  private static fitULS(
+    S: number[][],
+    model: SEMModel,
+    allInds: string[],
+    factorNames: string[],
+    warmLoadings: SEMResults['measurementModel']['factorLoadings'],
+    warmPaths: SEMResults['structuralModel']['paths'],
+    PhiScores: number[][],
+    n: number
+  ): {
+    factorLoadings: SEMResults['measurementModel']['factorLoadings'];
+    paths: SEMResults['structuralModel']['paths'];
+    rSquared: { [f: string]: number };
+    Phi: number[][];
+    Sigma: number[][];
+  } {
+    const p  = allInds.length;
+    const q  = model.structuralPaths.length;
+    const nF = factorNames.length;
+    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+    const fIndex = new Map<string, number>(factorNames.map((f, i) => [f, i]));
+    const indFactor: number[] = allInds.map(ind => {
+      for (const [f, inds] of Object.entries(model.measurementModel))
+        if (inds.includes(ind)) return fIndex.get(f) ?? -1;
+      return -1;
+    });
+    const pathIdx: Array<[number, number]> = model.structuralPaths
+      .map(pt => [fIndex.get(pt.from) ?? -1, fIndex.get(pt.to) ?? -1] as [number, number]);
+
+    const endoSet = new Set(pathIdx.map(([, t]) => t).filter(t => t >= 0));
+    const exoIdx  = factorNames.map((_, i) => i).filter(i => !endoSet.has(i));
+    const exoPairs: Array<[number, number]> = [];
+    for (let a = 1; a < exoIdx.length; a++)
+      for (let b = 0; b < a; b++) exoPairs.push([exoIdx[a], exoIdx[b]]);
+    const r = exoPairs.length;
+
+    const topo = this.topoOrder(nF, pathIdx);
+
+    // Implied latent correlation matrix + explained variance per endo factor
+    const buildPhi = (betas: number[], phis: number[]) => {
+      const Phi: number[][] = Array.from({ length: nF }, (_, i) =>
+        Array.from({ length: nF }, (_, j) => (i === j ? 1 : 0)));
+      exoPairs.forEach(([a, b], k) => { Phi[a][b] = Phi[b][a] = clamp(phis[k], -0.99, 0.99); });
+      const explained: number[] = new Array(nF).fill(0);
+      const done: boolean[] = new Array(nF).fill(false);
+      for (const e of topo) {
+        if (!endoSet.has(e)) { done[e] = true; continue; }
+        const preds: Array<[number, number]> = [];
+        pathIdx.forEach(([f, t], k) => { if (t === e && f >= 0) preds.push([f, k]); });
+        for (let g = 0; g < nF; g++) {
+          if (!done[g] || g === e) continue;
+          let s = 0;
+          for (const [f, k] of preds) s += betas[k] * Phi[f][g];
+          Phi[e][g] = Phi[g][e] = clamp(s, -0.995, 0.995);
+        }
+        let ev = 0;
+        for (const [f1, k1] of preds)
+          for (const [f2, k2] of preds) ev += betas[k1] * betas[k2] * Phi[f1][f2];
+        explained[e] = ev;
+        done[e] = true;
+      }
+      return { Phi, explained };
+    };
+
+    const buildSigma = (lambdas: number[], betas: number[], phis: number[]) => {
+      const { Phi, explained } = buildPhi(betas, phis);
+      const Sigma: number[][] = Array.from({ length: p }, (_, i) =>
+        Array.from({ length: p }, (_, j) => {
+          if (i === j) return 1;
+          const fi = indFactor[i], fj = indFactor[j];
+          if (fi < 0 || fj < 0) return 0;
+          return lambdas[i] * Phi[fi][fj] * lambdas[j];
+        }));
+      return { Sigma, Phi, explained };
+    };
+
+    // ULS discrepancy (χ² = (n−1)·F convention shared with the CFA engine),
+    // plus a smooth penalty keeping endo variance decompositions admissible
+    const objective = (lambdas: number[], betas: number[], phis: number[]) => {
+      const { Sigma, explained } = buildSigma(lambdas, betas, phis);
+      let f = 0;
+      for (let i = 0; i < p; i++)
+        for (let j = 0; j < i; j++) {
+          const d = S[i][j] - Sigma[i][j];
+          f += d * d;
+        }
+      // diagonal is exactly reproduced (both matrices have unit diagonal),
+      // so F = ½·tr[(S−Σ)²] = sum over the lower triangle
+      for (const e of endoSet) f += 100 * Math.max(0, explained[e] - 0.98) ** 2;
+      return f;
+    };
+
+    // ── Warm starts from the two-stage estimates ────────────────────────────
+    const lamMap = new Map<string, number>(warmLoadings.map(fl => [fl.item, fl.loading]));
+    let lambdas: number[] = allInds.map(ind => clamp((lamMap.get(ind) ?? 0.6) * 0.95, -0.98, 0.98));
+    const warmPathMap = new Map<string, number>(warmPaths.map(pt => [`${pt.from}->${pt.to}`, pt.coefficient]));
+    let betas: number[] = model.structuralPaths.map(pt =>
+      clamp(warmPathMap.get(`${pt.from}->${pt.to}`) ?? 0.3, -0.9, 0.9));
+    let phis: number[] = exoPairs.map(([a, b]) => clamp(PhiScores[a]?.[b] ?? 0, -0.9, 0.9));
+
+    // ── Gradient descent with Armijo line search (mirrors CFAEstimator) ─────
+    const nPar = p + q + r;
+    const unpack = (t: number[]) => ({ l: t.slice(0, p), b: t.slice(p, p + q), ph: t.slice(p + q) });
+    const clampTheta = (t: number[]) => t.map((v, k) =>
+      k < p ? clamp(v, -0.999, 0.999) : k < p + q ? clamp(v, -1.5, 1.5) : clamp(v, -0.99, 0.99));
+    const F = (t: number[]) => { const { l, b, ph } = unpack(t); return objective(l, b, ph); };
+
+    let theta: number[] = clampTheta([...lambdas, ...betas, ...phis]);
+    const H_STEP = 1e-5;
+    let stepSize = 0.05;
+    for (let iter = 0; iter < 500; iter++) {
+      const f0 = F(theta);
+      const grad = theta.map((_, k) => {
+        const tp = [...theta]; tp[k] += H_STEP;
+        return (F(tp) - f0) / H_STEP;
+      });
+      const gradNorm2 = grad.reduce((s, g) => s + g * g, 0);
+      if (gradNorm2 < 1e-8) break;
+      let step = stepSize;
+      let moved = false;
+      for (let ls = 0; ls < 20; ls++) {
+        const tNext = clampTheta(theta.map((v, k) => v - step * grad[k]));
+        if (F(tNext) < f0 - 1e-4 * step * gradNorm2) {
+          theta = tNext; stepSize = step * 1.1; moved = true; break;
+        }
+        step *= 0.5;
+        if (step < 1e-12) break;
+      }
+      if (!moved) break;
+    }
+    ({ l: lambdas, b: betas, ph: phis } = unpack(theta));
+
+    // ── Standard errors via numerical Hessian of F (CFA convention) ─────────
+    const hh = 1e-4;
+    const Hm: number[][] = Array.from({ length: nPar }, () => new Array(nPar).fill(0));
+    for (let i = 0; i < nPar; i++) {
+      for (let j = i; j < nPar; j++) {
+        const pp = [...theta]; pp[i] += hh; pp[j] += hh;
+        const pm = [...theta]; pm[i] += hh; pm[j] -= hh;
+        const mp = [...theta]; mp[i] -= hh; mp[j] += hh;
+        const mm = [...theta]; mm[i] -= hh; mm[j] -= hh;
+        Hm[i][j] = Hm[j][i] = (F(pp) - F(pm) - F(mp) + F(mm)) / (4 * hh * hh);
+      }
+    }
+    let seTheta: number[];
+    try {
+      const Hinv = MatrixOps.inverse(Hm);
+      seTheta = Hinv.map((row, i) => Math.sqrt(Math.max(0, row[i]) / Math.max(n - 1, 1)));
+    } catch {
+      seTheta = new Array(nPar).fill(0.05);
+    }
+
+    // ── Assemble outputs ────────────────────────────────────────────────────
+    const { Sigma, Phi, explained } = buildSigma(lambdas, betas, phis);
+
+    const factorLoadings: SEMResults['measurementModel']['factorLoadings'] = [];
+    allInds.forEach((item, k) => {
+      const fi = indFactor[k];
+      if (fi < 0) return;
+      const lam  = lambdas[k];
+      const se   = seTheta[k] > 1e-8 ? seTheta[k] : Math.abs(lam) / Math.sqrt(Math.max(n, 2));
+      const z    = se > 0 ? lam / se : 0;
+      factorLoadings.push({
+        item, factor: factorNames[fi],
+        loading: lam, se, z,
+        pvalue: Math.min(1, 2 * (1 - normalCDF(Math.abs(z)))),
+        std_loading: lam, r_squared: lam * lam,
+      });
+    });
+
+    const paths: SEMResults['structuralModel']['paths'] = model.structuralPaths.map((pt, k) => {
+      const b  = betas[k];
+      const se = seTheta[p + k] > 1e-8 ? seTheta[p + k] : 0.05;
+      const z  = se > 0 ? b / se : 0;
+      return {
+        from: pt.from, to: pt.to,
+        coefficient: b, se, z,
+        pvalue: Math.min(1, 2 * (1 - normalCDF(Math.abs(z)))),
+        std_coefficient: b,
+      };
+    });
+
+    const rSquared: { [f: string]: number } = {};
+    endoSet.forEach(e => { rSquared[factorNames[e]] = clamp(explained[e], 0, 1); });
+
+    return { factorLoadings, paths, rSquared, Phi, Sigma };
+  }
+
+  // ── Topological order of factors (Kahn); cycles appended in input order ──────
+  private static topoOrder(nF: number, pathIdx: Array<[number, number]>): number[] {
+    const inDeg = new Array(nF).fill(0);
+    const out: number[][] = Array.from({ length: nF }, () => []);
+    pathIdx.forEach(([f, t]) => {
+      if (f >= 0 && t >= 0) { inDeg[t]++; out[f].push(t); }
+    });
+    const queue: number[] = [];
+    for (let i = 0; i < nF; i++) if (inDeg[i] === 0) queue.push(i);
+    const order: number[] = [];
+    while (queue.length) {
+      const v = queue.shift()!;
+      order.push(v);
+      out[v].forEach(t => { if (--inDeg[t] === 0) queue.push(t); });
+    }
+    // Non-recursive (cyclic) remainder: append so estimation still proceeds
+    for (let i = 0; i < nF; i++) if (!order.includes(i)) order.push(i);
+    return order;
+  }
+
+  // ── Reliability from fitted loadings (α kept from raw item data) ─────────────
+  private static rebuildReliability(
+    warm: SEMResults['measurementModel']['reliability'],
+    factorLoadings: SEMResults['measurementModel']['factorLoadings'],
+    factorNames: string[]
+  ): SEMResults['measurementModel']['reliability'] {
+    const rel: SEMResults['measurementModel']['reliability'] = {};
+    for (const f of factorNames) {
+      const ls = factorLoadings.filter(fl => fl.factor === f).map(fl => fl.loading);
+      if (!ls.length) continue;
+      const sumAbs = ls.reduce((a, l) => a + Math.abs(l), 0);
+      const sumL2  = ls.reduce((a, l) => a + l * l, 0);
+      const sumErr = ls.reduce((a, l) => a + (1 - l * l), 0);
+      rel[f] = {
+        cronbach_alpha: warm[f]?.cronbach_alpha ?? 0,
+        composite_reliability: Math.min(1, sumAbs ** 2 / Math.max(1e-8, sumAbs ** 2 + sumErr)),
+        ave: Math.min(1, sumL2 / Math.max(1e-8, sumL2 + sumErr)),
+        maxSharedVariance: 0,
+        averageSharedVariance: 0,
+      };
+    }
+    return rel;
   }
 
   // ── Measurement model ────────────────────────────────────────────────────────
@@ -324,11 +576,11 @@ export class SEMEstimator {
     return scores;
   }
 
-  // ── Structural model (OLS) ───────────────────────────────────────────────────
+  // ── Structural model (OLS) — used only for warm-start values ─────────────────
   private static estimateStructuralModel(
     factorScores: { [f: string]: number[] },
     paths: Array<{ from: string; to: string }>,
-    factors: string[], n: number
+    _factors: string[], n: number
   ): SEMResults['structuralModel'] {
     const pathResults: SEMResults['structuralModel']['paths'] = [];
     const rSquared: { [k: string]: number } = {};
@@ -418,27 +670,6 @@ export class SEMEstimator {
     return { direct, indirect, total };
   }
 
-  // ── Model-implied correlation matrix Σ = Λ·Φ·Λᵀ ─────────────────────────────
-  private static buildImpliedCorrelation(
-    allInds: string[], measurementModel: { [k: string]: string[] },
-    factorLoadings: SEMResults['measurementModel']['factorLoadings'],
-    Phi: number[][], factorNames: string[], p: number
-  ): number[][] {
-    const lambdaMap = new Map<string, number>();
-    factorLoadings.forEach(fl => lambdaMap.set(fl.item, fl.std_loading));
-    const indFactor = new Map<string, string>();
-    Object.entries(measurementModel).forEach(([f, inds]) => inds.forEach(ind => indFactor.set(ind, f)));
-    return Array.from({ length: p }, (_, i) =>
-      Array.from({ length: p }, (_, j) => {
-        if (i === j) return 1;
-        const fi = factorNames.indexOf(indFactor.get(allInds[i]) ?? '');
-        const fj = factorNames.indexOf(indFactor.get(allInds[j]) ?? '');
-        if (fi < 0 || fj < 0) return 0;
-        return (lambdaMap.get(allInds[i]) ?? 0) * Phi[fi][fj] * (lambdaMap.get(allInds[j]) ?? 0);
-      })
-    );
-  }
-
   // ── Fit indices ───────────────────────────────────────────────────────────────
   private static computeFitIndices(
     S: number[][], Sigma: number[][], n: number, nParams: number, p: number
@@ -506,20 +737,17 @@ export class SEMEstimator {
     };
   }
 
-  // ── Parameter count (correlation-structure model) ─────────────────────────────
-  // Free parameters: (k-1) loadings per factor + structural paths + exo factor correlations
-  // + disturbance variances for endogenous factors (one per endo factor)
+  // ── Parameter count (standardised correlation-structure SEM) ─────────────────
+  // Free parameters: one loading per indicator (latent variances fixed to 1)
+  // + structural paths + exogenous-factor correlations. Endogenous disturbances
+  // are implied (ψ = 1 − explained) and the unit diagonal is not fitted, so
+  // neither adds free parameters. This matches the lavaan/AMOS df for the
+  // equivalent covariance-metric model.
   private static countParameters(model: SEMModel): number {
-    let count = 0;
-    for (const inds of Object.values(model.measurementModel))
-      count += Math.max(0, inds.length - 1);
-    count += model.structuralPaths.length;
-    const endo = new Set(model.structuralPaths.map(p => p.to));
+    const p = new Set(Object.values(model.measurementModel).flat()).size;
+    const endo = new Set(model.structuralPaths.map(pt => pt.to));
     const exo  = Object.keys(model.measurementModel).filter(f => !endo.has(f));
-    count += exo.length * (exo.length - 1) / 2;
-    // Disturbance (residual) variance for each endogenous factor
-    count += endo.size;
-    return count;
+    return p + model.structuralPaths.length + exo.length * (exo.length - 1) / 2;
   }
 
   // ── Modification indices (LM-test on off-diagonal residuals) ─────────────────
@@ -535,9 +763,12 @@ export class SEMEstimator {
       for (let j = i + 1; j < p; j++) {
         if (indFactor.get(allInds[i]) === indFactor.get(allInds[j])) continue;
         const resid = S[i][j] - Sigma[i][j];
-        const varS  = Math.max(1e-8, (1 - S[i][j] ** 2) ** 2 / Math.max(n - 2, 1));
-        const mi    = Math.max(0, (n - 1) * resid ** 2 / (2 * varS));
-        const std   = resid * Math.sqrt(Math.max(0, (1 - Sigma[i][i]) * (1 - Sigma[j][j])));
+        // LM statistic, χ²(1) under H₀ — same convention as the CFA engine:
+        // MI = (n−1)·r² / (1−σᵢⱼ²)². The former version divided by the sampling
+        // variance of r (which already contains 1/n), inflating MI ≈ n-fold.
+        const w   = Math.max(1e-8, (1 - Sigma[i][j] ** 2) ** 2);
+        const mi  = Math.max(0, (n - 1) * resid ** 2 / w);
+        const std = resid * Math.sqrt(Math.max(0, (1 - Sigma[i][i]) * (1 - Sigma[j][j])));
         result.push({ param: `${allInds[i]} ~~ ${allInds[j]}`, mi, epc: resid, std_epc: std, type: 'covariance' });
       }
     }
@@ -618,7 +849,7 @@ export class SEMEstimator {
     S: number[][], Sigma: number[][], allInds: string[],
     model: SEMModel,
     factorLoadings: SEMResults['measurementModel']['factorLoadings'],
-    factorNames: string[], factorScores: { [f: string]: number[] },
+    factorNames: string[], _factorScores: { [f: string]: number[] },
     p: number, n: number
   ): SEMResults['diagnostics'] {
     return {
