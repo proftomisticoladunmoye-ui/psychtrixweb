@@ -16,13 +16,17 @@ export interface InvariancePathDiagramProps {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const FRX = 68, FRY = 36;
-const IND_W = 92, IND_H = 30;
-const ERR_R = 16;
-const IND_GAP = 62;
-const ERR_OFFSET = 22;          // gap between right edge of indicator and error circle center
-const FACTOR_TOP_PAD = 60;      // px from canvas top to factor center
-const IND_TOP_PAD = 54;         // px below factor bottom to first indicator center
+// Classic AMOS vertical layout: errors far left → indicator column → factor
+// ellipses right → covariance arcs bowing right (matches the CFA diagram).
+const FRX = 74, FRY = 38;
+const IND_W = 104, IND_H = 34;
+const ERR_R = 15;
+const IND_GAP = 52;
+const GROUP_GAP = 42;           // extra gap between factor indicator groups
+const ERR_X = 58;               // error-circle column x
+const IND_X = 205;              // indicator column x (center)
+const FACT_X = 520;             // factor ellipse column x (center)
+const TOP_PAD = 56;             // room above the first indicator (badge row)
 
 // ─── Theme palettes ───────────────────────────────────────────────────────────
 
@@ -120,34 +124,31 @@ interface Pos { x: number; y: number }
 
 function computeLayout(
   factorStructure: Record<string, string[]>,
-  cw: number,
+  _cw: number,
 ): { factorPos: Record<string, Pos>; indicatorPos: Record<string, Pos>; logicalH: number } {
   const factors = Object.keys(factorStructure);
   const n = factors.length;
   if (n === 0) return { factorPos: {}, indicatorPos: {}, logicalH: 600 };
 
-  const maxInds = Math.max(...factors.map(f => (factorStructure[f] || []).length), 1);
-  const logicalH = FACTOR_TOP_PAD + FRY + IND_TOP_PAD + maxInds * IND_GAP + 80;
-
-  const margin = 90;
-  const colW = (cw - margin * 2) / Math.max(n, 1);
-  const factorY = FACTOR_TOP_PAD + FRY;
-
+  // Vertical AMOS layout: one column of indicators grouped by factor; each
+  // factor ellipse sits to the RIGHT, centered on its group.
   const factorPos: Record<string, Pos> = {};
-  factors.forEach((f, i) => {
-    factorPos[f] = { x: margin + colW * i + colW / 2, y: factorY };
-  });
-
   const indicatorPos: Record<string, Pos> = {};
+
+  let y = TOP_PAD + IND_H / 2;
   factors.forEach(f => {
-    const fp = factorPos[f];
     const items = factorStructure[f] || [];
-    const startY = fp.y + FRY + IND_TOP_PAD;
-    items.forEach((item, k) => {
-      indicatorPos[item] = { x: fp.x, y: startY + k * IND_GAP };
+    const groupTop = y;
+    items.forEach(item => {
+      indicatorPos[item] = { x: IND_X, y };
+      y += IND_GAP;
     });
+    const groupBottom = y - IND_GAP;
+    factorPos[f] = { x: FACT_X, y: items.length ? (groupTop + groupBottom) / 2 : y };
+    y += GROUP_GAP;
   });
 
+  const logicalH = y - GROUP_GAP + 70;
   return { factorPos, indicatorPos, logicalH };
 }
 
@@ -176,17 +177,9 @@ function drawDiagram(
 
   ctx.clearRect(0, 0, cw, ch);
 
-  // Background
-  ctx.fillStyle = pal.bg;
+  // Plain white background — publication/AMOS convention (no grid).
+  ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, cw, ch);
-
-  // Grid
-  ctx.save();
-  ctx.strokeStyle = pal.grid;
-  ctx.lineWidth = 0.5;
-  for (let x = 0; x < cw; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, ch); ctx.stroke(); }
-  for (let y = 0; y < ch; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(cw, y); ctx.stroke(); }
-  ctx.restore();
 
   // ── Group + level badge ──────────────────────────────────────────────────
   ctx.save();
@@ -205,34 +198,40 @@ function drawDiagram(
   ctx.fillText(badgeText, bx + bw / 2, by + 12);
   ctx.restore();
 
-  // ── 1. Factor correlation arcs ────────────────────────────────────────────
+  // ── 1. Factor covariance arcs (bowing RIGHT, AMOS style) ──────────────────
+  const factorOrderMap = new Map(factors.map((f, i) => [f, i]));
   corrList.forEach(fc => {
     const p1 = factorPos[fc.factor1], p2 = factorPos[fc.factor2];
     if (!p1 || !p2) return;
-    const midX = (p1.x + p2.x) / 2;
-    const arcLift = Math.abs(p2.x - p1.x) * 0.38 + 45;
-    const cpY = Math.min(p1.y, p2.y) - arcLift;
-    const a1 = Math.atan2(cpY - p1.y, midX - p1.x);
-    const a2 = Math.atan2(cpY - p2.y, midX - p2.x);
+
+    const span = Math.abs((factorOrderMap.get(fc.factor1) ?? 0) - (factorOrderMap.get(fc.factor2) ?? 0));
+    const bow = 50 + 50 * Math.max(span - 1, 0) + 16 * Math.min(span, 1);
+    const cpX = Math.max(p1.x, p2.x) + FRX + bow;
+    const midY = (p1.y + p2.y) / 2;
+
+    const a1 = Math.atan2(midY - p1.y, cpX - p1.x);
+    const a2 = Math.atan2(midY - p2.y, cpX - p2.x);
     const [sx, sy] = ellipseEdge(p1.x, p1.y, FRX, FRY, a1);
     const [ex, ey] = ellipseEdge(p2.x, p2.y, FRX, FRY, a2);
 
     ctx.save();
     ctx.strokeStyle = pal.corrColor;
-    ctx.lineWidth = 1.8;
-    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.quadraticCurveTo(midX, cpY, ex, ey); ctx.stroke();
+    ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.quadraticCurveTo(cpX, midY, ex, ey); ctx.stroke();
 
     const t = 0.06;
-    const q1x = (1 - t) ** 2 * sx + 2 * (1 - t) * t * midX + t ** 2 * ex;
-    const q1y = (1 - t) ** 2 * sy + 2 * (1 - t) * t * cpY + t ** 2 * ey;
+    const q1x = (1 - t) ** 2 * sx + 2 * (1 - t) * t * cpX + t ** 2 * ex;
+    const q1y = (1 - t) ** 2 * sy + 2 * (1 - t) * t * midY + t ** 2 * ey;
     const q2t = 1 - t;
-    const q2x = (1 - q2t) ** 2 * sx + 2 * (1 - q2t) * q2t * midX + q2t ** 2 * ex;
-    const q2y = (1 - q2t) ** 2 * sy + 2 * (1 - q2t) * q2t * cpY + q2t ** 2 * ey;
+    const q2x = (1 - q2t) ** 2 * sx + 2 * (1 - q2t) * q2t * cpX + q2t ** 2 * ex;
+    const q2y = (1 - q2t) ** 2 * sy + 2 * (1 - q2t) * q2t * midY + q2t ** 2 * ey;
     arrowhead(ctx, sx, sy, Math.atan2(sy - q1y, sx - q1x), pal.corrColor, 9);
     arrowhead(ctx, ex, ey, Math.atan2(ey - q2y, ex - q2x), pal.corrColor, 9);
 
-    const label = `φ=${fc.correlation.toFixed(3)}${pStar(fc.pvalue)}`;
-    valuePill(ctx, label, midX, cpY + 9, pal.corrColor);
+    const labX = 0.25 * sx + 0.5 * cpX + 0.25 * ex + 14;
+    const labY = 0.25 * sy + 0.5 * midY + 0.25 * ey;
+    const label = fc.correlation.toFixed(2).replace(/^(-?)0\./, '$1.') + pStar(fc.pvalue);
+    valuePill(ctx, label, labX, labY, pal.corrColor);
     ctx.restore();
   });
 
@@ -259,41 +258,44 @@ function drawDiagram(
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
       arrowhead(ctx, ex, ey, angle, pathColor, 9);
 
-      // Loading label
+      // Loading label — AMOS convention: near the indicator end, above the arrow
       const fl = loadingMap.get(`${factor}::${item}`);
       if (fl !== undefined) {
-        const mx = (sx + ex) / 2 - Math.sin(angle) * 16;
-        const my = (sy + ey) / 2 + Math.cos(angle) * 16;
+        const t = 0.30;
+        const mx = ex + (sx - ex) * t;
+        const my = ey + (sy - ey) * t - 12;
         const sig = fl.pvalue < 0.05;
         const lc = sig ? pathColor : '#9ca3af';
-        valuePill(ctx, fl.loading.toFixed(3) + pStar(fl.pvalue), mx, my, lc);
+        valuePill(ctx, fl.loading.toFixed(2).replace(/^(-?)0\./, '$1.') + pStar(fl.pvalue), mx, my, lc);
       }
       ctx.restore();
     });
   });
 
-  // ── 3. Error/residual circles ─────────────────────────────────────────────
+  // ── 3. Error/residual circles (far-left column, e1..eN, AMOS style) ───────
+  const errIndexMap = new Map(
+    factors.flatMap(f => factorStructure[f] || []).map((it, i) => [it, i])
+  );
   factors.forEach(factor => {
     (factorStructure[factor] || []).forEach(item => {
       const ip = indicatorPos[item];
       if (!ip) return;
 
-      const errX = ip.x + IND_W / 2 + ERR_OFFSET + ERR_R;
+      const errX = ERR_X;
       const errY = ip.y;
-      const errAngle = Math.PI;  // error circle is to the right → arrow points LEFT
 
-      // Arrow from error circle left edge to indicator right edge
-      const esx = errX - ERR_R;
-      const [eex, eey] = rectEdge(ip.x, ip.y, 0);  // right edge of indicator
+      // Arrow from error circle right edge into the indicator's left edge
+      const esx = errX + ERR_R;
+      const eex = ip.x - IND_W / 2;
 
       const errColor = showSigma ? pal.sigmaColor : pal.errStroke;
-      const errLw = showSigma ? 2 : 1.5;
+      const errLw = showSigma ? 2 : 1.4;
 
       ctx.save();
       ctx.strokeStyle = errColor;
       ctx.lineWidth = errLw;
-      ctx.beginPath(); ctx.moveTo(esx, errY); ctx.lineTo(eex, eey); ctx.stroke();
-      arrowhead(ctx, eex, eey, errAngle, errColor, 7);
+      ctx.beginPath(); ctx.moveTo(esx, errY); ctx.lineTo(eex, errY); ctx.stroke();
+      arrowhead(ctx, eex, errY, 0, errColor, 7);
 
       // Error circle
       ctx.beginPath(); ctx.arc(errX, errY, ERR_R, 0, Math.PI * 2);
@@ -303,14 +305,14 @@ function drawDiagram(
 
       // Label inside error circle
       ctx.fillStyle = pal.errText;
-      ctx.font = showSigma ? 'bold 7.5px system-ui,Arial,sans-serif' : 'bold 10px system-ui,Arial,sans-serif';
+      ctx.font = showSigma ? 'bold 7.5px system-ui,Arial,sans-serif' : 'bold 9.5px system-ui,Arial,sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
 
       if (showSigma) {
         const rv = residualMap.get(item);
         ctx.fillText(rv !== undefined ? rv.toFixed(2) : 'δ', errX, errY);
       } else {
-        ctx.fillText('ε', errX, errY);
+        ctx.fillText(`e${(errIndexMap.get(item) ?? 0) + 1}`, errX, errY);
       }
       ctx.restore();
     });
@@ -393,6 +395,7 @@ function drawDiagram(
   const lw = 340, lh = 62;
   ctx.fillStyle = 'rgba(255,255,255,0.94)';
   ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
+  ctx.beginPath(); // canvas paths survive save/restore — prevents the previous shape leaking into this fill
   (ctx as any).roundRect?.(lx, ly, lw, lh, 5) ?? ctx.rect(lx, ly, lw, lh);
   ctx.fill(); ctx.stroke();
 
@@ -438,10 +441,8 @@ export function InvariancePathDiagram({
   const pal = THEMES[theme];
   const factors = Object.keys(factorStructure);
 
-  // Precompute logical canvas size
-  const maxInds = Math.max(...factors.map(f => (factorStructure[f] || []).length), 1);
-  const logicalW = Math.max(containerW, factors.length * 200 + 160);
-  const logicalH = FACTOR_TOP_PAD + FRY + IND_TOP_PAD + maxInds * IND_GAP + 120;
+  // Logical canvas size — width fits factor column + covariance arcs
+  const logicalW = Math.max(containerW, FACT_X + FRX + 190);
 
   // Maps for fast lookup
   const loadingMap = new Map<string, { loading: number; pvalue: number }>();
@@ -451,8 +452,9 @@ export function InvariancePathDiagram({
   const residualMap = new Map<string, number>();
   residualVariances.forEach(rv => residualMap.set(rv.item, rv.variance));
 
-  // Layout positions
-  const { factorPos, indicatorPos } = computeLayout(factorStructure, logicalW);
+  // Layout positions (vertical AMOS layout; height driven by indicator count)
+  const { factorPos, indicatorPos, logicalH: layoutH } = computeLayout(factorStructure, logicalW);
+  const logicalH = layoutH + 80; // room for the legend box
 
   // Drag/pan state
   const pointerMode = useRef<'none' | 'pan'>('none');
@@ -502,6 +504,7 @@ export function InvariancePathDiagram({
   useEffect(() => { redraw(); }, [redraw]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0) return; // pan only with the primary button
     e.currentTarget.setPointerCapture(e.pointerId);
     pointerMode.current = 'pan';
     panStart.current = { x: e.clientX, y: e.clientY, ox: panRef.current.x, oy: panRef.current.y };
@@ -509,6 +512,9 @@ export function InvariancePathDiagram({
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (pointerMode.current !== 'pan') return;
+    // Stray pointermoves (hover, synthetic events) arrive with no button held —
+    // without this guard they silently pan the diagram off-canvas.
+    if (!(e.buttons & 1)) { pointerMode.current = 'none'; return; }
     const dx = e.clientX - panStart.current.x;
     const dy = e.clientY - panStart.current.y;
     const np = { x: panStart.current.ox + dx / zoomRef.current, y: panStart.current.oy + dy / zoomRef.current };
@@ -601,6 +607,7 @@ export function InvariancePathDiagram({
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
           className="touch-none"
         />
       </div>

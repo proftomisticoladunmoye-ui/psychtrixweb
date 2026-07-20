@@ -323,6 +323,7 @@ function drawFrame(
   ctx.save();
   ctx.fillStyle = 'rgba(255,255,255,0.92)';
   ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
+  ctx.beginPath(); // canvas paths survive save/restore — prevents the previous shape leaking into this fill
   (ctx as any).roundRect?.(lx, ly, 320, 84, 6);
   ctx.fill(); ctx.stroke();
   ctx.font = '9px system-ui,sans-serif'; ctx.textBaseline = 'middle';
@@ -435,6 +436,8 @@ export const PLSSEMDiagram: React.FC<PLSSEMDiagramProps> = ({
       canvasRef.current.style.cursor = over ? (dragRef.current ? 'grabbing' : 'grab') : 'default';
     }
     if (!dragRef.current) return;
+    // Button released outside the canvas means we never saw mouseup — stop dragging.
+    if (!(e.buttons & 1)) { dragRef.current = null; return; }
     const { x, y } = toLogical(e.clientX, e.clientY);
     const { id, offsetX, offsetY } = dragRef.current;
     const nx = Math.max(CONSTRUCT_RX + 8, Math.min(CW - CONSTRUCT_RX - 8, x - offsetX));

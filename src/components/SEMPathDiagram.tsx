@@ -32,6 +32,12 @@ export interface SEMPathDiagramProps {
   indicatorLabels?: { [key: string]: string };   // editable indicator names
   onLabelChange?: (type: 'latent' | 'indicator', key: string, value: string) => void;
   theme?: 'amos' | 'smartpls' | 'journal';
+  /** Model Fit Summary box (top right), AMOS style. */
+  fitIndices?: { chisq?: number; df?: number; cfi?: number; tli?: number; rmsea?: number; srmr?: number };
+  /** Footer note, e.g. "Maximum Likelihood". */
+  estimationLabel?: string;
+  /** Diagram title, e.g. "Structural Model — Group 1". */
+  title?: string;
 }
 
 interface NodePos { x: number; y: number; locked?: boolean }
@@ -239,6 +245,9 @@ export function SEMPathDiagram({
   indicatorLabels = {},
   onLabelChange,
   theme = 'amos',
+  fitIndices,
+  estimationLabel,
+  title,
 }: SEMPathDiagramProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -364,22 +373,16 @@ export function SEMPathDiagram({
     ctx.scale(dpr * zoom, dpr * zoom);
     ctx.translate(pan.x, pan.y);
 
-    // Background
-    ctx.fillStyle = '#fafafa';
-    ctx.fillRect(-pan.x, -pan.y, canvasW, canvasH);
-
-    // Grid
-    ctx.strokeStyle = '#f0f0f0';
-    ctx.lineWidth = 0.5;
-    const gridSize = 40;
-    for (let gx = 0; gx < canvasW; gx += gridSize) {
-      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, canvasH); ctx.stroke();
-    }
-    for (let gy = 0; gy < canvasH; gy += gridSize) {
-      ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(canvasW, gy); ctx.stroke();
-    }
+    // Plain white background — publication/AMOS convention (no grid).
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(-pan.x - canvasW, -pan.y - canvasH, canvasW * 3, canvasH * 3);
 
     const factors = Object.keys(measurementModel);
+
+    // Sequential error-term numbering (e1..eN), AMOS convention
+    const itemIndexMap = new Map(
+      factors.flatMap(f => measurementModel[f] || []).map((it, i) => [it, i])
+    );
 
     // ── 1. Exogenous covariance arcs ─────────────────────────────────────────
     const exogenous = factors.filter(f => factorType(f) === 'exogenous');
@@ -390,9 +393,11 @@ export function SEMPathDiagram({
         if (!p1 || !p2) continue;
 
         ctx.save();
+        // AMOS convention: solid double-headed covariance arc with the plain
+        // coefficient on it (no dashes, no phi prefix).
         ctx.strokeStyle = pal.covarColor;
-        ctx.lineWidth = 2;
-        ctx.setLineDash([6, 4]);
+        ctx.lineWidth = 1.6;
+        ctx.setLineDash([]);
 
         const cpx = Math.min(p1.x, p2.x) - 70;
         const cpy = (p1.y + p2.y) / 2;
@@ -401,7 +406,6 @@ export function SEMPathDiagram({
         ctx.moveTo(p1.x - LATENT_RX + 5, p1.y);
         ctx.quadraticCurveTo(cpx, cpy, p2.x - LATENT_RX + 5, p2.y);
         ctx.stroke();
-        ctx.setLineDash([]);
 
         arrowhead(ctx, p1.x - LATENT_RX + 5, p1.y, Math.atan2(p1.y - cpy, p1.x - LATENT_RX + 5 - cpx), pal.covarColor, 9);
         arrowhead(ctx, p2.x - LATENT_RX + 5, p2.y, Math.atan2(p2.y - cpy, p2.x - LATENT_RX + 5 - cpx), pal.covarColor, 9);
@@ -409,7 +413,7 @@ export function SEMPathDiagram({
         const pairKey = `${f1}_${f2}`;
         const phi = factorCorrelations[pairKey] ?? factorCorrelations[`${f2}_${f1}`];
         if (phi !== undefined) {
-          drawValueLabel(ctx, `φ=${phi.toFixed(3)}`, cpx - 20, cpy, pal.covarColor);
+          drawValueLabel(ctx, phi.toFixed(2).replace(/^(-?)0\./, '$1.'), cpx - 16, cpy, pal.covarColor);
         }
         ctx.restore();
       }
@@ -459,7 +463,7 @@ export function SEMPathDiagram({
         arrowhead(ctx, ex, ey, Math.atan2(ey - qy, ex - qx), pathColor);
         if (showCoefficients) {
           drawValueLabel(ctx,
-            coef.toFixed(3) + pStar(path.pvalue),
+            coef.toFixed(2).replace(/^(-?)0\./, '$1.') + pStar(path.pvalue),
             (sx + ex) / 2 + Math.cos(perp) * (bend + 16),
             (sy + ey) / 2 + Math.sin(perp) * (bend + 16),
             pathColor
@@ -471,7 +475,7 @@ export function SEMPathDiagram({
         if (showCoefficients) {
           const mx = (sx + ex) / 2 - Math.sin(angle) * 18;
           const my = (sy + ey) / 2 + Math.cos(angle) * 18;
-          drawValueLabel(ctx, coef.toFixed(3) + pStar(path.pvalue), mx, my, pathColor);
+          drawValueLabel(ctx, coef.toFixed(2).replace(/^(-?)0\./, '$1.') + pStar(path.pvalue), mx, my, pathColor);
         }
       }
       ctx.restore();
@@ -501,10 +505,12 @@ export function SEMPathDiagram({
         if (showLoadings) {
           const ld = loadingMap.get(item);
           if (ld !== undefined) {
-            const mx = (sx + ex) / 2 - Math.sin(angle) * 14;
-            const my = (sy + ey) / 2 + Math.cos(angle) * 14;
+            // AMOS convention: coefficient near the indicator end of the arrow
+            const t = 0.30;
+            const mx = ex + (sx - ex) * t - Math.sin(angle) * 12;
+            const my = ey + (sy - ey) * t + Math.cos(angle) * 12;
             const lcolor = ld.pvalue !== undefined && ld.pvalue < 0.05 ? pal.loadingColor : pal.pathGray;
-            drawValueLabel(ctx, ld.value.toFixed(3) + pStar(ld.pvalue), mx, my, lcolor);
+            drawValueLabel(ctx, ld.value.toFixed(2).replace(/^(-?)0\./, '$1.') + pStar(ld.pvalue), mx, my, lcolor);
           }
         }
         ctx.restore();
@@ -532,9 +538,9 @@ export function SEMPathDiagram({
           ctx.fillStyle = pal.errorFill; ctx.fill();
           ctx.strokeStyle = pal.errorStroke; ctx.lineWidth = 1.5; ctx.stroke();
 
-          ctx.fillStyle = pal.errorText; ctx.font = 'bold 10px system-ui';
+          ctx.fillStyle = pal.errorText; ctx.font = 'bold 9.5px system-ui';
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-          ctx.fillText('e', errX, errY);
+          ctx.fillText(`e${(itemIndexMap.get(item) ?? 0) + 1}`, errX, errY);
           ctx.restore();
         }
       });
@@ -632,7 +638,7 @@ export function SEMPathDiagram({
         const r2 = rSquared[factor] ?? 0;
         ctx.font = '10px system-ui,Arial,sans-serif';
         ctx.fillStyle = '#6b7280';
-        ctx.fillText(`R²=${r2.toFixed(3)}`, fp.x, fp.y + LATENT_RY + 14);
+        ctx.fillText(`R²=${r2.toFixed(2).replace(/^0\./, '.')}`, fp.x, fp.y + LATENT_RY + 14);
       }
 
       // Lock indicator
@@ -649,6 +655,7 @@ export function SEMPathDiagram({
     ctx.save();
     ctx.fillStyle = 'rgba(255,255,255,0.9)';
     ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1;
+    ctx.beginPath(); // canvas paths survive save/restore — without this, the previous shape leaks into the fill
     (ctx as any).roundRect?.(lx, ly, 320, 66, 6) ?? ctx.rect(lx, ly, 320, 66);
     ctx.fill(); ctx.stroke();
     ctx.font = '9px system-ui,Arial,sans-serif'; ctx.fillStyle = '#475569';
@@ -669,11 +676,74 @@ export function SEMPathDiagram({
     ctx.fillText('* p<.05  ** p<.01  *** p<.001 | Double-click to rename | Drag to reposition', lx + 8, ly + 58);
     ctx.restore();
 
+    // ── 7. Title (top center) ────────────────────────────────────────────────
+    if (title) {
+      ctx.save();
+      ctx.fillStyle = '#111827';
+      ctx.font = 'bold 18px system-ui,Arial,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(title, canvasW / 2, 28);
+      ctx.restore();
+    }
+
+    // ── 8. Model Fit Summary box (top right, AMOS style) ─────────────────────
+    if (fitIndices) {
+      const rows: Array<[string, string]> = [];
+      if (fitIndices.chisq !== undefined) rows.push(['Chi-square (χ²)', fitIndices.chisq.toFixed(2)]);
+      if (fitIndices.df !== undefined) rows.push(['df', String(fitIndices.df)]);
+      if (fitIndices.chisq !== undefined && fitIndices.df) rows.push(['χ²/df', (fitIndices.chisq / fitIndices.df).toFixed(2)]);
+      if (fitIndices.cfi !== undefined) rows.push(['CFI', fitIndices.cfi.toFixed(2)]);
+      if (fitIndices.tli !== undefined) rows.push(['TLI', fitIndices.tli.toFixed(2)]);
+      if (fitIndices.rmsea !== undefined) rows.push(['RMSEA', fitIndices.rmsea.toFixed(3)]);
+      if (fitIndices.srmr !== undefined) rows.push(['SRMR', fitIndices.srmr.toFixed(3)]);
+
+      if (rows.length > 0) {
+        const boxW = 218;
+        const boxH = 30 + rows.length * 19;
+        const bx = canvasW - boxW - 18, by = 16;
+        ctx.save();
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = '#374151';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath(); // path leak guard
+        (ctx as any).roundRect?.(bx, by, boxW, boxH, 6) ?? ctx.rect(bx, by, boxW, boxH);
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#111827';
+        ctx.font = 'bold 12px system-ui,Arial,sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('Model Fit Summary', bx + boxW / 2, by + 15);
+        ctx.font = '11px system-ui,Arial,sans-serif';
+        rows.forEach(([k, v], i) => {
+          const ry = by + 34 + i * 19;
+          ctx.textAlign = 'left';
+          ctx.fillText(k, bx + 12, ry);
+          ctx.textAlign = 'center';
+          ctx.fillText('=', bx + boxW - 62, ry);
+          ctx.textAlign = 'right';
+          ctx.fillText(v, bx + boxW - 12, ry);
+        });
+        ctx.restore();
+      }
+    }
+
+    // ── 9. Estimation footer ─────────────────────────────────────────────────
+    if (estimationLabel) {
+      ctx.save();
+      ctx.fillStyle = '#374151';
+      ctx.font = '12px system-ui,Arial,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`Estimation Method: ${estimationLabel}`, canvasW / 2, canvasH - 14);
+      ctx.restore();
+    }
+
     ctx.restore(); // restore main transform
   }, [latentPos, indicatorPos, measurementModel, structuralModel, factorLoadings,
       factorCorrelations, rSquared, showLoadings, showErrors, showRSquared,
       showCoefficients, showStandardized, zoom, pan, canvasW, canvasH,
-      loadingMap, pal, mediators, latentLabels, indicatorLabels, factorType]);
+      loadingMap, pal, mediators, latentLabels, indicatorLabels, factorType,
+      fitIndices, estimationLabel, title]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -727,6 +797,9 @@ export function SEMPathDiagram({
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const d = dragRef.current;
     if (!d) return;
+    // If the button was released outside the canvas we never saw mouseup —
+    // without this guard the next hover-move keeps dragging/panning.
+    if (!(e.buttons & 1)) { dragRef.current = null; setIsDragging(false); return; }
 
     if (d.type === 'pan') {
       setPan({ x: d.ox + (e.clientX - d.mx) / zoom, y: d.oy + (e.clientY - d.my) / zoom });

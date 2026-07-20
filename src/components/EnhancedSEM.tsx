@@ -415,6 +415,16 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
           indicatorLabels={indicatorLabels}
           onLabelChange={handleLabelChange}
           theme={diagramTheme}
+          title="Structural Equation Model"
+          estimationLabel="Two-stage least squares (composite-based)"
+          fitIndices={{
+            chisq: results.fitIndices?.chisq,
+            df: results.fitIndices?.df,
+            cfi: results.fitIndices?.cfi,
+            tli: results.fitIndices?.tli,
+            rmsea: results.fitIndices?.rmsea,
+            srmr: results.fitIndices?.srmr,
+          }}
         />
 
         {/* Measurement + Structural grid */}

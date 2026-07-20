@@ -846,6 +846,11 @@ export function EnhancedMultiGroupSEM({ datasets, selectedDataset, onDatasetChan
               showCoefficients={true}
               showStandardized={true}
               rSquared={results.groupParameters[selectedGroupForDiagram].structuralModel.rSquared}
+              factorLoadings={results.groupParameters[selectedGroupForDiagram].measurementModel.factorLoadings.map(fl => ({
+                item: fl.item, factor: fl.factor, std_loading: fl.loading, pvalue: fl.pvalue,
+              }))}
+              title={`Multi-Group SEM — ${selectedGroupForDiagram}`}
+              estimationLabel="Two-stage least squares (composite-based)"
             />
           )}
         </div>

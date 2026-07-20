@@ -700,6 +700,9 @@ export function AdvancedPathDiagram({
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const d = dragRef.current;
     if (!d) return;
+    // If the button was released outside the canvas we never saw mouseup —
+    // without this guard the next hover-move keeps dragging/panning.
+    if (!(e.buttons & 1)) { dragRef.current = null; setIsDragging(false); return; }
 
     if (d.type === 'pan') {
       setPan({ x: d.ox + (e.clientX - d.mx) / zoom, y: d.oy + (e.clientY - d.my) / zoom });

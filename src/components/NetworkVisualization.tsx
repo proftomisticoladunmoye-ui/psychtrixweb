@@ -334,6 +334,7 @@ export function NetworkVisualization({
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0) return; // drag/pan only with the primary button
     e.currentTarget.setPointerCapture(e.pointerId);
     const { x, y } = toLogical(e.clientX, e.clientY);
     const hit = hitNode(x, y);
@@ -353,6 +354,10 @@ export function NetworkVisualization({
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (pointerModeRef.current === 'none') return;
+    // Stray pointermoves (hover, missed pointerup) arrive with no button held —
+    // without this guard they silently pan the graph or drag nodes.
+    if (!(e.buttons & 1)) { handlePointerUp(e); return; }
     if (pointerModeRef.current === 'pan') {
       const dx = e.clientX - panStartRef.current.x;
       const dy = e.clientY - panStartRef.current.y;
