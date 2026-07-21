@@ -33,6 +33,8 @@ interface Dataset {
 }
 
 interface CFAResults {
+  estimator?: 'ULS' | 'DWLS';
+  thresholds?: Array<{ variable: string; values: number[] }>;
   fitIndices: {
     chisq: number;
     df: number;
@@ -49,6 +51,7 @@ interface CFAResults {
     agfi: number;
     nfi: number;
     nnfi?: number;
+    scaled?: boolean;
   };
   factorLoadings: Array<{
     item: string;
@@ -104,7 +107,7 @@ export function EnhancedCFA({ datasets, selectedDataset, onDatasetChange }: Enha
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
 
   const [advancedOptions, setAdvancedOptions] = useState({
-    estimator: 'ML' as 'ML' | 'WLS' | 'DWLS' | 'ULS' | 'GLS',
+    estimator: 'auto' as 'auto' | 'DWLS' | 'ULS',
     standardization: 'std.all' as 'std.all' | 'std.lv' | 'none',
     missing: 'listwise' as 'listwise' | 'fiml' | 'ml',
     bootstrap: false,
@@ -337,7 +340,9 @@ export function EnhancedCFA({ datasets, selectedDataset, onDatasetChange }: Enha
           latentVariables: factorStructure
         };
 
-        const cfaResults = CFAEstimator.estimate(rawData, model, uniqueIndicators);
+        const cfaResults = CFAEstimator.estimate(rawData, model, uniqueIndicators, {
+          estimator: advancedOptions.estimator,
+        });
 
         formattedResults = {
           fitIndices: {
@@ -386,6 +391,8 @@ export function EnhancedCFA({ datasets, selectedDataset, onDatasetChange }: Enha
               }
             ])
           ),
+          estimator: cfaResults.estimator,
+          thresholds: cfaResults.thresholds,
           // Real modification indices from the estimator
           modificationIndices: advancedOptions.modificationIndices
             ? cfaResults.modificationIndices.slice(0, 15)
@@ -605,7 +612,9 @@ export function EnhancedCFA({ datasets, selectedDataset, onDatasetChange }: Enha
               rmsea: results.fitIndices?.rmsea,
               srmr: results.fitIndices?.srmr,
             }}
-            estimationLabel="Unweighted Least Squares (ULS)"
+            estimationLabel={results.estimator === 'DWLS'
+              ? 'Diagonally Weighted Least Squares (DWLS), robust'
+              : 'Unweighted Least Squares (ULS)'}
           />
         </div>
 
@@ -949,12 +958,14 @@ export function EnhancedCFA({ datasets, selectedDataset, onDatasetChange }: Enha
                     onChange={(e) => setAdvancedOptions({ ...advancedOptions, estimator: e.target.value as any })}
                     className="w-full px-3 py-2 border border-gray-300 rounded"
                   >
-                    <option value="ML">Maximum Likelihood (ML)</option>
-                    <option value="WLS">Weighted Least Squares (WLS)</option>
-                    <option value="DWLS">Diagonally Weighted Least Squares (DWLS)</option>
-                    <option value="ULS">Unweighted Least Squares (ULS)</option>
-                    <option value="GLS">Generalized Least Squares (GLS)</option>
+                    <option value="auto">Auto — DWLS for ordinal, ULS otherwise (Recommended)</option>
+                    <option value="DWLS">DWLS — polychoric, ordinal (WLSMV-style robust χ²)</option>
+                    <option value="ULS">ULS — Pearson, continuous</option>
                   </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Ordinal/Likert items use polychoric correlations with diagonally
+                    weighted least squares and a mean-adjusted robust test statistic.
+                  </p>
                 </div>
 
                 <div>

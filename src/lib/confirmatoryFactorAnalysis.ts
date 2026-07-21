@@ -12,6 +12,7 @@
 
 import { MatrixOps, Statistics, CorrelationMatrix } from './psychometricStats';
 import { normalCDF, chiSqPValue, ncpRmseaBound } from './statDistributions';
+import { polychoricMatrix, looksOrdinal } from './polychoric';
 
 // ─── Public interfaces ────────────────────────────────────────────────────────
 
@@ -40,10 +41,19 @@ export interface FitIndices {
   bic: number;
   nfi: number;
   nnfi: number;
+  scaled?: boolean;         // true when the mean-adjusted (WLSM) statistic was used
+  scalingFactor?: number;   // c = tr(UΓ)/df
+}
+
+export interface CFAOptions {
+  /** 'ULS' (Pearson) · 'DWLS' (polychoric, ordinal) · 'auto' (detect ordinal). */
+  estimator?: 'ULS' | 'DWLS' | 'auto';
 }
 
 export interface CFAResults {
   fitIndices: FitIndices;
+  estimator?: 'ULS' | 'DWLS';
+  thresholds?: Array<{ variable: string; values: number[] }>;
   factorLoadings: Array<{
     latent: string;
     indicator: string;
@@ -290,7 +300,8 @@ export class CFAEstimator {
   static estimate(
     data: number[][],
     model: CFAModel,
-    variables: string[]
+    variables: string[],
+    options: CFAOptions = {}
   ): CFAResults {
     const warnings: string[] = [];
     const n = data.length;
@@ -333,11 +344,60 @@ export class CFAEstimator {
 
     // Sub-matrix of S for used indicators
     const pU = usedIdx.length;
-    const Su: number[][] = Array.from({ length: pU }, (_, i) =>
+    let Su: number[][] = Array.from({ length: pU }, (_, i) =>
       Array.from({ length: pU }, (_, j) => S[usedIdx[i]][usedIdx[j]])
     );
     const indFactorU = usedIdx.map(i => indicatorFactor[i]);
     const varNamesU = usedIdx.map(i => variables[i]);
+
+    // ── Estimator selection: DWLS (polychoric) for ordinal data ──────────────
+    // 'auto' switches to DWLS when every used indicator looks ordinal.
+    const allOrdinal = usedIdx.every(vi => looksOrdinal(data.map(r => r[vi])));
+    const useDWLS = options.estimator === 'DWLS' || (options.estimator === 'auto' && allOrdinal);
+
+    // Lower-triangle pair order (i>j) shared by the weight vector, Γ and Δ.
+    const lowerPairs: Array<[number, number]> = [];
+    for (let i = 0; i < pU; i++) for (let j = 0; j < i; j++) lowerPairs.push([i, j]);
+    const q = lowerPairs.length;
+
+    // DWLS weight per pair (w = 1/asymVar); ULS uses w = 1. Γ holds the full
+    // asymptotic covariance of the polychoric correlations (for the WLSM scaling).
+    let pairWeight = new Array(q).fill(1);
+    let Gamma: number[][] | null = null;
+    let dwlsThresholds: number[][] = [];
+    if (useDWLS) {
+      const poly = polychoricMatrix(data, usedIdx, true);
+      Su = poly.R;
+      dwlsThresholds = poly.thresholds;
+      // poly.pairIndex is ordered i>j identically to lowerPairs
+      pairWeight = poly.asymVar.map(v => 1 / Math.max(v, 1e-8));
+      Gamma = poly.Gamma ?? null;
+    }
+
+    // Weighted discrepancy: F = Σ_{i>j} w_ij (S_ij − Σ_ij)². ULS is the w=1 case
+    // (equivalent to the previous ulsDiscrepancy on a unit-diagonal matrix).
+    const discrep = (A: number[][], B: number[][]): number => {
+      let f = 0;
+      for (let k = 0; k < q; k++) {
+        const [i, j] = lowerPairs[k];
+        const d = A[i][j] - B[i][j];
+        f += pairWeight[k] * d * d;
+      }
+      return f;
+    };
+    const localGradient = (lam: number[], phi: number[]): { dL: number[]; dPhi: number[] } => {
+      const hh = 1e-5;
+      const f0 = discrep(Su, buildImplied(lam, phi, factorNames, indFactorU));
+      const dL = lam.map((_, k) => {
+        const lp = [...lam]; lp[k] += hh;
+        return (discrep(Su, buildImplied(lp, phi, factorNames, indFactorU)) - f0) / hh;
+      });
+      const dPhi = phi.map((_, k) => {
+        const pp = [...phi]; pp[k] += hh;
+        return (discrep(Su, buildImplied(lam, pp, factorNames, indFactorU)) - f0) / hh;
+      });
+      return { dL, dPhi };
+    };
 
     // ── Starting values via first eigenvector per factor ───────────────────
     // For each factor, extract the sub-correlation matrix and use first eigenvector
@@ -380,17 +440,17 @@ export class CFAEstimator {
     let stepSize = 0.05;
 
     for (let iter = 0; iter < MAX_ITER; iter++) {
-      const { dL, dPhi } = gradient(Su, lambdas, phis, factorNames, indFactorU);
+      const { dL, dPhi } = localGradient(lambdas, phis);
       const gradNorm2 = dL.reduce((s, g) => s + g * g, 0) + dPhi.reduce((s, g) => s + g * g, 0);
       if (gradNorm2 < TOL) break;
 
       // Armijo line search
-      const f0 = ulsDiscrepancy(Su, buildImplied(lambdas, phis, factorNames, indFactorU));
+      const f0 = discrep(Su, buildImplied(lambdas, phis, factorNames, indFactorU));
       let step = stepSize;
       for (let ls = 0; ls < 20; ls++) {
         const lNext = lambdas.map((v, k) => Math.max(0.01, Math.min(0.999, v - step * dL[k])));
         const pNext = phis.map((v, k) => Math.max(-0.99, Math.min(0.99, v - step * dPhi[k])));
-        const fNext = ulsDiscrepancy(Su, buildImplied(lNext, pNext, factorNames, indFactorU));
+        const fNext = discrep(Su, buildImplied(lNext, pNext, factorNames, indFactorU));
         if (fNext < f0 - 1e-4 * step * gradNorm2) {
           lambdas = lNext; phis = pNext; stepSize = step * 1.1; break;
         }
@@ -415,13 +475,55 @@ export class CFAEstimator {
         const mm = [...theta]; mm[i] -= h; mm[j] -= h;
         const fL = (t: number[]) => {
           const lam = t.slice(0, pU), phi = t.slice(pU);
-          return ulsDiscrepancy(Su, buildImplied(lam, phi, factorNames, indFactorU));
+          return discrep(Su, buildImplied(lam, phi, factorNames, indFactorU));
         };
         H[i][j] = H[j][i] = (fL(pp) - fL(pm) - fL(mp) + fL(mm)) / (4 * h * h);
       }
     }
     const Hinv = (() => { try { return inverse(H); } catch { return Array.from({ length: nParams }, (_, i) => Array.from({ length: nParams }, (_, j) => i === j ? 0.01 : 0)); } })();
-    const seTheta = Hinv.map((row, i) => Math.sqrt(Math.max(0, row[i]) / Math.max(n - 1, 1)));
+
+    // Jacobian Δ = ∂σ/∂θ (q × nParams) of the lower-triangle implied correlations,
+    // needed for DWLS robust SEs and the WLSM mean-adjusted statistic.
+    const jacobian = (): number[][] => {
+      const hh = 1e-5;
+      const base = buildImplied(lambdas, phis, factorNames, indFactorU);
+      const D: number[][] = Array.from({ length: q }, () => new Array(nParams).fill(0));
+      for (let t = 0; t < nParams; t++) {
+        const lam = [...lambdas], phi = [...phis];
+        if (t < pU) lam[t] += hh; else phi[t - pU] += hh;
+        const pert = buildImplied(lam, phi, factorNames, indFactorU);
+        for (let k = 0; k < q; k++) {
+          const [i, j] = lowerPairs[k];
+          D[k][t] = (pert[i][j] - base[i][j]) / hh;
+        }
+      }
+      return D;
+    };
+
+    let seTheta: number[];
+    if (useDWLS && Gamma) {
+      // Robust (sandwich) SEs: acov(θ̂) = (4/N)·Hinv·(Δ'VΓVΔ)·Hinv, where the
+      // fit Hessian H ≈ 2Δ'VΔ, V = diag(pairWeight), Γ = acov(√N·r̂).
+      const D = jacobian();
+      const VG = Gamma.map((row) => row); // Γ
+      // M = Δ'VΓVΔ  (nParams × nParams)
+      const Vd: number[][] = D.map((row, k) => row.map(v => v * pairWeight[k])); // V·Δ (q×t)
+      // (VΓ V Δ) then Δ'· : compute G2 = Γ·(VΔ) → q×t, then (VΔ)'·G2 → t×t
+      const GVd: number[][] = Array.from({ length: q }, (_, a) => {
+        const out = new Array(nParams).fill(0);
+        for (let b = 0; b < q; b++) { const g = VG[a][b]; if (g !== 0) for (let t = 0; t < nParams; t++) out[t] += g * Vd[b][t]; }
+        return out;
+      });
+      const M: number[][] = Array.from({ length: nParams }, () => new Array(nParams).fill(0));
+      for (let a = 0; a < q; a++)
+        for (let s = 0; s < nParams; s++) { const vs = Vd[a][s]; if (vs !== 0) for (let t = 0; t < nParams; t++) M[s][t] += vs * GVd[a][t]; }
+      // acov = (4/N)·Hinv·M·Hinv
+      const HM = MatrixOps.multiply(Hinv, M);
+      const acov = MatrixOps.multiply(HM, Hinv);
+      seTheta = acov.map((row, i) => Math.sqrt(Math.max(0, 4 * row[i] / Math.max(n, 1))));
+    } else {
+      seTheta = Hinv.map((row, i) => Math.sqrt(Math.max(0, row[i]) / Math.max(n - 1, 1)));
+    }
 
     // ── Standardised loadings ─────────────────────────────────────────────────
     // In this parameterisation loadings are already in the correlation-scale metric,
@@ -480,22 +582,80 @@ export class CFAEstimator {
     const nFreeParams = pU + nPhi;
     const dfModel = Math.max(1, (pU * (pU - 1)) / 2 - nFreeParams);
 
-    // ULS chi-square: F_ULS = 0.5 * tr((S - Sigma)²)  →  χ² = (n-1) * F_ULS
-    const F_uls = ulsDiscrepancy(Su, SigmaU);
-    const chisq = (n - 1) * F_uls;
+    // ── Test statistic ────────────────────────────────────────────────────────
+    // ULS:  χ² = (n−1)·F_ULS.
+    // DWLS: the mean-adjusted (WLSM) statistic. T = Σ_{i>j}(S−Σ)²/asymVar; it is
+    // scaled by c = tr(UΓ)/df, U = W⁻¹ − W⁻¹Δ(Δ'W⁻¹Δ)⁻¹Δ'W⁻¹, W = diag(Γ), so
+    // T/c is asymptotically χ²(df). The baseline model is scaled the same way.
+    const dfNull = pU * (pU - 1) / 2;
+    let chisq: number, chisqNull: number, scaled = false, scalingFactor = 1;
 
-    // SRMR
+    if (useDWLS && Gamma) {
+      const D = jacobian();                              // q × nParams
+      // Scaling uses the O(1) weight W⁻¹ = diag(1/Γ_kk); the estimation/statistic
+      // weight pairWeight = 1/asymVar = N·(1/Γ_kk) carries the N in T = N·F̂.
+      const Winv = Gamma.map((row, k) => 1 / Math.max(row[k], 1e-12));
+      // A = Δ'W⁻¹Δ
+      const A: number[][] = Array.from({ length: nParams }, () => new Array(nParams).fill(0));
+      for (let k = 0; k < q; k++) {
+        const w = Winv[k];
+        for (let s = 0; s < nParams; s++) { const ds = D[k][s] * w; if (ds !== 0) for (let t = 0; t < nParams; t++) A[s][t] += ds * D[k][t]; }
+      }
+      const Ainv = (() => { try { return inverse(A); } catch { return null; } })();
+      // U = W⁻¹ − W⁻¹Δ Ainv Δ'W⁻¹  (q × q); trace(UΓ) computed without forming UΓ fully
+      const traceUGamma = (): number => {
+        // tr(W⁻¹Γ)
+        let t1 = 0;
+        for (let k = 0; k < q; k++) t1 += Winv[k] * Gamma![k][k];
+        if (!Ainv) return t1;
+        // tr(W⁻¹Δ Ainv Δ'W⁻¹ Γ) = tr(Ainv · (Δ'W⁻¹ Γ W⁻¹ Δ))
+        // B = Δ'W⁻¹ (nParams × q); then Bᵀ pieces
+        const B: number[][] = Array.from({ length: nParams }, (_, s) => D.map((row, k) => row[s] * Winv[k])); // nParams×q
+        // C = Δ'W⁻¹ Γ W⁻¹ Δ  (nParams × nParams): C = B Γ Bᵀ but with W⁻¹ already in B (B=Δ'W⁻¹)
+        // note Δ'W⁻¹ Γ W⁻¹ Δ = B Γ Bᵀ
+        const GB: number[][] = Array.from({ length: q }, (_, a) => {
+          const out = new Array(nParams).fill(0);
+          for (let b = 0; b < q; b++) { const g = Gamma![a][b]; if (g !== 0) for (let s = 0; s < nParams; s++) out[s] += g * B[s][b]; }
+          return out;
+        });
+        const C: number[][] = Array.from({ length: nParams }, () => new Array(nParams).fill(0));
+        for (let s = 0; s < nParams; s++) for (let a = 0; a < q; a++) { const bsa = B[s][a]; if (bsa !== 0) for (let t = 0; t < nParams; t++) C[s][t] += bsa * GB[a][t]; }
+        // tr(Ainv C)
+        let t2 = 0;
+        for (let s = 0; s < nParams; s++) for (let t = 0; t < nParams; t++) t2 += Ainv[s][t] * C[t][s];
+        return t1 - t2;
+      };
+      const trUG = traceUGamma();
+      scalingFactor = trUG / Math.max(1, dfModel);
+      const T = discrep(Su, SigmaU);                     // = Σ (S−Σ)²/asymVar
+      chisq = scalingFactor > 1e-8 ? T / scalingFactor : T;
+
+      // Baseline (independence) model: σ = I → no free correlation params, U = W⁻¹.
+      // T on the same N·F̂ scale as the model statistic (pairWeight); the scaling
+      // uses the O(1) weight Winv so cNull ≈ 1.
+      let Tnull = 0, trUGnull = 0;
+      for (let k = 0; k < q; k++) {
+        const [i, j] = lowerPairs[k];
+        Tnull += pairWeight[k] * Su[i][j] * Su[i][j];
+        trUGnull += Winv[k] * Gamma[k][k];
+      }
+      const cNull = trUGnull / Math.max(1, dfNull);
+      chisqNull = cNull > 1e-8 ? Tnull / cNull : Tnull;
+      scaled = true;
+    } else {
+      const F_uls = ulsDiscrepancy(Su, SigmaU);
+      chisq = (n - 1) * F_uls;
+      chisqNull = 0;
+      for (let i = 0; i < pU; i++) for (let j = 0; j < i; j++)
+        chisqNull += (n - 1) * Su[i][j] ** 2;
+    }
+
+    // SRMR (unstandardised-residual RMS on the correlation matrix)
     let srmrSum = 0, srmrCnt = 0;
     for (let i = 0; i < pU; i++) for (let j = 0; j < i; j++) {
       srmrSum += (Su[i][j] - SigmaU[i][j]) ** 2; srmrCnt++;
     }
     const srmr = srmrCnt > 0 ? Math.sqrt(srmrSum / srmrCnt) : 0;
-
-    // Null model chi-square (all inter-variable correlations = 0)
-    let chisqNull = 0;
-    for (let i = 0; i < pU; i++) for (let j = 0; j < i; j++)
-      chisqNull += (n - 1) * Su[i][j] ** 2;
-    const dfNull = pU * (pU - 1) / 2;
 
     const ncp     = Math.max(0, chisq - dfModel);
     const ncpNull = Math.max(0, chisqNull - dfNull);
@@ -547,6 +707,7 @@ export class CFAEstimator {
       cfi, tli, nfi, nnfi,
       rmsea, rmsea_ci_lower: rmseaLo, rmsea_ci_upper: rmseaHi,
       srmr, gfi, agfi, aic, bic,
+      scaled, scalingFactor,
     };
 
     // ── Modification indices ──────────────────────────────────────────────────
@@ -632,6 +793,8 @@ export class CFAEstimator {
 
     return {
       fitIndices,
+      estimator: useDWLS ? 'DWLS' : 'ULS',
+      thresholds: useDWLS ? varNamesU.map((name, k) => ({ variable: name, values: dwlsThresholds[k] ?? [] })) : undefined,
       factorLoadings,
       factorCorrelations,
       residualVariances,
