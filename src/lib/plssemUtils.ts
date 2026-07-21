@@ -405,7 +405,18 @@ export function runPLSAlgorithm(
       }
     }
 
-    latentScores[construct.id] = scores;
+    // Standardize final scores to unit variance (SmartPLS convention) and
+    // rescale the outer weights to match, so score = X_std · w exactly.
+    // Without this the regression coefficients between constructs are not
+    // standardized path coefficients.
+    const mean = scores.reduce((a, b) => a + b, 0) / n;
+    const sd = Math.sqrt(scores.reduce((s, v) => s + (v - mean) ** 2, 0) / Math.max(1, n - 1));
+    if (sd > 1e-12) {
+      latentScores[construct.id] = scores.map(s => (s - mean) / sd);
+      outerWeights[construct.id] = outerWeights[construct.id].map(w => w / sd);
+    } else {
+      latentScores[construct.id] = scores.map(() => 0);
+    }
   });
 
   return {
@@ -504,34 +515,45 @@ export function calculateCompositeReliability(loadings: number[]): number {
   return (sumLoadings * sumLoadings) / (sumLoadings * sumLoadings + sumErrors);
 }
 
-export function calculateRhoA(loadings: number[], correlations: number[][]): number {
-  // Dijkstra-Henseler's ρ_A (Dijkstra & Henseler 2015)
-  // ρ_A = (Σλᵢ)² · r̄ / [(Σλᵢ)² · r̄ + Σ(1-λᵢ²)]
-  // where r̄ = average off-diagonal inter-indicator correlation
+/**
+ * Dijkstra–Henseler's ρ_A (Dijkstra & Henseler 2015, Eq. 15) — exact formula:
+ *
+ *   ρ_A = (w'w)² · [w'(S − diag(S))w] / [w'(ww' − diag(ww'))w]
+ *
+ * where w = outer weights of the construct and S = correlation matrix of its
+ * indicators. Falls back to weights ∝ loadings when weights are not supplied.
+ */
+export function calculateRhoA(loadings: number[], correlations: number[][], weights?: number[]): number {
   const k = loadings.length;
   if (k < 2) return 0;
 
-  // Use unique pairs (i < j) only — symmetric matrix, avoid double-counting
-  let sumOffDiagCorr = 0;
-  let offDiagCount = 0;
-  for (let i = 0; i < k; i++) {
-    for (let j = i + 1; j < k; j++) {
-      if (correlations[i] && correlations[i][j] !== undefined) {
-        sumOffDiagCorr += correlations[i][j];
-        offDiagCount++;
-      }
-    }
-  }
-  const rBar = offDiagCount > 0 ? sumOffDiagCorr / offDiagCount : 0;
+  // The formula requires the weights that give the composite UNIT VARIANCE
+  // (w'Sw = 1) — the scale ρ_A is not invariant to. Rescale to enforce it.
+  let w = weights && weights.length === k ? [...weights] : [...loadings];
+  let wSw = 0;
+  for (let i = 0; i < k; i++)
+    for (let j = 0; j < k; j++)
+      wSw += w[i] * (i === j ? 1 : (correlations[i]?.[j] ?? 0)) * w[j];
+  if (wSw <= 1e-12) return 0;
+  const scale = 1 / Math.sqrt(wSw);
+  w = w.map(v => v * scale);
 
-  const sumLoadings = loadings.reduce((a, b) => a + Math.abs(b), 0);
-  const sumLoadingsSq = sumLoadings * sumLoadings;
-  const sumErrors = loadings.reduce((a, b) => a + (1 - b * b), 0);
+  // w'(S − diag(S))w  — off-diagonal part of the indicator correlation matrix
+  let quadS = 0;
+  for (let i = 0; i < k; i++)
+    for (let j = 0; j < k; j++)
+      if (i !== j) quadS += w[i] * (correlations[i]?.[j] ?? 0) * w[j];
 
-  const numerator = sumLoadingsSq * rBar;
-  const denominator = sumLoadingsSq * rBar + sumErrors;
+  // w'(ww' − diag(ww'))w — off-diagonal part of ww'
+  let quadW = 0;
+  for (let i = 0; i < k; i++)
+    for (let j = 0; j < k; j++)
+      if (i !== j) quadW += w[i] * (w[i] * w[j]) * w[j];
 
-  return denominator > 0 ? Math.max(0, Math.min(1, numerator / denominator)) : 0;
+  if (Math.abs(quadW) < 1e-12) return 0;
+  const ww = w.reduce((s, v) => s + v * v, 0);
+  const rhoA = (ww * ww) * quadS / quadW;
+  return Math.max(0, Math.min(1, rhoA));
 }
 
 export function calculateAVE(loadings: number[]): number {
@@ -1008,14 +1030,20 @@ export function blindfolding(
         const trainingEndogenous = plsResults.latentScores[construct.id];
         if (!trainingEndogenous) continue;
 
-        const pathCoeffs = predictors.map(predId => {
-          const predScores = plsResults.latentScores[predId];
-          if (!predScores) return 0;
-          return pearsonCorrelation(predScores, trainingEndogenous);
-        });
+        // Joint OLS on training latent scores (matches the structural estimator)
+        let pathCoeffs: number[];
+        try {
+          const Xp: number[][] = trainingEndogenous.map((_, i) =>
+            predictors.map(pid => plsResults.latentScores[pid]?.[i] ?? 0));
+          pathCoeffs = multipleRegression(trainingEndogenous, Xp);
+        } catch {
+          pathCoeffs = predictors.map(predId => {
+            const predScores = plsResults.latentScores[predId];
+            return predScores ? pearsonCorrelation(predScores, trainingEndogenous) : 0;
+          });
+        }
 
         // Get standardization parameters from training data
-        const trainStd = standardize(trainingData);
         const colMeans: number[] = [];
         const colSds: number[] = [];
         const totalCols = trainingData[0]?.length || 0;
@@ -1040,15 +1068,13 @@ export function blindfolding(
             .filter(idx => idx !== -1);
           if (indIndices.length === 0) return;
 
+          // Scores are plain X_std · w — the training weights are already scaled
+          // so the training scores have unit variance, so no extra normalisation
           const weights = plsResults.outerWeights[construct.id] || [];
           let actualScore = 0;
-          let weightSum = 0;
           indIndices.forEach((idx, k) => {
-            const w = weights[k] ?? (1 / indIndices.length);
-            actualScore += w * stdObs(obs, idx);
-            weightSum += Math.abs(w);
+            actualScore += (weights[k] ?? (1 / indIndices.length)) * stdObs(obs, idx);
           });
-          if (weightSum > 0) actualScore /= weightSum;
 
           // Predicted: path coefficient × predictor outer weight projection
           let predictedScore = 0;
@@ -1061,13 +1087,9 @@ export function blindfolding(
             if (predIndices.length === 0) return;
             const predWeights = plsResults.outerWeights[predId] || [];
             let predScore = 0;
-            let predWeightSum = 0;
             predIndices.forEach((idx, k) => {
-              const w = predWeights[k] ?? (1 / predIndices.length);
-              predScore += w * stdObs(obs, idx);
-              predWeightSum += Math.abs(w);
+              predScore += (predWeights[k] ?? (1 / predIndices.length)) * stdObs(obs, idx);
             });
-            if (predWeightSum > 0) predScore /= predWeightSum;
             predictedScore += pathCoeffs[pIdx] * predScore;
           });
 
@@ -1151,13 +1173,21 @@ export function plsPredict(
         .filter(p => p.to === construct.id)
         .map(p => p.from);
 
-      // Estimate path coefficients from training latent scores
+      // Estimate path coefficients from training latent scores via joint OLS
       const trainingEndogenous = plsResults.latentScores[construct.id];
-      const pathCoeffs: number[] = predictors.map(predId => {
-        const predScores = plsResults.latentScores[predId];
-        if (!predScores || !trainingEndogenous) return 0;
-        return pearsonCorrelation(predScores, trainingEndogenous);
-      });
+      let pathCoeffs: number[];
+      try {
+        if (!trainingEndogenous) throw new Error('no scores');
+        const Xp: number[][] = trainingEndogenous.map((_, i) =>
+          predictors.map(pid => plsResults.latentScores[pid]?.[i] ?? 0));
+        pathCoeffs = multipleRegression(trainingEndogenous, Xp);
+      } catch {
+        pathCoeffs = predictors.map(predId => {
+          const predScores = plsResults.latentScores[predId];
+          if (!predScores || !trainingEndogenous) return 0;
+          return pearsonCorrelation(predScores, trainingEndogenous);
+        });
+      }
 
       // Compute standardization parameters from training data
       const totalCols = trainData[0]?.length || 0;
@@ -1182,15 +1212,13 @@ export function plsPredict(
           .filter(idx => idx !== -1);
         if (indIndices.length === 0) return;
 
+        // Scores are plain X_std · w (training weights already give unit-variance
+        // training scores, so no extra normalisation)
         const weights = plsResults.outerWeights[construct.id] || [];
         let actualScore = 0;
-        let weightSum = 0;
         indIndices.forEach((idx, k) => {
-          const w = weights[k] ?? (1 / indIndices.length);
-          actualScore += w * stdObs(testRow, idx);
-          weightSum += Math.abs(w);
+          actualScore += (weights[k] ?? (1 / indIndices.length)) * stdObs(testRow, idx);
         });
-        if (weightSum > 0) actualScore /= weightSum;
 
         // Predicted: path coefficients × predictor outer weight projections
         let predictedScore = 0;
@@ -1203,13 +1231,9 @@ export function plsPredict(
           if (predIndices.length === 0) return;
           const predWeights = plsResults.outerWeights[predId] || [];
           let predScore = 0;
-          let predWeightSum = 0;
           predIndices.forEach((idx, k) => {
-            const w = predWeights[k] ?? (1 / predIndices.length);
-            predScore += w * stdObs(testRow, idx);
-            predWeightSum += Math.abs(w);
+            predScore += (predWeights[k] ?? (1 / predIndices.length)) * stdObs(testRow, idx);
           });
-          if (predWeightSum > 0) predScore /= predWeightSum;
           predictedScore += pathCoeffs[pIdx] * predScore;
         });
 
@@ -1281,8 +1305,10 @@ function calculateImpliedCorrelationMatrix(
   latentScores: { [construct: string]: number[] },
   outerLoadings: { [construct: string]: number[] },
   pathCoefficients: { [pathKey: string]: number },
-  columns?: string[]
+  columns?: string[],
+  observedCorrForImplied?: number[][]
 ): number[][] {
+  const impliedPhi = buildImpliedPhi(model, latentScores, pathCoefficients);
   const nVars = data[0].length;
   const impliedCorr: number[][] = Array(nVars).fill(0).map(() => Array(nVars).fill(0));
 
@@ -1318,34 +1344,79 @@ function calculateImpliedCorrelationMatrix(
 
       if (!varI || !varJ) continue;
 
+      // Composite-model convention (Henseler et al. 2014, SmartPLS): within-
+      // block correlations are UNCONSTRAINED by the composite model, so the
+      // implied value equals the observed one (residual 0). Only cross-block
+      // correlations are model-implied: λᵢ · Φ(cᵢ,cⱼ) · λⱼ.
+      if (varI.constructId === varJ.constructId) {
+        impliedCorr[i][j] = impliedCorr[j][i] = observedCorrForImplied?.[i]?.[j] ?? 0;
+        continue;
+      }
+
       const loadingI = outerLoadings[varI.constructId]?.[varI.indIdx] || 0;
       const loadingJ = outerLoadings[varJ.constructId]?.[varJ.indIdx] || 0;
-
-      let constructCorr = 0;
-      if (varI.constructId === varJ.constructId) {
-        constructCorr = 1;
-      } else {
-        const pathKey1 = `${varI.constructId}->${varJ.constructId}`;
-        const pathKey2 = `${varJ.constructId}->${varI.constructId}`;
-
-        if (pathCoefficients[pathKey1]) {
-          constructCorr = pathCoefficients[pathKey1];
-        } else if (pathCoefficients[pathKey2]) {
-          constructCorr = pathCoefficients[pathKey2];
-        } else {
-          const latentI = latentScores[varI.constructId];
-          const latentJ = latentScores[varJ.constructId];
-          if (latentI && latentJ) {
-            constructCorr = pearsonCorrelation(latentI, latentJ);
-          }
-        }
-      }
+      const constructCorr = impliedPhi[varI.constructId]?.[varJ.constructId] ?? 0;
 
       impliedCorr[i][j] = impliedCorr[j][i] = loadingI * loadingJ * constructCorr;
     }
   }
 
   return impliedCorr;
+}
+
+/**
+ * Model-implied construct correlation matrix via path tracing (estimated
+ * structural model, not the saturated one): exogenous constructs keep their
+ * empirical latent-score correlations; each endogenous construct's correlation
+ * with an earlier construct is Σᵢ βᵢ·Φ(predᵢ, g), processed in causal order.
+ */
+function buildImpliedPhi(
+  model: PLSSEMModel,
+  latentScores: { [construct: string]: number[] },
+  pathCoefficients: { [pathKey: string]: number }
+): { [a: string]: { [b: string]: number } } {
+  const ids = model.constructs.map(c => c.id);
+  const endo = new Set(model.paths.map(p => p.to));
+  const Phi: { [a: string]: { [b: string]: number } } = {};
+  ids.forEach(a => { Phi[a] = {}; Phi[a][a] = 1; });
+
+  // Exogenous block: empirical latent correlations
+  const exo = ids.filter(id => !endo.has(id));
+  for (let a = 0; a < exo.length; a++)
+    for (let b = a + 1; b < exo.length; b++) {
+      const r = (latentScores[exo[a]] && latentScores[exo[b]])
+        ? pearsonCorrelation(latentScores[exo[a]], latentScores[exo[b]])
+        : 0;
+      Phi[exo[a]][exo[b]] = Phi[exo[b]][exo[a]] = r;
+    }
+
+  // Topological order over the structural graph (cycles appended at the end)
+  const inDeg = new Map<string, number>(ids.map(id => [id, 0]));
+  model.paths.forEach(p => inDeg.set(p.to, (inDeg.get(p.to) || 0) + 1));
+  const order: string[] = ids.filter(id => (inDeg.get(id) || 0) === 0);
+  const placed = new Set(order);
+  while (placed.size < ids.length) {
+    const next = ids.find(id => !placed.has(id) &&
+      model.paths.filter(p => p.to === id).every(p => placed.has(p.from)));
+    if (!next) { ids.forEach(id => { if (!placed.has(id)) { order.push(id); placed.add(id); } }); break; }
+    order.push(next); placed.add(next);
+  }
+
+  const done = new Set<string>();
+  order.forEach(id => {
+    if (!endo.has(id)) { done.add(id); return; }
+    const preds = model.paths.filter(p => p.to === id)
+      .map(p => ({ from: p.from, b: pathCoefficients[`${p.from}->${id}`] ?? 0 }));
+    done.forEach(g => {
+      if (g === id) return;
+      let s = 0;
+      preds.forEach(({ from, b }) => { s += b * (Phi[from]?.[g] ?? 0); });
+      Phi[id][g] = Phi[g][id] = Math.max(-0.995, Math.min(0.995, s));
+    });
+    done.add(id);
+  });
+
+  return Phi;
 }
 
 export function calculateGlobalFit(
@@ -1369,15 +1440,12 @@ export function calculateGlobalFit(
     }
   });
 
+  // Joint-OLS path coefficients (same estimator as the structural model —
+  // simple correlations are wrong when an endogenous construct has several
+  // predictors)
+  const estimated = calculatePathCoefficients(latentScores, model.paths);
   const pathCoefficients: { [pathKey: string]: number } = {};
-  model.paths.forEach(path => {
-    const fromScores = latentScores[path.from];
-    const toScores = latentScores[path.to];
-    if (fromScores && toScores) {
-      const key = `${path.from}->${path.to}`;
-      pathCoefficients[key] = pearsonCorrelation(fromScores, toScores);
-    }
-  });
+  estimated.forEach(p => { pathCoefficients[`${p.from}->${p.to}`] = p.coefficient ?? 0; });
 
   const impliedCorr = calculateImpliedCorrelationMatrix(
     data,
@@ -1385,7 +1453,8 @@ export function calculateGlobalFit(
     latentScores,
     outerLoadings,
     pathCoefficients,
-    columns
+    columns,
+    observedCorr
   );
 
   const srmr = calculateSRMR(observedCorr, impliedCorr);

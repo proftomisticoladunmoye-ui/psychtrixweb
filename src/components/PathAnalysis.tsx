@@ -19,6 +19,7 @@ import {
   Cpu
 } from 'lucide-react';
 import { rAnalysisClient } from '../lib/rAnalysisClient';
+import { normalCDF, chiSqPValue, ncpRmseaBound } from '../lib/statDistributions';
 import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON, exportChartAsImage, exportPathAnalysisResults } from '../lib/exportUtils';
 import { saveAnalysisHistory } from '../lib/analysisHistory';
@@ -677,9 +678,13 @@ export function PathAnalysis() {
 
   const matTrace = (M: number[][]): number => M.reduce((s, row, i) => s + row[i], 0);
 
-  // Build model-implied covariance Σ(θ) from path coefficients B and residual variances Ψ_diag
+  // Build model-implied covariance Σ(θ) from path coefficients B and residual
+  // covariance Ψ. Ψ is diagonal for endogenous variables; the exogenous block
+  // is free (AMOS/lavaan default) and fixed at its saturated ML solution — the
+  // observed covariances — passed in via exoCov entries [i, j, s_ij].
   const buildSigma = (
-    B: number[][], psiDiag: number[], p2: number
+    B: number[][], psiDiag: number[], p2: number,
+    exoCov: Array<[number, number, number]> = []
   ): number[][] | null => {
     // (I - B)
     const IminusB = Array.from({ length: p2 }, (_, i) =>
@@ -688,6 +693,7 @@ export function PathAnalysis() {
     const IminusBInv = matInv(IminusB);
     if (!IminusBInv) return null;
     const Psi = Array.from({ length: p2 }, (_, i) => Array.from({ length: p2 }, (_, j) => i === j ? psiDiag[i] : 0));
+    exoCov.forEach(([i, j, v]) => { Psi[i][j] = Psi[j][i] = v; });
     // Σ = (I-B)^{-1} · Ψ · (I-B)^{-T}
     const IminusBInvT = IminusBInv[0].map((_, j) => IminusBInv.map(row => row[j]));
     return matMul(matMul(IminusBInv, Psi), IminusBInvT);
@@ -738,6 +744,14 @@ export function PathAnalysis() {
       i: varIdx2[pt.to], j: varIdx2[pt.from]
     })).filter(({ i, j }) => i !== undefined && j !== undefined);
 
+    // Exogenous covariances are free parameters (AMOS/lavaan default). Their ML
+    // solution is the observed covariance, so fix them there and count them in df.
+    const exoIdxList = varNames.map((v, i) => endoSet2.has(v) ? -1 : i).filter(i => i >= 0);
+    const exoCov: Array<[number, number, number]> = [];
+    for (let a = 1; a < exoIdxList.length; a++)
+      for (let b = 0; b < a; b++)
+        exoCov.push([exoIdxList[a], exoIdxList[b], S[exoIdxList[a]][exoIdxList[b]]]);
+
     // Start with zero paths and identity Psi (will converge from OLS-seeded values below)
     const B0: number[][] = Array.from({ length: p2 }, () => Array(p2).fill(0));
     const psi0: number[] = Array(p2).fill(1);
@@ -783,7 +797,7 @@ export function PathAnalysis() {
 
     const objective = (theta: number[]): number => {
       const { B, psi } = unpack(theta);
-      const Sigma = buildSigma(B, psi, p2);
+      const Sigma = buildSigma(B, psi, p2, exoCov);
       if (!Sigma) return 1e10;
       return fML(S, Sigma, p2, logDetS);
     };
@@ -831,13 +845,14 @@ export function PathAnalysis() {
     }
 
     const { B: Bopt, psi: psiOpt } = unpack(theta);
-    const SigmaOpt = buildSigma(Bopt, psiOpt, p2);
+    const SigmaOpt = buildSigma(Bopt, psiOpt, p2, exoCov);
     if (!SigmaOpt) return null;
     const fmlVal = Math.max(0, objective(theta));
 
     // χ² = (n-1) · F_ML
     const chisqML = (n2 - 1) * fmlVal;
-    const nFreeML = nPaths + p2; // path coefficients + residual variances
+    // Free parameters: paths + residual variances + exogenous covariances
+    const nFreeML = nPaths + p2 + exoCov.length;
     const dfML = Math.max(1, (p2 * (p2 + 1)) / 2 - nFreeML);
 
     // Numerical Hessian for SEs (observed information matrix)
@@ -861,20 +876,14 @@ export function PathAnalysis() {
 
     const H = hessian(theta);
     const Hinv = matInv(H);
-    // SE = sqrt(diag(H^{-1}) / (n-1))
+    // Asymptotic covariance of θ̂ for ML: acov = (2/(n-1)) · H⁻¹ where H is the
+    // Hessian of F_ML (the information matrix is ((n-1)/2)·H). SE = sqrt(diag).
     const seTheta = Hinv
-      ? theta.map((_, k) => Math.sqrt(Math.max(0, Hinv[k][k]) / Math.max(1, n2 - 1)))
+      ? theta.map((_, k) => Math.sqrt(Math.max(0, 2 * Hinv[k][k]) / Math.max(1, n2 - 1)))
       : theta.map(() => 0);
 
-    // Two-tailed p-values (large sample: normal approx)
-    const normalPVal = (z: number): number => {
-      const absZ = Math.abs(z);
-      const a = 0.2316419, b1n = 0.319382, b2n = -0.356564, b3n = 1.781478, b4n = -1.821256, b5n = 1.330274;
-      const t2 = 1 / (1 + a * absZ);
-      const phi = Math.exp(-absZ * absZ / 2) / Math.sqrt(2 * Math.PI);
-      const cdf = 1 - phi * t2 * (b1n + t2 * (b2n + t2 * (b3n + t2 * (b4n + t2 * b5n))));
-      return Math.min(1, 2 * (1 - cdf));
-    };
+    // Two-tailed p-values (large sample: exact normal CDF from statDistributions)
+    const normalPVal = (z: number): number => Math.min(1, 2 * (1 - normalCDF(Math.abs(z))));
 
     // Standardize: beta = b * SD(pred) / SD(outcome) from S (correlation = 1 on diagonal if standardized)
     const pathCoefficients = pathIndices.map(({ i, j }, k) => {
@@ -898,13 +907,24 @@ export function PathAnalysis() {
       rSquaredML[endo] = varY > 0 ? Math.max(0, Math.min(1, 1 - residVar / varY)) : 0;
     });
 
-    // Fit indices
-    const chisqP = incompleteBetaReg(dfML / (dfML + chisqML), dfML / 2, 0.5);
+    // Fit indices — χ² p-value from the chi-square survival function, null-model
+    // χ² from the exact independence-model discrepancy F_null = −log|R|, and the
+    // RMSEA CI from the non-central χ² bisection shared with the CFA/SEM engines.
+    const chisqP = chiSqPValue(chisqML, dfML);
     const rmsea = chisqML > dfML ? Math.sqrt((chisqML / dfML - 1) / Math.max(1, n2 - 1)) : 0;
-    const rmseaLo = Math.max(0, rmsea - 1.96 * Math.sqrt(1 / (2 * Math.max(1, n2 - 1) * dfML)));
-    const rmseaHi = rmsea + 1.96 * Math.sqrt(1 / (2 * Math.max(1, n2 - 1) * dfML));
+    const rmseaLo = dfML > 0 && n2 > 1
+      ? Math.sqrt(ncpRmseaBound(chisqML, dfML, 0.95) / (dfML * (n2 - 1)))
+      : 0;
+    const rmseaHi = dfML > 0 && n2 > 1
+      ? Math.sqrt(ncpRmseaBound(chisqML, dfML, 0.05) / (dfML * (n2 - 1)))
+      : 0;
     const dfNull = p2 * (p2 - 1) / 2;
-    const chisqNull = (n2 - 1) * (p2 - 1); // null model F_ML approximation
+    // Independence model: Σ_null = diag(S) → F_null = log|diag(S)| − log|S| = −log|R|
+    const Rcorr = Array.from({ length: p2 }, (_, i) =>
+      Array.from({ length: p2 }, (_, j) =>
+        S[i][j] / Math.sqrt(Math.max(1e-12, S[i][i] * S[j][j]))));
+    const detR = matDet(Rcorr);
+    const chisqNull = Math.max(dfNull + 1, (n2 - 1) * (detR > 0 ? -Math.log(detR) : dfNull + 1));
     const cfi = Math.max(0, Math.min(1, 1 - Math.max(0, chisqML - dfML) / Math.max(0.001, chisqNull - dfNull)));
     const tli = dfML > 0 ? Math.max(0, Math.min(1.2, (chisqNull / dfNull - chisqML / dfML) / (chisqNull / dfNull - 1))) : 0;
 
@@ -935,24 +955,30 @@ export function PathAnalysis() {
     const gfi = ssObsML > 0 ? Math.max(0, Math.min(1, 1 - ssResML / ssObsML)) : 1;
     const agfi = dfML > 0 ? Math.max(0, 1 - (p2 * (p2 + 1) / 2 / dfML) * (1 - gfi)) : gfi;
 
-    // Modification indices: for each fixed (zero) path, MI ≈ (n-1)·(gradient²/hessian_diag)
-    // We compute MI for all zero off-diagonal paths not in the model
+    // Modification indices — univariate score (LM) test for each fixed-to-zero
+    // path. With g = ∂F/∂θ and h = ∂²F/∂θ² at θ = 0, the quadratic drop in F
+    // from freeing the parameter is g²/(2h), so MI = (n−1)·g²/(2h) ~ χ²(1) and
+    // the expected parameter change is EPC = −g/h.
     const modificationIndices: Array<{ from: string; to: string; mi: number; epc: number }> = [];
     for (let i = 0; i < p2; i++) {
       for (let j = 0; j < p2; j++) {
         if (i === j) continue;
         const alreadyFree = pathIndices.some(pi => pi.i === i && pi.j === j);
         if (alreadyFree) continue;
-        // Gradient w.r.t. a new path from j to i
-        const h = 1e-5;
-        const Btest = Bopt.map(r => [...r]);
-        Btest[i][j] = h;
-        const SigmaTest = buildSigma(Btest, psiOpt, p2);
-        if (!SigmaTest) continue;
-        const fTest = fML(S, SigmaTest, p2, logDetS);
-        const gij = (fTest - fmlVal) / h; // one-sided gradient
-        const mi = (n2 - 1) * gij * gij; // approximate MI
-        const epc = Math.abs(gij) > 1e-10 ? -gij / Math.max(1e-6, gij * gij) : 0;
+        const h = 1e-4;
+        const fAt = (v: number): number | null => {
+          const Btest = Bopt.map(r => [...r]);
+          Btest[i][j] = v;
+          const SigmaTest = buildSigma(Btest, psiOpt, p2, exoCov);
+          return SigmaTest ? fML(S, SigmaTest, p2, logDetS) : null;
+        };
+        const fPlus = fAt(h), fMinus = fAt(-h);
+        if (fPlus === null || fMinus === null) continue;
+        const gij = (fPlus - fMinus) / (2 * h);
+        const hij = (fPlus - 2 * fmlVal + fMinus) / (h * h);
+        if (hij <= 1e-10) continue;
+        const mi = (n2 - 1) * gij * gij / (2 * hij);
+        const epc = -gij / hij;
         if (mi > 3.84) modificationIndices.push({ from: varNames[j], to: varNames[i], mi, epc });
       }
     }
@@ -1173,9 +1199,11 @@ export function PathAnalysis() {
       // Exogenous variables: those with no incoming paths in the model
       const exoSet = new Set(allModelVars.filter(v => !endoSet.has(v)));
 
-      // Φ: observed correlation matrix of exogenous variables only (block)
+      // Ψ*: exogenous correlation block PLUS the standardised residual variance
+      // ψ = 1 − R² on the diagonal for each endogenous variable. Without the ψ
+      // terms Σ = T·Ψ*·Tᵀ has wrong endogenous variances/covariances (e.g. the
+      // implied M–Y correlation in a chain came out β₁²β₂ instead of β₂).
       const exoIdx = allModelVars.map((v, i) => exoSet.has(v) ? i : -1).filter(i => i >= 0);
-      // Build exo correlation sub-matrix in full-variable space
       const Phi: number[][] = Array.from({ length: pv }, () => Array(pv).fill(0));
       for (const ei of exoIdx) {
         for (const ej of exoIdx) {
@@ -1186,6 +1214,9 @@ export function PathAnalysis() {
           }
         }
       }
+      allModelVars.forEach((v, i) => {
+        if (endoSet.has(v)) Phi[i][i] = Math.max(0.02, 1 - (rSquaredMap[v] ?? 0));
+      });
 
       // impCorr = T_full · Phi · T_full^T
       const impCorr: number[][] = Array.from({ length: pv }, () => Array(pv).fill(0));
@@ -1200,88 +1231,50 @@ export function PathAnalysis() {
       const srmr = computeSRMR(obsCorr, impCorr);
       const p = allModelVars.length;
       const nPaths = validPaths.length;
-      const nFreeParams = nPaths + endoVars.length; // paths + error variances
-      const dfModel = Math.max(1, (p * (p + 1)) / 2 - nFreeParams);
+      // Correlation-metric df: p(p−1)/2 unique correlations minus free paths and
+      // exogenous correlations (variances drop out on both sides). Matches the
+      // AMOS/lavaan df for the equivalent covariance-metric model — e.g. the
+      // just-identified X→M→Y chain gives df = 1.
+      const nExoOLS = allModelVars.filter(v => !endoSet.has(v)).length;
+      const nExoPairsOLS = nExoOLS * (nExoOLS - 1) / 2;
+      const nFreeParams = nPaths + nExoPairsOLS;
+      const dfModel = Math.max(1, (p * (p - 1)) / 2 - nFreeParams);
 
-      // Chi-square via GLS discrepancy: F_GLS = tr((S·Σ⁻¹ - I)²)/2
-      // χ² = (n-1)·F_GLS  (Browne 1974 / standard SEM formula)
-      // Invert implied correlation matrix (regularise if near-singular)
-      const computeGLSChisq = (): number => {
+      // χ² from the ML discrepancy evaluated at the estimates (equation-by-
+      // equation OLS is the ML solution for recursive path models):
+      // F_ML = log|Σ| + tr(S·Σ⁻¹) − log|S| − p,  χ² = (n−1)·F_ML
+      const computeMLChisq = (): number => {
         try {
-          // Simple Gauss-Jordan inverse of impCorr
-          const sz = impCorr.length;
-          const aug = impCorr.map((row, i) => {
-            const r = [...row, ...Array(sz).fill(0)];
-            r[sz + i] = 1;
-            return r;
-          });
-          for (let col = 0; col < sz; col++) {
-            let maxR = col;
-            for (let r = col + 1; r < sz; r++) if (Math.abs(aug[r][col]) > Math.abs(aug[maxR][col])) maxR = r;
-            [aug[col], aug[maxR]] = [aug[maxR], aug[col]];
-            const piv = aug[col][col];
-            if (Math.abs(piv) < 1e-12) return n * srmr * srmr * p * (p + 1) / 2; // fallback
-            for (let c = col; c < 2 * sz; c++) aug[col][c] /= piv;
-            for (let r = 0; r < sz; r++) {
-              if (r === col) continue;
-              const f = aug[r][col];
-              for (let c = col; c < 2 * sz; c++) aug[r][c] -= f * aug[col][c];
-            }
-          }
-          const inv = aug.map(row => row.slice(sz));
-          // S · Σ⁻¹
-          const SinvSigma: number[][] = Array.from({ length: sz }, (_, i) =>
-            Array.from({ length: sz }, (_, j) =>
-              obsCorr[i].reduce((s, v, k) => s + v * inv[k][j], 0)
-            )
-          );
-          // tr((S·Σ⁻¹ - I)²) = sum_{i,j}(SinvSigma[i][j] - delta[i][j])²
-          let trace = 0;
-          for (let i = 0; i < sz; i++) for (let j = 0; j < sz; j++) {
-            const d = SinvSigma[i][j] - (i === j ? 1 : 0);
-            trace += d * d;
-          }
-          return (n - 1) * trace / 2;
-        } catch { return n * srmr * srmr * p * (p + 1) / 2; }
+          const SigmaInv = matInv(impCorr);
+          if (!SigmaInv) return 0;
+          const detSigma = matDet(impCorr);
+          const detObs = matDet(obsCorr);
+          if (detSigma <= 0 || detObs <= 0) return 0;
+          let tr = 0;
+          for (let i = 0; i < p; i++)
+            for (let k = 0; k < p; k++) tr += obsCorr[i][k] * SigmaInv[k][i];
+          const F = Math.log(detSigma) + tr - Math.log(detObs) - p;
+          return Math.max(0, (n - 1) * F);
+        } catch { return 0; }
       };
-      const chisq = computeGLSChisq();
-      const chisqP = incompleteBetaReg(dfModel / (dfModel + chisq), dfModel / 2, 0.5);
+      const chisq = computeMLChisq();
+      const chisqP = chiSqPValue(chisq, dfModel);
 
-      // RMSEA = sqrt(max(0, (chisq/df - 1) / (n-1)))
+      // RMSEA + 90% CI via the non-central χ² bisection shared with CFA/SEM
       const rmsea = chisq > dfModel
         ? Math.sqrt((chisq / dfModel - 1) / Math.max(1, n - 1))
         : 0;
-      // 90% CI via Wilson-Hilferty non-central chi-square approximation
-      const rmseaCI90 = (chisqVal: number, df2: number, nVal: number): [number, number] => {
-        const bisectNcp = (alpha: number): number => {
-          if (chisqVal <= df2) return 0;
-          let lo = 0, hi = chisqVal * 5 + 100;
-          for (let iter = 0; iter < 80; iter++) {
-            const mid = (lo + hi) / 2;
-            const mu = df2 + mid, sig2 = 2 * (df2 + 2 * mid);
-            const h = 1 - (2 / 3) * ((df2 + mid) * (df2 + 3 * mid)) / (df2 + 2 * mid) ** 2;
-            const z = (Math.pow(chisqVal / mu, 1 / 3) - (1 - h)) / Math.sqrt(h / mu * sig2 / mu);
-            const cdf = 0.5 * (1 + (z >= 0 ? 1 : -1) * (1 - Math.exp(-0.7071068 * Math.abs(z) * (1 + Math.abs(z) * 0.04761904))));
-            if (cdf > alpha) hi = mid; else lo = mid;
-            if ((hi - lo) < 1e-5) break;
-          }
-          return lo;
-        };
-        const ncpLo = bisectNcp(0.95);
-        const ncpHi = bisectNcp(0.05);
-        return [Math.sqrt(Math.max(0, ncpLo) / Math.max(1, nVal - 1)), Math.sqrt(Math.max(0, ncpHi) / Math.max(1, nVal - 1))];
-      };
-      const [rmseaLo, rmseaHi] = rmseaCI90(chisq, dfModel, n);
+      const rmseaLo = dfModel > 0 && n > 1
+        ? Math.sqrt(ncpRmseaBound(chisq, dfModel, 0.95) / (dfModel * (n - 1)))
+        : 0;
+      const rmseaHi = dfModel > 0 && n > 1
+        ? Math.sqrt(ncpRmseaBound(chisq, dfModel, 0.05) / (dfModel * (n - 1)))
+        : 0;
 
-      // CFI = 1 - max(0, chisq - df) / max(0, chisq_null - df_null)
-      // Null model: independence model — proper computation from observed correlations
+      // Null (independence) model: Σ_null = I → F_null = −log|R|
       const dfNull = p * (p - 1) / 2;
-      let chisqNull = 0;
-      for (let i = 0; i < p; i++) for (let j = 0; j < i; j++) {
-        const rij = obsCorr[i][j];
-        chisqNull += (n - 1) * Math.log(Math.max(1e-10, 1 - rij * rij));
-      }
-      chisqNull = Math.max(-chisqNull, dfNull + 1); // F_null = -2 * sum(log(1-r^2))
+      const detRObs = matDet(obsCorr);
+      const chisqNull = Math.max(dfNull + 1, (n - 1) * (detRObs > 0 ? -Math.log(detRObs) : dfNull + 1));
       const cfi = Math.max(0, Math.min(1, 1 - Math.max(0, chisq - dfModel) / Math.max(0.001, chisqNull - dfNull)));
       const tli = dfModel > 0
         ? Math.max(0, Math.min(1.2, (chisqNull / dfNull - chisq / dfModel) / (chisqNull / dfNull - 1)))
@@ -1395,8 +1388,8 @@ export function PathAnalysis() {
               // Sobel test SE: sqrt(b²·seA² + a²·seB²)
               const sobelSE = Math.sqrt(bCoef ** 2 * seA ** 2 + a ** 2 * seB ** 2);
               const sobelZ = sobelSE > 0 ? indirect / sobelSE : 0;
-              // Two-tailed p from normal
-              const sobelP = 2 * (1 - Math.min(0.9999, 0.5 * (1 + Math.sign(sobelZ) * (1 - Math.exp(-0.717 * sobelZ - 0.416 * sobelZ ** 2)))));
+              // Two-tailed p from the exact normal CDF
+              const sobelP = Math.min(1, 2 * (1 - normalCDF(Math.abs(sobelZ))));
 
               // Bootstrap CI for indirect effect
               const bsCI = bootstrapIndirectCI(ivData, medData, dvData, [], Math.min(nBoot, 2000));
@@ -1530,7 +1523,6 @@ export function PathAnalysis() {
             const xw = xC.map((v, i) => v * wC[i]);
             const reg = olsRegression(yData, xC.map((v, i) => [v, wC[i], xw[i]]));
             const b1 = reg.coefficients[1], b3 = reg.coefficients[3];
-            const se1 = reg.se[1], se3 = reg.se[3];
             const wSD = colSD(wData), wMean = colMean(wData);
             const wLevels = [wMean - wSD, wMean, wMean + wSD];
             const wLabels = [-1, 0, 1];
@@ -1540,7 +1532,10 @@ export function PathAnalysis() {
               focusVariable: mod.iv, moderator: mod.moderator, dv: mod.dv,
               effects: wLevels.map((w, li) => {
                 const eff = b1 + b3 * w;
-                const seEff = Math.sqrt(se1 ** 2 + w ** 2 * se3 ** 2);
+                // Var(b1 + w·b3) = s²·[v11 + w²·v33 + 2w·v13] — the covariance
+                // term matters because X and X×W are correlated
+                const varEff = reg.s2 * (reg.invXtX[1][1] + w * w * reg.invXtX[3][3] + 2 * w * reg.invXtX[1][3]);
+                const seEff = Math.sqrt(Math.max(0, varEff));
                 const t = seEff > 0 ? eff / seEff : 0;
                 const p = df > 0 ? Math.min(1, incompleteBetaReg(df / (df + t ** 2), df / 2, 0.5)) : 1;
                 const z975 = 1.96;
@@ -1567,52 +1562,73 @@ export function PathAnalysis() {
         if (iv && dv && cols.includes(iv) && cols.includes(dv) && medVars.length >= 2) {
           const ivData = getCol(mat, cols, iv);
           const dvData = getCol(mat, cols, dv);
+          const allMedData = medVars.map(m => getCol(mat, cols, m));
 
-          // For parallel mediation: run each mediator separately
-          const specificEffects = medVars.map(med => {
-            const medData = getCol(mat, cols, med);
-            const regA = olsRegression(medData, ivData.map(v => [v]));
-            const a = regA.coefficients[1];
+          // Point estimates: aᵢ from IV → Mᵢ, bᵢ from the joint DV regression
+          // (Hayes PROCESS Model 4 with multiple mediators)
+          const fitParallel = (
+            ivS: number[], medsS: number[][], dvS: number[]
+          ): number[] | null => {
+            try {
+              const bs = medsS.map(medS => olsRegression(medS, ivS.map(v => [v])).coefficients[1]);
+              const Xdv = ivS.map((v, i) => [v, ...medsS.map(md => md[i])]);
+              const regB = olsRegression(dvS, Xdv);
+              return medsS.map((_, k) => bs[k] * regB.coefficients[k + 2]);
+            } catch { return null; }
+          };
 
-            // Include ALL mediators in regression of DV on IV + mediators
-            const allMedData = medVars.map(m => getCol(mat, cols, m));
-            const Xdv = ivData.map((v, i) => [v, ...allMedData.map(md => md[i])]);
-            const regB = olsRegression(dvData, Xdv);
-            const medIdx = medVars.indexOf(med);
-            const bCoef = regB.coefficients[medIdx + 2]; // +2 for intercept + iv
-
-            const effect = a * bCoef;
-            const ci = bootstrapIndirectCI(ivData, medData, dvData, [], Math.min(nBoot, 1000));
-            return { mediator: med, effect, bootstrapCI: ci as [number, number], proportion: 0 };
-          });
-
-          const totalIndirect = specificEffects.reduce((s, e) => s + e.effect, 0);
-          specificEffects.forEach(e => { e.proportion = Math.abs(totalIndirect) > 0 ? e.effect / totalIndirect : 0; });
-
-          // Total indirect CI via bootstrap
-          const totalCI: [number, number] = [
-            specificEffects.reduce((s, e) => s + e.bootstrapCI[0], 0),
-            specificEffects.reduce((s, e) => s + e.bootstrapCI[1], 0),
-          ];
-
-          // Pairwise contrasts
-          const pairwiseContrasts: PathAnalysisResults['parallelMediation']['pairwiseContrasts'] = [];
-          for (let i = 0; i < medVars.length; i++) {
-            for (let j = i + 1; j < medVars.length; j++) {
-              const diff = specificEffects[i].effect - specificEffects[j].effect;
-              const ciDiff: [number, number] = [
-                specificEffects[i].bootstrapCI[0] - specificEffects[j].bootstrapCI[1],
-                specificEffects[i].bootstrapCI[1] - specificEffects[j].bootstrapCI[0],
-              ];
-              pairwiseContrasts.push({
-                mediator1: medVars[i], mediator2: medVars[j], difference: diff,
-                bootstrapCI: ciDiff,
-                significant: !(ciDiff[0] <= 0 && ciDiff[1] >= 0),
-              });
+          const pointSpecific = fitParallel(ivData, allMedData, dvData);
+          if (pointSpecific) {
+            // ONE joint bootstrap: every resample refits the full model, so the
+            // specific indirects, their sum, and all pairwise differences come
+            // from the same joint distribution (endpoint arithmetic on separate
+            // CIs is not a valid interval).
+            const bsB = Math.min(nBoot, 2000);
+            const bootSpecific: number[][] = medVars.map(() => []);
+            const bootTotal: number[] = [];
+            for (let b = 0; b < bsB; b++) {
+              const idx = Array.from({ length: n }, () => Math.floor(Math.random() * n));
+              const ivS = idx.map(i => ivData[i]);
+              const dvS = idx.map(i => dvData[i]);
+              const medsS = allMedData.map(md => idx.map(i => md[i]));
+              const eff = fitParallel(ivS, medsS, dvS);
+              if (!eff) continue;
+              eff.forEach((e, k) => bootSpecific[k].push(e));
+              bootTotal.push(eff.reduce((s, e) => s + e, 0));
             }
-          }
+            const pctCI = (arr: number[]): [number, number] => {
+              if (arr.length < 10) return [0, 0];
+              const s = [...arr].sort((x, y) => x - y);
+              return [s[Math.floor(s.length * 0.025)], s[Math.min(s.length - 1, Math.floor(s.length * 0.975))]];
+            };
 
-          parallelMedResult = { iv, mediators: medVars, dv, totalIndirect, totalIndirectBootstrapCI: totalCI, specificIndirect: specificEffects, pairwiseContrasts };
+            const specificEffects = medVars.map((med, k) => ({
+              mediator: med,
+              effect: pointSpecific[k],
+              bootstrapCI: pctCI(bootSpecific[k]),
+              proportion: 0,
+            }));
+            const totalIndirect = pointSpecific.reduce((s, e) => s + e, 0);
+            specificEffects.forEach(e => { e.proportion = Math.abs(totalIndirect) > 0 ? e.effect / totalIndirect : 0; });
+            const totalCI = pctCI(bootTotal);
+
+            const pairwiseContrasts: NonNullable<PathAnalysisResults['parallelMediation']>['pairwiseContrasts'] = [];
+            for (let i = 0; i < medVars.length; i++) {
+              for (let j = i + 1; j < medVars.length; j++) {
+                const nB = Math.min(bootSpecific[i].length, bootSpecific[j].length);
+                const diffs = Array.from({ length: nB }, (_, b) => bootSpecific[i][b] - bootSpecific[j][b]);
+                const ciDiff = pctCI(diffs);
+                pairwiseContrasts.push({
+                  mediator1: medVars[i], mediator2: medVars[j],
+                  difference: pointSpecific[i] - pointSpecific[j],
+                  bootstrapCI: ciDiff,
+                  significant: !(ciDiff[0] <= 0 && ciDiff[1] >= 0),
+                });
+              }
+            }
+
+            parallelMedResult = { iv, mediators: medVars, dv, totalIndirect, totalIndirectBootstrapCI: totalCI, specificIndirect: specificEffects, pairwiseContrasts };
+          }
         }
       }
 
@@ -1713,35 +1729,43 @@ export function PathAnalysis() {
           const rB = olsRegression(dvData, medData.map((v, i) => [v, ivData[i]]));
           const bCoef = rB.coefficients[1];
 
-          // Conditional indirect effects = (a1 + a3*W)*b at each W level
-          const condEffects = wLevels.map(wl => {
-            const condA = a1 + a3 * wl.value;
-            const condInd = condA * bCoef;
-            // Bootstrap CI at this W level
-            const bsB = Math.min(nBoot, 1000);
-            const boots: number[] = [];
-            for (let b = 0; b < bsB; b++) {
-              const idx = Array.from({ length: n }, () => Math.floor(Math.random() * n));
-              const ivS = idx.map(i => ivData[i]), medS = idx.map(i => medData[i]);
-              const wS = idx.map(i => wData[i]), dvS = idx.map(i => dvData[i]);
-              try {
-                const xwS = ivS.map((v, i) => v * wS[i]);
-                const rAs = olsRegression(medS, ivS.map((v, i) => [v, wS[i], xwS[i]]));
-                const rBs = olsRegression(dvS, medS.map((v, i) => [v, ivS[i]]));
-                boots.push((rAs.coefficients[1] + rAs.coefficients[3] * wl.value) * rBs.coefficients[1]);
-              } catch { continue; }
-            }
-            boots.sort((a, b) => a - b);
-            const lo = boots.length >= 10 ? boots[Math.floor(boots.length * 0.025)] : condInd - 0.05;
-            const hi = boots.length >= 10 ? boots[Math.min(boots.length - 1, Math.floor(boots.length * 0.975))] : condInd + 0.05;
-            return { moderatorLevel: wl.level, moderatorValue: wl.value, indirectEffect: condInd, bootstrapCI: [lo, hi] as [number, number] };
+          // ONE joint bootstrap: each resample refits both equations, collecting
+          // the conditional indirect effect at every W level AND the index of
+          // moderated mediation a3·b (Hayes 2015) from the same distribution.
+          const bsB = Math.min(nBoot, 2000);
+          const bootsByLevel: number[][] = wLevels.map(() => []);
+          const bootsIMM: number[] = [];
+          for (let b = 0; b < bsB; b++) {
+            const idx = Array.from({ length: n }, () => Math.floor(Math.random() * n));
+            const ivS = idx.map(i => ivData[i]), medS = idx.map(i => medData[i]);
+            const wS = idx.map(i => wData[i]), dvS = idx.map(i => dvData[i]);
+            try {
+              const xwS = ivS.map((v, i) => v * wS[i]);
+              const rAs = olsRegression(medS, ivS.map((v, i) => [v, wS[i], xwS[i]]));
+              const rBs = olsRegression(dvS, medS.map((v, i) => [v, ivS[i]]));
+              const a1S = rAs.coefficients[1], a3S = rAs.coefficients[3], bS = rBs.coefficients[1];
+              wLevels.forEach((wl, li) => bootsByLevel[li].push((a1S + a3S * wl.value) * bS));
+              bootsIMM.push(a3S * bS);
+            } catch { continue; }
+          }
+          const pctCI2 = (arr: number[], fallback: number): [number, number] => {
+            if (arr.length < 10) return [fallback - 0.05, fallback + 0.05];
+            const s = [...arr].sort((x, y) => x - y);
+            return [s[Math.floor(s.length * 0.025)], s[Math.min(s.length - 1, Math.floor(s.length * 0.975))]];
+          };
+
+          const condEffects = wLevels.map((wl, li) => {
+            const condInd = (a1 + a3 * wl.value) * bCoef;
+            return {
+              moderatorLevel: wl.level, moderatorValue: wl.value,
+              indirectEffect: condInd,
+              bootstrapCI: pctCI2(bootsByLevel[li], condInd),
+            };
           });
 
-          // Index of moderated mediation = a3 * bCoef
+          // Index of moderated mediation = a3 · b, CI from its own bootstrap distribution
           const imm = a3 * bCoef;
-          const immCI: [number, number] = condEffects.length >= 2
-            ? [condEffects[0].bootstrapCI[0] - condEffects[condEffects.length - 1].bootstrapCI[1], condEffects[condEffects.length - 1].bootstrapCI[1] - condEffects[0].bootstrapCI[0]]
-            : [imm - 0.05, imm + 0.05];
+          const immCI = pctCI2(bootsIMM, imm);
 
           moderatedMedResult = {
             model: 7, iv: mod.iv, mediator: med, moderator: mod.moderator, dv: mod.dv,
@@ -2062,6 +2086,17 @@ export function PathAnalysis() {
           moderators={moderators.map(m => m.moderator)}
           rSquared={results.rSquared}
           exogenousVars={exogenousVars}
+          title="Path Model"
+          estimationLabel={results.estimator === 'MLE' ? 'Maximum Likelihood (ML)' : 'Ordinary Least Squares (OLS)'}
+          fitIndices={{
+            chisq: results.fitIndices?.chisq,
+            df: results.fitIndices?.df,
+            pvalue: results.fitIndices?.pvalue,
+            cfi: results.fitIndices?.cfi,
+            tli: results.fitIndices?.tli,
+            rmsea: results.fitIndices?.rmsea,
+            srmr: results.fitIndices?.srmr,
+          }}
         />
 
         {/* Path Coefficients Table */}

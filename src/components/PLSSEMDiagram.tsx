@@ -157,7 +157,8 @@ function drawFrame(
   draggingId: string | null,
 ) {
   ctx.clearRect(0, 0, CW, CH);
-  ctx.fillStyle = '#f8fafc';
+  // White background — publication/SmartPLS convention (also what exports show)
+  ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, CW, CH);
 
   // ── Measurement paths ──────────────────────────────────────────────────

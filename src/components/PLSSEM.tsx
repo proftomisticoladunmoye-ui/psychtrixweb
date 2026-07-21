@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import {
   PLSSEMModel, PLSSEMConstruct, PLSSEMPath,
-  runPLSAlgorithm, calculateOuterLoadings, bootstrap,
+  runPLSAlgorithm, calculateOuterLoadings, bootstrap, calculatePathCoefficients,
   calculateConfidenceInterval, calculateCronbachAlpha, calculateCronbachAlphaFromData,
   calculateCompositeReliability, calculateRhoA, calculateAVE,
   calculateVIF, calculateRSquared, blindfolding, plsPredict,
@@ -285,7 +285,11 @@ export function PLSSEM() {
 
           const cronbach = calculateCronbachAlphaFromData(numericData, indicatorIndices);
           const cr = calculateCompositeReliability(loadings);
-          const rhoA = calculateRhoA(loadings, correlationMatrix);
+          // ρ_A needs the construct's own indicator correlation submatrix and
+          // its outer weights (full-matrix input mixed in unrelated variables)
+          const subCorr = indicatorIndices.map(a =>
+            indicatorIndices.map(b => correlationMatrix[a]?.[b] ?? 0));
+          const rhoA = calculateRhoA(loadings, subCorr, plsResults.outerWeights[construct.id]);
           const ave = calculateAVE(loadings);
           aveValues[construct.name] = ave;
 
@@ -353,42 +357,33 @@ export function PLSSEM() {
       measurementModel.discriminantValidity.htmt = htmt;
       measurementModel.discriminantValidity.fornellLarcker = fornellLarcker;
 
+      // Original-sample path coefficients (SmartPLS convention: report the
+      // full-sample estimate; the bootstrap supplies only SE / t / p / CI)
+      const originalPaths = calculatePathCoefficients(plsResults.latentScores, model.paths);
+
       const structuralModel: any = {
-        paths: bootstrapResults ? model.paths.map(path => {
+        paths: originalPaths.map(path => {
           const key = `${path.from}->${path.to}`;
-          const coefficients = bootstrapResults.pathCoefficients[key] || [];
+          const coefficients = bootstrapResults?.pathCoefficients[key] || [];
+          const coef = path.coefficient ?? 0;
 
-          let avgCoef = 0;
-          let tValue = 0;
-          let pValue = 1;
-          let ci: [number, number] = [0, 0];
-
-          if (coefficients.length > 0) {
-            avgCoef = coefficients.reduce((a, b) => a + b, 0) / coefficients.length;
-
+          if (coefficients.length >= 10) {
             const se = calculateStandardError(coefficients);
-
-            tValue = se > 0 ? Math.abs(avgCoef / se) : 0;
-
+            const tValue = se > 0 ? Math.abs(coef / se) : 0;
             const df = settings.bootstrapSamples - 1;
-            pValue = tTestPValue(tValue, df);
-
-            ci = calculateConfidenceInterval(coefficients, settings.confidenceLevel);
-          } else {
-            avgCoef = 0.1;
-            tValue = 1.0;
-            pValue = 0.3;
-            ci = [0, 0.2];
+            const pValue = tTestPValue(tValue, df);
+            return {
+              ...path,
+              coefficient: coef,
+              tValue,
+              pValue: Math.max(0.0001, Math.min(1, pValue)),
+              ci: calculateConfidenceInterval(coefficients, settings.confidenceLevel),
+            };
           }
-
-          return {
-            ...path,
-            coefficient: avgCoef,
-            tValue: tValue,
-            pValue: Math.max(0.0001, Math.min(1, pValue)),
-            ci
-          };
-        }) : [],
+          // Bootstrap unavailable — report the estimate without inference
+          // rather than inventing t/p values
+          return { ...path, coefficient: coef, tValue: undefined, pValue: undefined, ci: undefined };
+        }),
         rSquared: {},
         adjustedRSquared: {},
         fSquared: {},

@@ -10,12 +10,38 @@ interface PathInfo {
   pvalue: number;
 }
 
+interface PathDiagramFitIndices {
+  chisq?: number;
+  df?: number;
+  pvalue?: number;
+  cfi?: number;
+  tli?: number;
+  rmsea?: number;
+  srmr?: number;
+}
+
 interface PathDiagramProps {
   paths: PathInfo[];
   mediators?: string[];
   moderators?: string[];
   rSquared?: { [variable: string]: number };
   exogenousVars?: string[];
+  fitIndices?: PathDiagramFitIndices;
+  estimationLabel?: string;
+  title?: string;
+}
+
+function pStar(p?: number): string {
+  if (p == null) return '';
+  if (p < 0.001) return '***';
+  if (p < 0.01) return '**';
+  if (p < 0.05) return '*';
+  return '';
+}
+
+// AMOS convention: two decimals, no leading zero (.85, -.31)
+function fmtCoef(v: number): string {
+  return v.toFixed(2).replace(/^(-?)0\./, '$1.');
 }
 
 export function PathDiagram({
@@ -23,7 +49,10 @@ export function PathDiagram({
   mediators = [],
   moderators = [],
   rSquared = {},
-  exogenousVars = []
+  exogenousVars = [],
+  fitIndices,
+  estimationLabel = 'Ordinary Least Squares (OLS)',
+  title = 'Path Model'
 }: PathDiagramProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [zoom, setZoom] = useState(1);
@@ -65,7 +94,7 @@ export function PathDiagram({
     ctx.clearRect(0, 0, dimensions.width, dimensions.height);
 
     drawPathDiagram(ctx);
-  }, [dimensions, zoom, paths, mediators, moderators, showCoefficients, showErrors, showRSquared, showStandardized, rSquared]);
+  }, [dimensions, zoom, paths, mediators, moderators, showCoefficients, showErrors, showRSquared, showStandardized, rSquared, fitIndices, estimationLabel, title]);
 
   const drawPathDiagram = (ctx: CanvasRenderingContext2D) => {
     // Collect all unique variables
@@ -161,74 +190,68 @@ export function PathDiagram({
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // Draw correlation curves between exogenous variables
+    // White publication background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, dimensions.width, dimensions.height);
+
+    // Title (top-left, AMOS style)
+    ctx.save();
+    ctx.fillStyle = '#111827';
+    ctx.font = 'bold 17px system-ui, Arial, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(title, 24, 20);
+    ctx.restore();
+
+    // Exogenous covariances: solid double-headed arcs bowing LEFT of the exo
+    // column with arrowheads at BOTH ENDS (AMOS convention)
     for (let i = 0; i < exoVars.length; i++) {
       for (let j = i + 1; j < exoVars.length; j++) {
         const node1 = nodes[exoVars[i]];
         const node2 = nodes[exoVars[j]];
+        if (!node1 || !node2) continue;
 
-        if (node1 && node2) {
-          ctx.strokeStyle = '#6366f1';
-          ctx.lineWidth = 2;
-          ctx.setLineDash([5, 3]);
+        const span = Math.abs(j - i);
+        const bow = 46 + 34 * Math.max(span - 1, 0);
+        const startX = node1.x - 52, startY = node1.y;
+        const endX = node2.x - 52, endY = node2.y;
+        const cpX = Math.min(node1.x, node2.x) - 52 - bow;
+        const cpY = (startY + endY) / 2;
 
-          const cpX = node1.x - 70;
-          const cpY = (node1.y + node2.y) / 2;
-          const startX = node1.x - 50;
-          const startY = node1.y;
-          const endX = node2.x - 50;
-          const endY = node2.y;
+        ctx.save();
+        ctx.strokeStyle = '#475569';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.quadraticCurveTo(cpX, cpY, endX, endY);
+        ctx.stroke();
 
-          ctx.beginPath();
-          ctx.moveTo(startX, startY);
-          ctx.quadraticCurveTo(cpX, cpY, endX, endY);
-          ctx.stroke();
-
-          const t = 0.3;
-          const arrowX1 = Math.pow(1-t, 2) * startX + 2*(1-t)*t * cpX + Math.pow(t, 2) * endX;
-          const arrowY1 = Math.pow(1-t, 2) * startY + 2*(1-t)*t * cpY + Math.pow(t, 2) * endY;
-          const angle1 = Math.atan2(
-            2*(1-t)*(cpY - startY) + 2*t*(endY - cpY),
-            2*(1-t)*(cpX - startX) + 2*t*(endX - cpX)
-          );
-          drawDoubleArrowHead(ctx, arrowX1, arrowY1, angle1, 8);
-
-          const t2 = 0.7;
-          const arrowX2 = Math.pow(1-t2, 2) * startX + 2*(1-t2)*t2 * cpX + Math.pow(t2, 2) * endX;
-          const arrowY2 = Math.pow(1-t2, 2) * startY + 2*(1-t2)*t2 * cpY + Math.pow(t2, 2) * endY;
-          const angle2 = Math.atan2(
-            2*(1-t2)*(cpY - startY) + 2*t2*(endY - cpY),
-            2*(1-t2)*(cpX - startX) + 2*t2*(endX - cpX)
-          );
-          drawDoubleArrowHead(ctx, arrowX2, arrowY2, angle2 + Math.PI, 8);
-
-          ctx.setLineDash([]);
-        }
+        const tA = 0.05, tB = 0.95;
+        const qx = (t: number) => (1 - t) ** 2 * startX + 2 * (1 - t) * t * cpX + t * t * endX;
+        const qy = (t: number) => (1 - t) ** 2 * startY + 2 * (1 - t) * t * cpY + t * t * endY;
+        drawDoubleArrowHead(ctx, startX, startY, Math.atan2(startY - qy(tA), startX - qx(tA)), 8);
+        drawDoubleArrowHead(ctx, endX, endY, Math.atan2(endY - qy(tB), endX - qx(tB)), 8);
+        ctx.restore();
       }
     }
 
-    // Draw paths
+    // Directed paths — restrained AMOS palette: dark for significant, light
+    // gray dashed for non-significant; constant modest line width
     paths.forEach(path => {
       const fromNode = nodes[path.from];
       const toNode = nodes[path.to];
-
       if (!fromNode || !toNode) return;
 
       const isSignificant = path.pvalue < 0.05;
       const coefficient = showStandardized ? path.beta : path.coefficient;
+      const pathColor = isSignificant ? '#334155' : '#9ca3af';
 
-      // Color by significance and effect size
-      let pathColor = '#9ca3af';
-      if (isSignificant) {
-        const absCoef = Math.abs(coefficient);
-        if (absCoef >= 0.5) pathColor = '#10b981';
-        else if (absCoef >= 0.3) pathColor = '#3b82f6';
-        else pathColor = '#f59e0b';
-      }
-
+      ctx.save();
       ctx.strokeStyle = pathColor;
-      ctx.lineWidth = isSignificant ? Math.max(2.5, Math.abs(coefficient) * 7) : 2;
+      ctx.lineWidth = isSignificant ? 1.8 : 1.4;
+      if (!isSignificant) ctx.setLineDash([6, 4]);
 
+      const label = fmtCoef(coefficient) + pStar(path.pvalue);
       const isCurved = Math.abs(fromNode.y - toNode.y) > 60;
 
       if (isCurved) {
@@ -241,14 +264,15 @@ export function PathDiagram({
         ctx.moveTo(fromNode.x + 52, fromNode.y);
         ctx.quadraticCurveTo(cpX, cpY, endX, endY);
         ctx.stroke();
+        ctx.setLineDash([]);
 
         const angle = Math.atan2(endY - cpY, endX - cpX);
         const arrowStartX = endX - 15 * Math.cos(angle);
         const arrowStartY = endY - 15 * Math.sin(angle);
-        drawArrowHead(ctx, arrowStartX, arrowStartY, endX, endY, 12);
+        drawArrowHead(ctx, arrowStartX, arrowStartY, endX, endY, 10);
 
         if (showCoefficients) {
-          drawLabel(ctx, coefficient.toFixed(3), cpX, cpY - 15, isSignificant);
+          drawLabel(ctx, label, cpX, cpY - 13, isSignificant);
         }
       } else {
         const startX = fromNode.x + 52;
@@ -260,56 +284,59 @@ export function PathDiagram({
         ctx.moveTo(startX, startY);
         ctx.lineTo(endX, endY);
         ctx.stroke();
+        ctx.setLineDash([]);
 
         const angle = Math.atan2(endY - startY, endX - startX);
         const arrowStartX = endX - 15 * Math.cos(angle);
         const arrowStartY = endY - 15 * Math.sin(angle);
-        drawArrowHead(ctx, arrowStartX, arrowStartY, endX, endY, 12);
+        drawArrowHead(ctx, arrowStartX, arrowStartY, endX, endY, 10);
 
         if (showCoefficients) {
-          const midX = (startX + endX) / 2;
-          const midY = startY - 20;
-          drawLabel(ctx, coefficient.toFixed(3), midX, midY, isSignificant);
+          // AMOS convention: label near the arrowhead end, above the line
+          const lx = startX + (endX - startX) * 0.68;
+          const ly = startY + (endY - startY) * 0.68 - 16;
+          drawLabel(ctx, label, lx, ly, isSignificant);
         }
       }
+      ctx.restore();
     });
 
-    // Draw error terms
+    // Error terms — e1..eN numbering (AMOS convention)
     if (showErrors) {
-      [...endoVars, ...medVars].forEach(v => {
+      const errVars = [...medVars, ...endoVars];
+      errVars.forEach((v, errIdx) => {
         const node = nodes[v];
         if (!node) return;
 
         const errorX = node.x;
-        const errorY = node.y - 90;
+        const errorY = node.y - 88;
 
-        ctx.beginPath();
-        ctx.arc(errorX, errorY, 20, 0, Math.PI * 2);
-        ctx.fillStyle = '#fef3c7';
-        ctx.fill();
-        ctx.strokeStyle = '#f59e0b';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-
-        ctx.save();
-        ctx.font = 'bold 12px Arial';
-        ctx.fillStyle = '#92400e';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('e', errorX, errorY);
-        ctx.restore();
-
-        const errorStartY = errorY + 20;
-        const errorEndY = node.y - 35;
+        const errorStartY = errorY + 18;
+        const errorEndY = node.y - 34;
 
         ctx.beginPath();
         ctx.moveTo(errorX, errorStartY);
         ctx.lineTo(errorX, errorEndY);
-        ctx.strokeStyle = '#d97706';
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#b45309';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        drawArrowHead(ctx, errorX, errorEndY - 10, errorX, errorEndY, 8);
+
+        ctx.beginPath();
+        ctx.arc(errorX, errorY, 18, 0, Math.PI * 2);
+        ctx.fillStyle = '#fef9c3';
+        ctx.fill();
+        ctx.strokeStyle = '#b45309';
+        ctx.lineWidth = 1.5;
         ctx.stroke();
 
-        drawArrowHead(ctx, errorX, errorEndY - 10, errorX, errorEndY, 8);
+        ctx.save();
+        ctx.font = 'bold 11px system-ui, Arial, sans-serif';
+        ctx.fillStyle = '#92400e';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`e${errIdx + 1}`, errorX, errorY);
+        ctx.restore();
       });
     }
 
@@ -369,13 +396,57 @@ export function PathDiagram({
       if (showRSquared && (node.type === 'endogenous' || node.type === 'mediator')) {
         const r2 = rSquared[variable] || 0;
         ctx.save();
-        ctx.font = 'bold 11px Arial';
+        ctx.font = 'bold 11px system-ui, Arial, sans-serif';
         ctx.fillStyle = '#4b5563';
         ctx.textAlign = 'center';
-        ctx.fillText(`R² = ${r2.toFixed(3)}`, node.x, node.y + 50);
+        ctx.fillText(`R² = ${fmtCoef(r2)}`, node.x, node.y + 50);
         ctx.restore();
       }
     });
+
+    // Model Fit Summary box (bottom-left) + estimation footer, matching the
+    // CFA/SEM/Invariance diagram engines
+    if (fitIndices && fitIndices.chisq !== undefined) {
+      const lines: string[] = [];
+      if (fitIndices.chisq !== undefined && fitIndices.df !== undefined)
+        lines.push(`χ² = ${fitIndices.chisq.toFixed(2)}   df = ${fitIndices.df}${fitIndices.pvalue !== undefined ? `   p = ${fitIndices.pvalue < 0.001 ? '<.001' : fitIndices.pvalue.toFixed(3)}` : ''}`);
+      const l2: string[] = [];
+      if (fitIndices.cfi !== undefined) l2.push(`CFI = ${fitIndices.cfi.toFixed(3)}`);
+      if (fitIndices.tli !== undefined) l2.push(`TLI = ${fitIndices.tli.toFixed(3)}`);
+      if (l2.length) lines.push(l2.join('   '));
+      const l3: string[] = [];
+      if (fitIndices.rmsea !== undefined) l3.push(`RMSEA = ${fitIndices.rmsea.toFixed(3)}`);
+      if (fitIndices.srmr !== undefined) l3.push(`SRMR = ${fitIndices.srmr.toFixed(3)}`);
+      if (l3.length) lines.push(l3.join('   '));
+
+      const boxW = 240;
+      const boxH = 22 + lines.length * 17;
+      const bx = 24, by = dimensions.height - boxH - 46;
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,255,255,0.96)';
+      ctx.strokeStyle = '#374151';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); // canvas paths survive save/restore — prevents the previous shape leaking into this fill
+      (ctx as any).roundRect?.(bx, by, boxW, boxH, 4) ?? ctx.rect(bx, by, boxW, boxH);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#111827';
+      ctx.font = 'bold 11px system-ui, Arial, sans-serif';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText('Model Fit Summary', bx + 10, by + 7);
+      ctx.font = '10.5px system-ui, Arial, sans-serif';
+      ctx.fillStyle = '#374151';
+      lines.forEach((ln, i) => ctx.fillText(ln, bx + 10, by + 24 + i * 17));
+      ctx.restore();
+    }
+
+    // Estimation footer
+    ctx.save();
+    ctx.fillStyle = '#6b7280';
+    ctx.font = 'italic 11px system-ui, Arial, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`Estimation: ${estimationLabel}   |   * p<.05  ** p<.01  *** p<.001`, 24, dimensions.height - 16);
+    ctx.restore();
   };
 
   const drawArrowHead = (
@@ -440,12 +511,17 @@ export function PathDiagram({
     isSignificant: boolean
   ) => {
     ctx.save();
-    ctx.font = 'bold 12px Arial';
+    ctx.font = 'bold 11px system-ui, Arial, sans-serif';
     ctx.textAlign = 'center';
 
     const metrics = ctx.measureText(text);
-    ctx.fillStyle = 'white';
-    ctx.fillRect(x - metrics.width / 2 - 5, y - 11, metrics.width + 10, 20);
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.strokeStyle = '#d1d5db';
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    (ctx as any).roundRect?.(x - metrics.width / 2 - 5, y - 10, metrics.width + 10, 18, 3)
+      ?? ctx.rect(x - metrics.width / 2 - 5, y - 10, metrics.width + 10, 18);
+    ctx.fill(); ctx.stroke();
 
     ctx.fillStyle = isSignificant ? '#1f2937' : '#6b7280';
     ctx.fillText(text, x, y + 3);
@@ -560,20 +636,19 @@ export function PathDiagram({
           </div>
           <div>
             <p className="font-medium text-gray-700 mb-2">Paths:</p>
-            <p className="text-gray-600 mb-1">• Solid = Direct effect</p>
-            <p className="text-gray-600 mb-1">• Dashed = Correlation</p>
-            <p className="text-gray-600">• Arrow = Directional</p>
+            <p className="text-gray-600 mb-1">• Solid = significant (p &lt; .05)</p>
+            <p className="text-gray-600 mb-1">• Dashed gray = not significant</p>
+            <p className="text-gray-600">• Double-headed arc = covariance</p>
           </div>
           <div>
-            <p className="font-medium text-gray-700 mb-2">Path Strength:</p>
-            <p className="text-green-600 mb-1">• Green: |β| ≥ 0.5</p>
-            <p className="text-blue-600 mb-1">• Blue: |β| ≥ 0.3</p>
-            <p className="text-amber-600 mb-1">• Amber: |β| &lt; 0.3</p>
-            <p className="text-gray-600">• Gray: Not sig.</p>
+            <p className="font-medium text-gray-700 mb-2">Labels:</p>
+            <p className="text-gray-600 mb-1">• .xx = coefficient (AMOS format)</p>
+            <p className="text-gray-600 mb-1">• * p&lt;.05 ** p&lt;.01 *** p&lt;.001</p>
+            <p className="text-gray-600">• Fit summary box (χ², CFI, RMSEA…)</p>
           </div>
           <div>
             <p className="font-medium text-gray-700 mb-2">Notation:</p>
-            <p className="text-gray-600 mb-1">• e = Error term</p>
+            <p className="text-gray-600 mb-1">• e1…eN = Error terms</p>
             <p className="text-gray-600 mb-1">• R² = Var. explained</p>
             <p className="text-gray-600">• β = Std. coef.</p>
           </div>
