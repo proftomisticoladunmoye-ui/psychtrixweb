@@ -201,10 +201,10 @@ export const exportResultsToPDF = (results: any, analysisType: string) => {
             <tr>
               <td>${fl.item}</td>
               <td>${fl.factor}</td>
-              <td><strong>${fl.loading}</strong></td>
-              <td>${fl.se}</td>
-              <td>${fl.zvalue}</td>
-              <td>${fl.pvalue}</td>
+              <td><strong>${Number(fl.loading).toFixed(3)}</strong></td>
+              <td>${Number(fl.se).toFixed(3)}</td>
+              <td>${Number(fl.z ?? fl.zvalue).toFixed(3)}</td>
+              <td>${Number(fl.pvalue).toFixed(3)}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -2796,43 +2796,43 @@ export const exportCFAToWord = (results: any, studyName: string = 'CFA Analysis'
         </tr>
         <tr class="${parseFloat(results.fitIndices.cfi) >= 0.95 ? 'fit-good' : parseFloat(results.fitIndices.cfi) >= 0.90 ? 'fit-adequate' : 'fit-poor'}">
           <td>CFI</td>
-          <td>${results.fitIndices.cfi}</td>
+          <td>${Number(results.fitIndices.cfi).toFixed(3)}</td>
           <td>≥ 0.95 (good), ≥ 0.90 (adequate)</td>
           <td>${parseFloat(results.fitIndices.cfi) >= 0.95 ? 'Good fit' : parseFloat(results.fitIndices.cfi) >= 0.90 ? 'Adequate fit' : 'Poor fit'}</td>
         </tr>
         <tr class="${parseFloat(results.fitIndices.tli) >= 0.95 ? 'fit-good' : parseFloat(results.fitIndices.tli) >= 0.90 ? 'fit-adequate' : 'fit-poor'}">
           <td>TLI</td>
-          <td>${results.fitIndices.tli}</td>
+          <td>${Number(results.fitIndices.tli).toFixed(3)}</td>
           <td>≥ 0.95 (good), ≥ 0.90 (adequate)</td>
           <td>${parseFloat(results.fitIndices.tli) >= 0.95 ? 'Good fit' : parseFloat(results.fitIndices.tli) >= 0.90 ? 'Adequate fit' : 'Poor fit'}</td>
         </tr>
         <tr class="${parseFloat(results.fitIndices.rmsea) <= 0.06 ? 'fit-good' : parseFloat(results.fitIndices.rmsea) <= 0.08 ? 'fit-adequate' : 'fit-poor'}">
           <td>RMSEA</td>
-          <td>${results.fitIndices.rmsea}</td>
+          <td>${Number(results.fitIndices.rmsea).toFixed(3)}</td>
           <td>≤ 0.06 (good), ≤ 0.08 (adequate)</td>
           <td>${parseFloat(results.fitIndices.rmsea) <= 0.06 ? 'Good fit' : parseFloat(results.fitIndices.rmsea) <= 0.08 ? 'Adequate fit' : 'Poor fit'}</td>
         </tr>
         <tr class="${parseFloat(results.fitIndices.srmr) <= 0.08 ? 'fit-good' : 'fit-poor'}">
           <td>SRMR</td>
-          <td>${results.fitIndices.srmr}</td>
+          <td>${Number(results.fitIndices.srmr).toFixed(3)}</td>
           <td>≤ 0.08 (good)</td>
           <td>${parseFloat(results.fitIndices.srmr) <= 0.08 ? 'Good fit' : 'Poor fit'}</td>
         </tr>
         <tr>
           <td>χ²</td>
-          <td>${results.fitIndices.chisq}</td>
+          <td>${Number(results.fitIndices.chisq).toFixed(2)}</td>
           <td>Lower is better</td>
-          <td>df = ${results.fitIndices.df}, p = ${results.fitIndices.pvalue}</td>
+          <td>df = ${results.fitIndices.df}, p = ${Number(results.fitIndices.pvalue).toFixed(3)}</td>
         </tr>
         <tr>
           <td>AIC</td>
-          <td>${results.fitIndices.aic}</td>
+          <td>${Number(results.fitIndices.aic).toFixed(2)}</td>
           <td>Compare models</td>
           <td>Lower indicates better fit</td>
         </tr>
         <tr>
           <td>BIC</td>
-          <td>${results.fitIndices.bic}</td>
+          <td>${Number(results.fitIndices.bic).toFixed(2)}</td>
           <td>Compare models</td>
           <td>Lower indicates better fit</td>
         </tr>
@@ -2852,10 +2852,10 @@ export const exportCFAToWord = (results: any, studyName: string = 'CFA Analysis'
           <tr>
             <td>${loading.item}</td>
             <td>${loading.factor}</td>
-            <td>${loading.loading}</td>
-            <td>${loading.se}</td>
-            <td>${loading.zvalue}</td>
-            <td>${loading.pvalue}</td>
+            <td>${Number(loading.loading).toFixed(3)}</td>
+            <td>${Number(loading.se).toFixed(3)}</td>
+            <td>${Number(loading.z ?? loading.zvalue).toFixed(3)}</td>
+            <td>${Number(loading.pvalue).toFixed(3)}</td>
           </tr>
         `).join('')}
       </table>
@@ -3055,10 +3055,10 @@ export const exportCFAToHTML = (results: any, studyName: string = 'CFA Analysis'
             <tr>
               <td>${loading.item}</td>
               <td>${loading.factor}</td>
-              <td>${loading.loading}</td>
-              <td>${loading.se}</td>
-              <td>${loading.zvalue}</td>
-              <td>${loading.pvalue}</td>
+              <td>${Number(loading.loading).toFixed(3)}</td>
+              <td>${Number(loading.se).toFixed(3)}</td>
+              <td>${Number(loading.z ?? loading.zvalue).toFixed(3)}</td>
+              <td>${Number(loading.pvalue).toFixed(3)}</td>
             </tr>
           `).join('')}
         </table>
@@ -3126,33 +3126,53 @@ export const exportSEMToWord = (results: any, studyName: string = 'SEM Analysis'
           <th>Index</th>
           <th>Value</th>
         </tr>
-        ${Object.entries(results.fitIndices || {}).map(([key, value]) => `
-          <tr>
-            <td>${key.toUpperCase()}</td>
-            <td>${value}</td>
-          </tr>
-        `).join('')}
+        ${(() => {
+          const fi = results.fitIndices || {};
+          const show: Array<[string, string]> = [
+            ['χ²', fi.chisq != null ? Number(fi.chisq).toFixed(2) : '—'],
+            ['df', fi.df != null ? String(fi.df) : '—'],
+            ['p-value', fi.pvalue != null ? Number(fi.pvalue).toFixed(3) : '—'],
+            ['CFI', fi.cfi != null ? Number(fi.cfi).toFixed(3) : '—'],
+            ['TLI', fi.tli != null ? Number(fi.tli).toFixed(3) : '—'],
+            ['RMSEA', fi.rmsea != null ? Number(fi.rmsea).toFixed(3) : '—'],
+            ['SRMR', fi.srmr != null ? Number(fi.srmr).toFixed(3) : '—'],
+            ['AIC', fi.aic != null ? Number(fi.aic).toFixed(2) : '—'],
+            ['BIC', fi.bic != null ? Number(fi.bic).toFixed(2) : '—'],
+          ];
+          if (fi.scaled) show.push(['Estimator', 'DWLS (robust, mean-adjusted)']);
+          return show.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+        })()}
       </table>
 
-      <h2>Path Coefficients</h2>
+      <h2>Structural Path Coefficients</h2>
       <table>
         <tr>
           <th>From</th>
           <th>To</th>
-          <th>Coefficient</th>
+          <th>β (std)</th>
           <th>SE</th>
+          <th>z</th>
           <th>p-value</th>
         </tr>
-        ${(results.pathCoefficients || []).map((path: any) => `
+        ${((results.structuralModel?.paths) || results.pathCoefficients || []).map((path: any) => `
           <tr>
             <td>${path.from}</td>
             <td>${path.to}</td>
-            <td>${path.coefficient}</td>
-            <td>${path.se || 'N/A'}</td>
-            <td>${path.pvalue || 'N/A'}</td>
+            <td>${Number(path.std_coefficient ?? path.coefficient).toFixed(3)}</td>
+            <td>${Number(path.se).toFixed(3)}</td>
+            <td>${path.z != null ? Number(path.z).toFixed(3) : 'N/A'}</td>
+            <td>${path.pvalue != null ? Number(path.pvalue).toFixed(3) : 'N/A'}</td>
           </tr>
         `).join('')}
       </table>
+
+      ${(() => {
+        const fl = results.measurementModel?.factorLoadings || [];
+        return fl.length ? `<h2>Factor Loadings</h2><table>
+          <tr><th>Item</th><th>Factor</th><th>λ (std)</th><th>SE</th><th>z</th><th>p-value</th></tr>
+          ${fl.map((l: any) => `<tr><td>${l.item}</td><td>${l.factor}</td><td>${Number(l.std_loading ?? l.loading).toFixed(3)}</td><td>${Number(l.se).toFixed(3)}</td><td>${Number(l.z).toFixed(3)}</td><td>${Number(l.pvalue).toFixed(3)}</td></tr>`).join('')}
+        </table>` : '';
+      })()}
 
       <p class="info">Note: SEM path diagram should be exported separately as PNG</p>
     </body>
@@ -3263,33 +3283,53 @@ export const exportSEMToHTML = (results: any, studyName: string = 'SEM Analysis'
             <th>Index</th>
             <th>Value</th>
           </tr>
-          ${Object.entries(results.fitIndices || {}).map(([key, value]) => `
-            <tr>
-              <td>${key.toUpperCase()}</td>
-              <td>${value}</td>
-            </tr>
-          `).join('')}
+          ${(() => {
+            const fi = results.fitIndices || {};
+            const show: Array<[string, string]> = [
+              ['χ²', fi.chisq != null ? Number(fi.chisq).toFixed(2) : '—'],
+              ['df', fi.df != null ? String(fi.df) : '—'],
+              ['p-value', fi.pvalue != null ? Number(fi.pvalue).toFixed(3) : '—'],
+              ['CFI', fi.cfi != null ? Number(fi.cfi).toFixed(3) : '—'],
+              ['TLI', fi.tli != null ? Number(fi.tli).toFixed(3) : '—'],
+              ['RMSEA', fi.rmsea != null ? Number(fi.rmsea).toFixed(3) : '—'],
+              ['SRMR', fi.srmr != null ? Number(fi.srmr).toFixed(3) : '—'],
+              ['AIC', fi.aic != null ? Number(fi.aic).toFixed(2) : '—'],
+              ['BIC', fi.bic != null ? Number(fi.bic).toFixed(2) : '—'],
+            ];
+            if (fi.scaled) show.push(['Estimator', 'DWLS (robust, mean-adjusted)']);
+            return show.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+          })()}
         </table>
 
-        <h2>Path Coefficients</h2>
+        <h2>Structural Path Coefficients</h2>
         <table>
           <tr>
             <th>From</th>
             <th>To</th>
-            <th>Coefficient</th>
+            <th>β (std)</th>
             <th>SE</th>
+            <th>z</th>
             <th>p-value</th>
           </tr>
-          ${(results.pathCoefficients || []).map((path: any) => `
+          ${((results.structuralModel?.paths) || results.pathCoefficients || []).map((path: any) => `
             <tr>
               <td>${path.from}</td>
               <td>${path.to}</td>
-              <td>${path.coefficient}</td>
-              <td>${path.se || 'N/A'}</td>
-              <td>${path.pvalue || 'N/A'}</td>
+              <td>${Number(path.std_coefficient ?? path.coefficient).toFixed(3)}</td>
+              <td>${Number(path.se).toFixed(3)}</td>
+              <td>${path.z != null ? Number(path.z).toFixed(3) : 'N/A'}</td>
+              <td>${path.pvalue != null ? Number(path.pvalue).toFixed(3) : 'N/A'}</td>
             </tr>
           `).join('')}
         </table>
+
+        ${(() => {
+          const fl = results.measurementModel?.factorLoadings || [];
+          return fl.length ? `<h2>Factor Loadings</h2><table>
+            <tr><th>Item</th><th>Factor</th><th>λ (std)</th><th>SE</th><th>z</th><th>p-value</th></tr>
+            ${fl.map((l: any) => `<tr><td>${l.item}</td><td>${l.factor}</td><td>${Number(l.std_loading ?? l.loading).toFixed(3)}</td><td>${Number(l.se).toFixed(3)}</td><td>${Number(l.z).toFixed(3)}</td><td>${Number(l.pvalue).toFixed(3)}</td></tr>`).join('')}
+          </table>` : '';
+        })()}
 
         <p style="color: #6b7280; font-size: 14px; margin-top: 20px;">Note: SEM path diagram should be exported separately as PNG</p>
       </div>
