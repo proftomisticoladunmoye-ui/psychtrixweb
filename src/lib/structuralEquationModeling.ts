@@ -19,6 +19,7 @@
 
 import { MatrixOps } from './psychometricStats';
 import { normalCDF, chiSqPValue, ncpRmseaBound as ncpBound } from './statDistributions';
+import { polychoricMatrix, looksOrdinal } from './polychoric';
 
 // ── Interfaces ────────────────────────────────────────────────────────────────
 
@@ -35,7 +36,14 @@ export interface ModificationIndex {
   type:     'loading' | 'covariance' | 'path';
 }
 
+export interface SEMOptions {
+  /** 'ULS' (Pearson) · 'DWLS' (polychoric, ordinal) · 'auto' (detect ordinal). */
+  estimator?: 'ULS' | 'DWLS' | 'auto';
+}
+
 export interface SEMResults {
+  estimator?: 'ULS' | 'DWLS';
+  thresholds?: Array<{ variable: string; values: number[] }>;
   fitIndices: {
     chisq: number; df: number; pvalue: number; chisq_df_ratio: number;
     cfi: number; tli: number; rmsea: number;
@@ -45,6 +53,7 @@ export interface SEMResults {
     gfi: number; agfi: number; nfi: number; nnfi: number;
     pgfi: number; pnfi: number;
     chisqNull: number; dfNull: number;
+    scaled?: boolean; scalingFactor?: number;
   };
   measurementModel: {
     factorLoadings: Array<{
@@ -117,19 +126,40 @@ function standardise(v: number[]): number[] {
 
 export class SEMEstimator {
 
-  static estimate(data: number[][], model: SEMModel, variableNames: string[]): SEMResults {
+  static estimate(data: number[][], model: SEMModel, variableNames: string[], options: SEMOptions = {}): SEMResults {
     const n = data.length;
 
-    // 1. Observed correlation matrix (p indicators)
+    // 1. Correlation matrix of the p indicators. Ordinal data (DWLS/auto) uses
+    //    polychoric correlations + diagonal weights and a robust WLSM statistic.
     const allInds = [...new Set(Object.values(model.measurementModel).flat())];
     const indIdx  = allInds.map(v => variableNames.indexOf(v)).filter(i => i >= 0);
     const indData = data.map(row => indIdx.map(i => row[i]));
     const p = indIdx.length;
-    const S: number[][] = Array.from({ length: p }, (_, i) =>
-      Array.from({ length: p }, (_, j) =>
-        i === j ? 1 : pearsonR(indData.map(r => r[i]), indData.map(r => r[j]))
-      )
-    );
+
+    const allOrdinal = indIdx.every(vi => looksOrdinal(data.map(r => r[vi])));
+    const useDWLS = options.estimator === 'DWLS' || (options.estimator === 'auto' && allOrdinal);
+
+    // Lower-triangle pair order (i>j, i outer) shared by weights, Γ and the objective.
+    const lowerPairs: Array<[number, number]> = [];
+    for (let i = 0; i < p; i++) for (let j = 0; j < i; j++) lowerPairs.push([i, j]);
+    let pairWeight: number[] | null = null;
+    let Gamma: number[][] | null = null;
+    let dwlsThresholds: number[][] = [];
+
+    let S: number[][];
+    if (useDWLS) {
+      const poly = polychoricMatrix(data, indIdx, true);
+      S = poly.R;
+      dwlsThresholds = poly.thresholds;
+      pairWeight = poly.asymVar.map(v => 1 / Math.max(v, 1e-8)); // ordered i>j like lowerPairs
+      Gamma = poly.Gamma ?? null;
+    } else {
+      S = Array.from({ length: p }, (_, i) =>
+        Array.from({ length: p }, (_, j) =>
+          i === j ? 1 : pearsonR(indData.map(r => r[i]), indData.map(r => r[j]))
+        )
+      );
+    }
 
     // 2. Warm starts: unit-weighted factor scores, item–composite loadings,
     //    OLS structural coefficients (the former two-stage estimates)
@@ -139,10 +169,11 @@ export class SEMEstimator {
     const warmStruct = this.estimateStructuralModel(factorScores, model.structuralPaths, factorNames, n);
     const PhiScores  = this.buildFactorCorrelation(factorScores, factorNames);
 
-    // 3. Full-information ULS estimation of the complete SEM
+    // 3. Full-information (D)WLS estimation of the complete SEM
     const fitted = this.fitULS(
       S, model, allInds, factorNames,
-      warmMeas.factorLoadings, warmStruct.paths, PhiScores, n
+      warmMeas.factorLoadings, warmStruct.paths, PhiScores, n,
+      pairWeight, Gamma, lowerPairs
     );
 
     // 4. Measurement model output — CR/AVE from fitted loadings, α from raw data
@@ -157,9 +188,9 @@ export class SEMEstimator {
       effects: this.decomposeEffects(fitted.paths),
     };
 
-    // 6. Fit indices on the fitted implied matrix
+    // 6. Fit indices on the fitted implied matrix (WLSM-scaled for DWLS)
     const nParams  = this.countParameters(model);
-    const fitIndices = this.computeFitIndices(S, fitted.Sigma, n, nParams, p);
+    const fitIndices = this.computeFitIndices(S, fitted.Sigma, n, nParams, p, fitted.fitStat);
 
     // 7. Mediation
     const mediation = this.analyzeMediation(fitted.paths, model.structuralPaths);
@@ -171,6 +202,8 @@ export class SEMEstimator {
 
     return {
       fitIndices,
+      estimator: useDWLS ? 'DWLS' : 'ULS',
+      thresholds: useDWLS ? allInds.map((item, k) => ({ variable: item, values: dwlsThresholds[k] ?? [] })) : undefined,
       measurementModel: {
         factorLoadings: fitted.factorLoadings,
         reliability: reliabilityExt,
@@ -214,13 +247,17 @@ export class SEMEstimator {
     warmLoadings: SEMResults['measurementModel']['factorLoadings'],
     warmPaths: SEMResults['structuralModel']['paths'],
     PhiScores: number[][],
-    n: number
+    n: number,
+    pairWeight: number[] | null = null,
+    Gamma: number[][] | null = null,
+    lowerPairs: Array<[number, number]> = []
   ): {
     factorLoadings: SEMResults['measurementModel']['factorLoadings'];
     paths: SEMResults['structuralModel']['paths'];
     rSquared: { [f: string]: number };
     Phi: number[][];
     Sigma: number[][];
+    fitStat?: { chisq: number; chisqNull: number; dfNull: number; scaled: boolean; scalingFactor: number };
   } {
     const p  = allInds.length;
     const q  = model.structuralPaths.length;
@@ -283,18 +320,18 @@ export class SEMEstimator {
       return { Sigma, Phi, explained };
     };
 
-    // ULS discrepancy (χ² = (n−1)·F convention shared with the CFA engine),
-    // plus a smooth penalty keeping endo variance decompositions admissible
+    // Discrepancy over the lower triangle. ULS weights every residual equally;
+    // DWLS weights by 1/asymVar of the polychoric correlation (pairWeight). A
+    // smooth penalty keeps the endogenous variance decompositions admissible.
     const objective = (lambdas: number[], betas: number[], phis: number[]) => {
       const { Sigma, explained } = buildSigma(lambdas, betas, phis);
-      let f = 0;
+      let f = 0, k = 0;
       for (let i = 0; i < p; i++)
         for (let j = 0; j < i; j++) {
           const d = S[i][j] - Sigma[i][j];
-          f += d * d;
+          f += (pairWeight ? pairWeight[k] : 1) * d * d;
+          k++;
         }
-      // diagonal is exactly reproduced (both matrices have unit diagonal),
-      // so F = ½·tr[(S−Σ)²] = sum over the lower triangle
       for (const e of endoSet) f += 100 * Math.max(0, explained[e] - 0.98) ** 2;
       return f;
     };
@@ -351,12 +388,64 @@ export class SEMEstimator {
         Hm[i][j] = Hm[j][i] = (F(pp) - F(pm) - F(mp) + F(mm)) / (4 * hh * hh);
       }
     }
-    let seTheta: number[];
-    try {
-      const Hinv = MatrixOps.inverse(Hm);
-      seTheta = Hinv.map((row, i) => Math.sqrt(Math.max(0, row[i]) / Math.max(n - 1, 1)));
-    } catch {
-      seTheta = new Array(nPar).fill(0.05);
+    const Hinv0 = (() => { try { return MatrixOps.inverse(Hm); } catch { return null; } })();
+    let seTheta: number[] = Hinv0
+      ? Hinv0.map((row, i) => Math.sqrt(Math.max(0, row[i]) / Math.max(n - 1, 1)))
+      : new Array(nPar).fill(0.05);
+
+    // ── DWLS: robust SEs + mean-adjusted (WLSM) test statistic ───────────────
+    let fitStat: { chisq: number; chisqNull: number; dfNull: number; scaled: boolean; scalingFactor: number } | undefined;
+    if (pairWeight && Gamma && lowerPairs.length === pairWeight.length) {
+      const qy = lowerPairs.length;
+      // Jacobian Δ = ∂σ/∂θ over the lower-triangle implied correlations
+      const base = buildSigma(...([lambdas, betas, phis] as [number[], number[], number[]])).Sigma;
+      const Dj: number[][] = Array.from({ length: qy }, () => new Array(nPar).fill(0));
+      const hj = 1e-5;
+      for (let t = 0; t < nPar; t++) {
+        const tp = [...theta]; tp[t] += hj;
+        const u = unpack(tp);
+        const pert = buildSigma(u.l, u.b, u.ph).Sigma;
+        for (let kk = 0; kk < qy; kk++) { const [i, j] = lowerPairs[kk]; Dj[kk][t] = (pert[i][j] - base[i][j]) / hj; }
+      }
+      // Robust SE sandwich: acov = (4/N)·Hinv·(Δ'VΓVΔ)·Hinv, V = diag(pairWeight)
+      if (Hinv0) {
+        const Vd = Dj.map((row, k) => row.map(v => v * pairWeight[k]));      // VΔ (q×t)
+        const GVd = Array.from({ length: qy }, (_, a) => {
+          const out = new Array(nPar).fill(0);
+          for (let b = 0; b < qy; b++) { const g = Gamma[a][b]; if (g !== 0) for (let t = 0; t < nPar; t++) out[t] += g * Vd[b][t]; }
+          return out;
+        });
+        const M: number[][] = Array.from({ length: nPar }, () => new Array(nPar).fill(0));
+        for (let a = 0; a < qy; a++) for (let s = 0; s < nPar; s++) { const vs = Vd[a][s]; if (vs !== 0) for (let t = 0; t < nPar; t++) M[s][t] += vs * GVd[a][t]; }
+        const acov = MatrixOps.multiply(MatrixOps.multiply(Hinv0, M), Hinv0);
+        seTheta = acov.map((row, i) => Math.sqrt(Math.max(0, 4 * row[i] / Math.max(n, 1))));
+      }
+      // WLSM scaling: c = tr(UΓ)/df, U = W⁻¹ − W⁻¹Δ(Δ'W⁻¹Δ)⁻¹Δ'W⁻¹, W = diag(Γ)
+      const Wo = Gamma.map((row, k) => 1 / Math.max(row[k], 1e-12));
+      const A: number[][] = Array.from({ length: nPar }, () => new Array(nPar).fill(0));
+      for (let k = 0; k < qy; k++) { const w = Wo[k]; for (let s = 0; s < nPar; s++) { const ds = Dj[k][s] * w; if (ds !== 0) for (let t = 0; t < nPar; t++) A[s][t] += ds * Dj[k][t]; } }
+      const Ainv = (() => { try { return MatrixOps.inverse(A); } catch { return null; } })();
+      let trUG = 0;
+      for (let k = 0; k < qy; k++) trUG += Wo[k] * Gamma[k][k];
+      if (Ainv) {
+        const B = Array.from({ length: nPar }, (_, s) => Dj.map((row, k) => row[s] * Wo[k])); // Δ'W⁻¹ (t×q)
+        const GB = Array.from({ length: qy }, (_, a) => { const out = new Array(nPar).fill(0); for (let b = 0; b < qy; b++) { const g = Gamma[a][b]; if (g !== 0) for (let s = 0; s < nPar; s++) out[s] += g * B[s][b]; } return out; });
+        const C: number[][] = Array.from({ length: nPar }, () => new Array(nPar).fill(0));
+        for (let s = 0; s < nPar; s++) for (let a = 0; a < qy; a++) { const bsa = B[s][a]; if (bsa !== 0) for (let t = 0; t < nPar; t++) C[s][t] += bsa * GB[a][t]; }
+        let t2 = 0; for (let s = 0; s < nPar; s++) for (let t = 0; t < nPar; t++) t2 += Ainv[s][t] * C[t][s];
+        trUG -= t2;
+      }
+      const nMoments = qy;
+      const dfModel = Math.max(1, nMoments - nPar);
+      const c = trUG / dfModel;
+      // T = Σ pairWeight·(S−Σ)² (pure residual SS, no penalty)
+      let T = 0; for (let k = 0; k < qy; k++) { const [i, j] = lowerPairs[k]; const d = S[i][j] - base[i][j]; T += pairWeight[k] * d * d; }
+      const chisq = c > 1e-8 ? T / c : T;
+      // Baseline (independence) model, scaled the same way
+      let Tnull = 0, trUGnull = 0;
+      for (let k = 0; k < qy; k++) { const [i, j] = lowerPairs[k]; Tnull += pairWeight[k] * S[i][j] * S[i][j]; trUGnull += Wo[k] * Gamma[k][k]; }
+      const cNull = trUGnull / Math.max(1, qy);
+      fitStat = { chisq, chisqNull: cNull > 1e-8 ? Tnull / cNull : Tnull, dfNull: qy, scaled: true, scalingFactor: c };
     }
 
     // ── Assemble outputs ────────────────────────────────────────────────────
@@ -392,7 +481,7 @@ export class SEMEstimator {
     const rSquared: { [f: string]: number } = {};
     endoSet.forEach(e => { rSquared[factorNames[e]] = clamp(explained[e], 0, 1); });
 
-    return { factorLoadings, paths, rSquared, Phi, Sigma };
+    return { factorLoadings, paths, rSquared, Phi, Sigma, fitStat };
   }
 
   // ── Topological order of factors (Kahn); cycles appended in input order ──────
@@ -671,24 +760,31 @@ export class SEMEstimator {
   }
 
   // ── Fit indices ───────────────────────────────────────────────────────────────
+  // `stat` overrides the χ² and baseline with the mean-adjusted (WLSM) values
+  // when DWLS was used; otherwise the ULS χ² = (n−1)·F is computed here.
   private static computeFitIndices(
-    S: number[][], Sigma: number[][], n: number, nParams: number, p: number
+    S: number[][], Sigma: number[][], n: number, nParams: number, p: number,
+    stat?: { chisq: number; chisqNull: number; dfNull: number; scaled: boolean; scalingFactor: number }
   ): SEMResults['fitIndices'] {
     const nMoments = p * (p - 1) / 2;
     const dfModel  = Math.max(1, nMoments - nParams);
 
-    let F = 0;
-    for (let i = 0; i < p; i++) {
-      F += (S[i][i] - Sigma[i][i]) ** 2;
-      for (let j = 0; j < i; j++) F += 2 * (S[i][j] - Sigma[i][j]) ** 2;
+    let chisq: number, chisqNull: number, dfNull: number;
+    if (stat) {
+      chisq = stat.chisq; chisqNull = stat.chisqNull; dfNull = stat.dfNull;
+    } else {
+      let F = 0;
+      for (let i = 0; i < p; i++) {
+        F += (S[i][i] - Sigma[i][i]) ** 2;
+        for (let j = 0; j < i; j++) F += 2 * (S[i][j] - Sigma[i][j]) ** 2;
+      }
+      F /= 2;
+      chisq = (n - 1) * F;
+      chisqNull = 0;
+      for (let i = 0; i < p; i++) for (let j = 0; j < i; j++)
+        chisqNull += (n - 1) * S[i][j] ** 2;
+      dfNull = nMoments;
     }
-    F /= 2;
-    const chisq = (n - 1) * F;
-
-    let chisqNull = 0;
-    for (let i = 0; i < p; i++) for (let j = 0; j < i; j++)
-      chisqNull += (n - 1) * S[i][j] ** 2;
-    const dfNull  = nMoments;
     const ncp     = Math.max(0, chisq - dfModel);
     const ncpNull = Math.max(0, chisqNull - dfNull);
 
@@ -734,6 +830,7 @@ export class SEMEstimator {
       cfi, tli, rmsea, rmsea_ci_lower: rmseaLo, rmsea_ci_upper: rmseaHi,
       srmr, wrmr, aic, bic, gfi, agfi, nfi, nnfi, pgfi, pnfi,
       chisqNull, dfNull,
+      scaled: stat?.scaled ?? false, scalingFactor: stat?.scalingFactor ?? 1,
     };
   }
 

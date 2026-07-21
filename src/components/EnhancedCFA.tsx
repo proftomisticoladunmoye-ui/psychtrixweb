@@ -102,6 +102,10 @@ export function EnhancedCFA({ datasets, selectedDataset, onDatasetChange }: Enha
   const [secondOrderFactors, setSecondOrderFactors] = useState<Array<{ name: string; firstOrderFactors: string[]; loadings?: { factor: string; loading: number }[] }>>([]);
   const [modelType, setModelType] = useState<'first-order' | 'second-order'>('first-order');
   const [results, setResults] = useState<CFAResults | null>(null);
+  // User-facing latent-factor display names (double-click a factor to rename).
+  const [latentLabels, setLatentLabels] = useState<{ [key: string]: string }>({});
+  const handleLabelChange = (key: string, value: string) =>
+    setLatentLabels(prev => ({ ...prev, [key]: value }));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
@@ -615,6 +619,8 @@ export function EnhancedCFA({ datasets, selectedDataset, onDatasetChange }: Enha
             estimationLabel={results.estimator === 'DWLS'
               ? 'Diagonally Weighted Least Squares (DWLS), robust'
               : 'Unweighted Least Squares (ULS)'}
+            latentLabels={latentLabels}
+            onLabelChange={handleLabelChange}
           />
         </div>
 

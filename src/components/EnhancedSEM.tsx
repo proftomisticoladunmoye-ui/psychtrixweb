@@ -104,7 +104,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
   };
 
   const [advancedOptions, setAdvancedOptions] = useState({
-    estimator: 'ML' as 'ML' | 'MLR' | 'MLM' | 'WLS' | 'DWLS' | 'ULS',
+    estimator: 'auto' as 'auto' | 'DWLS' | 'ULS',
     missing: 'fiml' as 'listwise' | 'fiml' | 'ml',
     mediation: true,
   });
@@ -187,7 +187,9 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
         return;
       }
 
-      const libResults = SEMEstimator.estimate(numericData, { measurementModel, structuralPaths }, allVariables);
+      const libResults = SEMEstimator.estimate(numericData, { measurementModel, structuralPaths }, allVariables, {
+        estimator: advancedOptions.estimator,
+      });
 
       const directRows: EffectRow[] = Array.from(libResults.structuralModel.effects.direct.entries()).map(([key, e]) => {
         const [from, to] = key.split('->');
@@ -416,7 +418,9 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
           onLabelChange={handleLabelChange}
           theme={diagramTheme}
           title="Structural Equation Model"
-          estimationLabel="Unweighted Least Squares (ULS)"
+          estimationLabel={results.estimator === 'DWLS'
+            ? 'Diagonally Weighted Least Squares (DWLS), robust'
+            : 'Unweighted Least Squares (ULS)'}
           fitIndices={{
             chisq: results.fitIndices?.chisq,
             df: results.fitIndices?.df,
@@ -918,13 +922,11 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
                     onChange={e => setAdvancedOptions({ ...advancedOptions, estimator: e.target.value as any })}
                     className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
                   >
-                    <option value="ML">Maximum Likelihood (ML)</option>
-                    <option value="MLR">Robust ML (MLR)</option>
-                    <option value="MLM">ML with robust SEs (MLM)</option>
-                    <option value="WLS">Weighted Least Squares (WLS)</option>
-                    <option value="DWLS">Diagonally Weighted LS (DWLS)</option>
-                    <option value="ULS">Unweighted Least Squares (ULS)</option>
+                    <option value="auto">Auto — DWLS for ordinal, ULS otherwise (Recommended)</option>
+                    <option value="DWLS">DWLS — polychoric, ordinal (WLSMV-style robust χ²)</option>
+                    <option value="ULS">ULS — Pearson, continuous</option>
                   </select>
+                  <p className="text-xs text-gray-500 mt-1">Ordinal/Likert indicators use polychoric correlations and a mean-adjusted robust test statistic.</p>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Missing Data</label>
