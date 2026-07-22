@@ -1,5 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Download, ZoomIn, ZoomOut, GitBranch } from 'lucide-react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { Download, ZoomIn, ZoomOut, GitBranch, Lock, Unlock, RefreshCw, Maximize2, Move } from 'lucide-react';
+
+type NodeType = 'exogenous' | 'mediator' | 'moderator' | 'endogenous';
+interface NodePos { x: number; y: number; type: NodeType }
+type NodesMap = { [key: string]: NodePos };
 
 interface PathInfo {
   from: string;
@@ -56,11 +60,18 @@ export function PathDiagram({
 }: PathDiagramProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [locked, setLocked] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [showCoefficients, setShowCoefficients] = useState(true);
   const [showErrors, setShowErrors] = useState(true);
   const [showRSquared, setShowRSquared] = useState(true);
   const [showStandardized, setShowStandardized] = useState(true);
   const [dimensions, setDimensions] = useState({ width: 1400, height: 800 });
+  // Draggable node positions (initialised from the auto-layout, then user-movable).
+  const [nodes, setNodes] = useState<NodesMap>({});
+  const dragRef = useRef<{ type: 'node' | 'pan'; key: string; ox: number; oy: number; mx: number; my: number } | null>(null);
+  const layoutSigRef = useRef<string>('');
 
   useEffect(() => {
     const updateDimensions = () => {
@@ -77,8 +88,66 @@ export function PathDiagram({
     return () => window.removeEventListener('resize', updateDimensions);
   }, [paths]);
 
+  // ── Default auto-layout: exogenous left, mediators centre, moderators top,
+  //    endogenous right — the initial arrangement users can then drag/lock. ──
+  const buildDefaultNodes = useCallback((dims: { width: number; height: number }): NodesMap => {
+    const allVars = new Set<string>();
+    paths.forEach(p => { allVars.add(p.from); allVars.add(p.to); });
+    const endogenousVars = new Set<string>();
+    paths.forEach(p => endogenousVars.add(p.to));
+    const exogenousSet = new Set(exogenousVars);
+    const mediatorSet = new Set(mediators);
+    const moderatorSet = new Set(moderators);
+    if (exogenousVars.length === 0) {
+      allVars.forEach(v => { if (!endogenousVars.has(v) && !mediatorSet.has(v)) exogenousSet.add(v); });
+    }
+    const leftPadding = 180, rightPadding = 180, topPadding = 120, bottomPadding = 100;
+    const usableWidth = dims.width - leftPadding - rightPadding;
+    const usableHeight = dims.height - topPadding - bottomPadding;
+    const result: NodesMap = {};
+
+    const exoVars = Array.from(allVars).filter(v => exogenousSet.has(v) && !mediatorSet.has(v) && !moderatorSet.has(v));
+    const medVars = Array.from(allVars).filter(v => mediatorSet.has(v));
+    const modVars = Array.from(allVars).filter(v => moderatorSet.has(v));
+    const endoVars = Array.from(allVars).filter(v => endogenousVars.has(v) && !mediatorSet.has(v) && !moderatorSet.has(v));
+
+    const exoX = leftPadding + 90;
+    const exoSpacing = exoVars.length > 1 ? usableHeight / (exoVars.length + 1) : usableHeight / 2;
+    exoVars.forEach((v, idx) => { result[v] = { x: exoX, y: topPadding + exoSpacing * (idx + 1), type: 'exogenous' }; });
+
+    if (medVars.length > 0) {
+      const medX = leftPadding + usableWidth / 2;
+      const medSpacing = medVars.length > 1 ? usableHeight / (medVars.length + 1) : usableHeight / 2;
+      medVars.forEach((v, idx) => { result[v] = { x: medX, y: topPadding + medSpacing * (idx + 1), type: 'mediator' }; });
+    }
+    if (modVars.length > 0) {
+      const modStartX = leftPadding + usableWidth * 0.3;
+      const modSpacing = usableWidth * 0.4 / Math.max(1, modVars.length - 1);
+      modVars.forEach((v, idx) => { result[v] = { x: modStartX + modSpacing * idx, y: topPadding - 30, type: 'moderator' }; });
+    }
+    const endoX = dims.width - rightPadding - 90;
+    const endoSpacing = endoVars.length > 1 ? usableHeight / (endoVars.length + 1) : usableHeight / 2;
+    endoVars.forEach((v, idx) => { result[v] = { x: endoX, y: topPadding + endoSpacing * (idx + 1), type: 'endogenous' }; });
+
+    return result;
+  }, [paths, mediators, moderators, exogenousVars]);
+
+  // Rebuild the layout only when the variable set / model structure / size
+  // changes — user drags are preserved across unrelated re-renders.
   useEffect(() => {
-    if (!canvasRef.current) return;
+    const sig = JSON.stringify({
+      v: Object.keys(buildDefaultNodes(dimensions)).sort(),
+      w: dimensions.width, h: dimensions.height,
+    });
+    if (sig !== layoutSigRef.current) {
+      layoutSigRef.current = sig;
+      setNodes(buildDefaultNodes(dimensions));
+      setPan({ x: 0, y: 0 });
+    }
+  }, [dimensions, buildDefaultNodes]);
+
+  useEffect(() => {
+    if (!canvasRef.current || Object.keys(nodes).length === 0) return;
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
@@ -89,103 +158,74 @@ export function PathDiagram({
     canvas.height = dimensions.height * dpr * zoom;
     canvas.style.width = `${dimensions.width * zoom}px`;
     canvas.style.height = `${dimensions.height * zoom}px`;
-    ctx.scale(dpr * zoom, dpr * zoom);
 
-    ctx.clearRect(0, 0, dimensions.width, dimensions.height);
+    // Fill the whole physical canvas white first so panning never reveals
+    // empty regions, then apply device-pixel-ratio, zoom and pan for drawing.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, pan.x * dpr * zoom, pan.y * dpr * zoom);
 
     drawPathDiagram(ctx);
-  }, [dimensions, zoom, paths, mediators, moderators, showCoefficients, showErrors, showRSquared, showStandardized, rSquared, fitIndices, estimationLabel, title]);
+  }, [dimensions, zoom, pan, nodes, paths, mediators, moderators, showCoefficients, showErrors, showRSquared, showStandardized, rSquared, fitIndices, estimationLabel, title]);
+
+  // ── Pointer interaction: drag nodes to reposition, drag background to pan;
+  //    node dragging is disabled while the layout is Locked. ──
+  const getCanvasPoint = useCallback((e: React.MouseEvent) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    return { x: (e.clientX - rect.left) / zoom - pan.x, y: (e.clientY - rect.top) / zoom - pan.y };
+  }, [zoom, pan]);
+
+  const hitTestNode = useCallback((x: number, y: number): string | null => {
+    for (const [v, pos] of Object.entries(nodes)) {
+      if (Math.abs(x - pos.x) <= 50 + 3 && Math.abs(y - pos.y) <= 32 + 3) return v;
+    }
+    return null;
+  }, [nodes]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    const p = getCanvasPoint(e);
+    const hit = locked ? null : hitTestNode(p.x, p.y);
+    if (hit) {
+      dragRef.current = { type: 'node', key: hit, ox: nodes[hit].x, oy: nodes[hit].y, mx: p.x, my: p.y };
+    } else {
+      dragRef.current = { type: 'pan', key: '', ox: pan.x, oy: pan.y, mx: e.clientX, my: e.clientY };
+    }
+    setIsDragging(true);
+  }, [locked, getCanvasPoint, hitTestNode, nodes, pan]);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    // Guard: button released off-canvas means we never saw mouseup.
+    if (!(e.buttons & 1)) { dragRef.current = null; setIsDragging(false); return; }
+    if (d.type === 'pan') {
+      setPan({ x: d.ox + (e.clientX - d.mx) / zoom, y: d.oy + (e.clientY - d.my) / zoom });
+      return;
+    }
+    const p = getCanvasPoint(e);
+    const nx = d.ox + (p.x - d.mx), ny = d.oy + (p.y - d.my);
+    setNodes(prev => prev[d.key] ? { ...prev, [d.key]: { ...prev[d.key], x: nx, y: ny } } : prev);
+  }, [getCanvasPoint, zoom]);
+
+  const handleMouseUp = useCallback(() => { dragRef.current = null; setIsDragging(false); }, []);
+
+  const autoLayout = useCallback(() => {
+    setNodes(buildDefaultNodes(dimensions));
+    setPan({ x: 0, y: 0 });
+    setZoom(1);
+  }, [buildDefaultNodes, dimensions]);
 
   const drawPathDiagram = (ctx: CanvasRenderingContext2D) => {
-    // Collect all unique variables
-    const allVars = new Set<string>();
-    paths.forEach(p => {
-      allVars.add(p.from);
-      allVars.add(p.to);
-    });
-
-    // Classify variables
-    const endogenousVars = new Set<string>();
-    paths.forEach(p => endogenousVars.add(p.to));
-
-    const exogenousSet = new Set(exogenousVars);
-    const mediatorSet = new Set(mediators);
-    const moderatorSet = new Set(moderators);
-
-    // Auto-detect if not specified
-    if (exogenousVars.length === 0) {
-      allVars.forEach(v => {
-        if (!endogenousVars.has(v) && !mediatorSet.has(v)) {
-          exogenousSet.add(v);
-        }
-      });
-    }
-
-    // Enhanced padding
-    const leftPadding = 180;
-    const rightPadding = 180;
-    const topPadding = 120;
-    const bottomPadding = 100;
-
-    const usableWidth = dimensions.width - leftPadding - rightPadding;
-    const usableHeight = dimensions.height - topPadding - bottomPadding;
-
-    // Position nodes
-    const nodes: { [key: string]: { x: number; y: number; type: 'exogenous' | 'mediator' | 'moderator' | 'endogenous' } } = {};
-
-    // Separate variables by type
-    const exoVars = Array.from(allVars).filter(v => exogenousSet.has(v) && !mediatorSet.has(v) && !moderatorSet.has(v));
-    const medVars = Array.from(allVars).filter(v => mediatorSet.has(v));
-    const modVars = Array.from(allVars).filter(v => moderatorSet.has(v));
-    const endoVars = Array.from(allVars).filter(v => endogenousVars.has(v) && !mediatorSet.has(v) && !moderatorSet.has(v));
-
-    // Position exogenous (left)
-    const exoX = leftPadding + 90;
-    const exoSpacing = exoVars.length > 1 ? usableHeight / (exoVars.length + 1) : usableHeight / 2;
-    exoVars.forEach((v, idx) => {
-      nodes[v] = {
-        x: exoX,
-        y: topPadding + exoSpacing * (idx + 1),
-        type: 'exogenous'
-      };
-    });
-
-    // Position mediators (center)
-    if (medVars.length > 0) {
-      const medX = leftPadding + usableWidth / 2;
-      const medSpacing = medVars.length > 1 ? usableHeight / (medVars.length + 1) : usableHeight / 2;
-      medVars.forEach((v, idx) => {
-        nodes[v] = {
-          x: medX,
-          y: topPadding + medSpacing * (idx + 1),
-          type: 'mediator'
-        };
-      });
-    }
-
-    // Position moderators (top center)
-    if (modVars.length > 0) {
-      const modStartX = leftPadding + usableWidth * 0.3;
-      const modSpacing = usableWidth * 0.4 / Math.max(1, modVars.length - 1);
-      modVars.forEach((v, idx) => {
-        nodes[v] = {
-          x: modStartX + modSpacing * idx,
-          y: topPadding - 30,
-          type: 'moderator'
-        };
-      });
-    }
-
-    // Position endogenous (right)
-    const endoX = dimensions.width - rightPadding - 90;
-    const endoSpacing = endoVars.length > 1 ? usableHeight / (endoVars.length + 1) : usableHeight / 2;
-    endoVars.forEach((v, idx) => {
-      nodes[v] = {
-        x: endoX,
-        y: topPadding + endoSpacing * (idx + 1),
-        type: 'endogenous'
-      };
-    });
+    // Positions come from the (draggable) node state; category lists are derived
+    // by type, preserving insertion order for stable e1..eN error numbering.
+    const keysByType = (t: NodeType) => Object.keys(nodes).filter(v => nodes[v].type === t);
+    const exoVars = keysByType('exogenous');
+    const medVars = keysByType('mediator');
+    const endoVars = keysByType('endogenous');
 
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -528,17 +568,26 @@ export function PathDiagram({
     ctx.restore();
   };
 
+  // Export the arranged layout cleanly (2×, no pan/zoom baked in).
   const handleDownload = () => {
-    if (!canvasRef.current) return;
+    const off = document.createElement('canvas');
+    off.width = dimensions.width * 2;
+    off.height = dimensions.height * 2;
+    const ctx = off.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(2, 0, 0, 2, 0, 0);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, dimensions.width, dimensions.height);
+    drawPathDiagram(ctx);
     const link = document.createElement('a');
     link.download = 'path-analysis-diagram.png';
-    link.href = canvasRef.current.toDataURL();
+    link.href = off.toDataURL('image/png', 1.0);
     link.click();
   };
 
-  const handleZoomIn = () => setZoom(Math.min(zoom + 0.1, 2));
-  const handleZoomOut = () => setZoom(Math.max(zoom - 0.1, 0.5));
-  const handleResetZoom = () => setZoom(1);
+  const handleZoomIn = () => setZoom(z => Math.min(z + 0.1, 3));
+  const handleZoomOut = () => setZoom(z => Math.max(z - 0.1, 0.4));
+  const handleResetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -554,34 +603,53 @@ export function PathDiagram({
             All variables are directly observed
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleZoomOut}
-            className="p-2 hover:bg-gray-100 rounded-lg transition"
-          >
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={handleZoomOut} className="p-2 hover:bg-gray-100 rounded-lg transition" title="Zoom Out">
             <ZoomOut className="w-4 h-4 text-gray-600" />
           </button>
-          <button
-            onClick={handleResetZoom}
+          <button onClick={handleResetView}
             className="px-3 py-2 text-sm hover:bg-gray-100 rounded-lg transition font-medium text-gray-700"
-          >
+            title="Reset zoom & pan">
             {Math.round(zoom * 100)}%
           </button>
-          <button
-            onClick={handleZoomIn}
-            className="p-2 hover:bg-gray-100 rounded-lg transition"
-          >
+          <button onClick={handleZoomIn} className="p-2 hover:bg-gray-100 rounded-lg transition" title="Zoom In">
             <ZoomIn className="w-4 h-4 text-gray-600" />
           </button>
-          <button
-            onClick={handleDownload}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-medium text-sm"
-          >
+          <button onClick={handleResetView} className="p-2 hover:bg-gray-100 rounded-lg transition" title="Reset View">
+            <Maximize2 className="w-4 h-4 text-gray-600" />
+          </button>
+
+          <div className="w-px h-5 bg-gray-300 mx-1" />
+
+          <button onClick={autoLayout}
+            className="flex items-center gap-1 px-2.5 py-2 text-sm bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg transition font-medium"
+            title="Re-apply the automatic layout">
+            <RefreshCw className="w-4 h-4" />
+            Auto-Layout
+          </button>
+          <button onClick={() => setLocked(l => !l)}
+            className={`flex items-center gap-1 px-2.5 py-2 text-sm rounded-lg transition font-medium ${
+              locked ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
+            }`}
+            title={locked ? 'Layout locked — nodes cannot be moved' : 'Lock the layout to prevent accidental moves'}>
+            {locked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+            {locked ? 'Locked' : 'Lock'}
+          </button>
+
+          <button onClick={handleDownload}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-medium text-sm">
             <Download className="w-4 h-4" />
-            Download PNG
+            PNG
           </button>
         </div>
       </div>
+
+      <p className="text-xs text-gray-500 mb-3 flex items-center gap-1.5">
+        <Move className="w-3.5 h-3.5" />
+        {locked
+          ? 'Layout is locked. Click Lock again to move nodes.'
+          : 'Drag any box to reposition it and avoid overlaps · drag the background to pan · Lock when done.'}
+      </p>
 
       {/* Controls */}
       <div className="flex items-center gap-4 mb-4 p-3 bg-gray-50 rounded-lg flex-wrap">
@@ -657,7 +725,14 @@ export function PathDiagram({
 
       {/* Canvas */}
       <div className="border border-gray-300 rounded-lg overflow-auto bg-white" style={{ maxHeight: '800px' }}>
-        <canvas ref={canvasRef} />
+        <canvas
+          ref={canvasRef}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+          style={{ display: 'block', cursor: locked ? 'default' : (isDragging ? 'grabbing' : 'grab') }}
+        />
       </div>
 
       {/* Info Card */}
