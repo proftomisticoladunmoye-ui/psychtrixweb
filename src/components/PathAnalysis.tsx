@@ -486,8 +486,11 @@ export function PathAnalysis() {
     return Math.min(1, Math.max(0, front * f));
   };
 
-  // Parse raw dataset rows to numeric columns
-  const getNumericMatrix = (ds: Dataset): { mat: number[][]; cols: string[] } => {
+  // Parse raw dataset rows to numeric columns.
+  // Listwise deletion is applied ONLY to the columns used by the model
+  // (requiredCols); a non-numeric column that the model never references — an
+  // ID, a name, a group label — must not delete otherwise-complete rows.
+  const getNumericMatrix = (ds: Dataset, requiredCols?: string[]): { mat: number[][]; cols: string[] } => {
     const raw = ds.data;
     const cols = ds.columns;
     let mat: number[][];
@@ -496,8 +499,11 @@ export function PathAnalysis() {
     } else {
       mat = (raw as Record<string, any>[]).map(row => cols.map(c => parseFloat(row[c])));
     }
-    // Listwise deletion
-    mat = mat.filter(row => row.every(v => isFinite(v)));
+    // Listwise deletion, restricted to the model variables when supplied.
+    const reqIdx = (requiredCols && requiredCols.length)
+      ? requiredCols.map(c => cols.indexOf(c)).filter(i => i >= 0)
+      : cols.map((_, i) => i);
+    mat = mat.filter(row => reqIdx.every(i => isFinite(row[i])));
     return { mat, cols };
   };
 
@@ -1084,9 +1090,17 @@ export function PathAnalysis() {
     setError('');
 
     try {
-      const { mat: rawMat, cols } = getNumericMatrix(currentDataset);
+      // Variables the model actually uses — the only ones that gate listwise
+      // deletion. Unused/non-numeric columns must not disqualify rows.
+      const modelVars = [...new Set([
+        ...validPaths.flatMap(p => [p.from, p.to]),
+        ...mediators,
+        ...moderators.flatMap(m => [m.iv, m.moderator, m.dv]),
+      ].filter(Boolean))];
+
+      const { mat: rawMat, cols } = getNumericMatrix(currentDataset, modelVars);
       if (rawMat.length < 10) {
-        throw new Error('Insufficient data: need at least 10 complete observations');
+        throw new Error(`Insufficient data: only ${rawMat.length} complete observation(s) on the model variables (need ≥ 10). Check that the selected variables are numeric and not mostly blank.`);
       }
 
       // Mean-center if requested
