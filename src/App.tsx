@@ -23,6 +23,7 @@ const EnhancedPathAnalysis = lazy(() => import('./components/EnhancedPathAnalysi
 const CommunityForum = lazy(() => import('./components/CommunityForum').then(m => ({ default: m.CommunityForum })));
 const PLSSEM = lazy(() => import('./components/PLSSEM').then(m => ({ default: m.PLSSEM })));
 const NetworkAnalysis = lazy(() => import('./components/NetworkAnalysis').then(m => ({ default: m.NetworkAnalysis })));
+const About = lazy(() => import('./components/About').then(m => ({ default: m.About })));
 
 const ViewLoader = () => (
   <div className="flex items-center justify-center py-24">
@@ -30,7 +31,7 @@ const ViewLoader = () => (
   </div>
 );
 
-export type ViewType = 'dashboard' | 'data-import' | 'ctt-analysis' | 'validity-analysis' | 'irt-analysis' | 'path-analysis' | 'pls-sem' | 'adaptive-testing' | 'network-analysis' | 'sandbox' | 'cultural-adaptation' | 'forum' | 'reports' | 'settings' | 'help';
+export type ViewType = 'dashboard' | 'data-import' | 'ctt-analysis' | 'validity-analysis' | 'irt-analysis' | 'path-analysis' | 'pls-sem' | 'adaptive-testing' | 'network-analysis' | 'sandbox' | 'cultural-adaptation' | 'forum' | 'reports' | 'settings' | 'help' | 'about';
 
 function App() {
   const { user, loading } = useAuth();
@@ -105,8 +106,10 @@ function App() {
         return <Settings />;
       case 'help':
         return <Help />;
+      case 'about':
+        return <About />;
       default:
-        return <Dashboard />;
+        return <Dashboard onNavigate={setCurrentView} />;
     }
   };
 

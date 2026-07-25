@@ -14,8 +14,14 @@ export function Footer() {
     <>
       <footer className="border-t border-gray-200 bg-white px-4 py-4 lg:px-8">
         <div className="max-w-screen-2xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-gray-500">
-          <p>© {year} Psychtrix Web · Publication-grade psychometrics</p>
+          <p>© {year} Psychtrix Initiative Limited · Publication-grade psychometrics</p>
           <div className="flex items-center gap-4">
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'about' }))}
+              className="hover:text-blue-600 transition font-medium"
+            >
+              About
+            </button>
             <button
               onClick={() => setShowPrivacy(true)}
               className="flex items-center gap-1.5 hover:text-blue-600 transition font-medium"
