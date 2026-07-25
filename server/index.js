@@ -125,8 +125,12 @@ app.delete('/api/db/:table', wrap(async (req, res) => {
 
 // ---- RPCs ------------------------------------------------------------------
 app.post('/api/rpc/increment_forum_post_views', wrap(async (req, res) => {
-  const { post_id } = req.body ?? {};
-  await query('UPDATE forum_posts SET views_count = COALESCE(views_count, 0) + 1 WHERE id = $1', [post_id]);
+  // The frontend (Supabase-era) sends post_uuid; accept post_id too.
+  const { post_uuid, post_id } = req.body ?? {};
+  const id = post_uuid ?? post_id;
+  if (id) {
+    await query('UPDATE forum_posts SET views_count = COALESCE(views_count, 0) + 1 WHERE id = $1', [id]);
+  }
   res.json({ ok: true });
 }));
 

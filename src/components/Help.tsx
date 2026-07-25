@@ -981,11 +981,58 @@ export function Help() {
               </div>
             </div>
 
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4">Estimation Methods (Continuous vs. Ordinal)</h2>
+              <p className="text-sm text-gray-700 mb-3">
+                Under <strong>Advanced Options → Estimator</strong> you choose how the model is fitted.
+                The default <strong>Auto</strong> setting inspects your items and picks the right method:
+              </p>
+              <div className="space-y-3">
+                <div className="p-3 bg-blue-50 rounded">
+                  <h4 className="font-semibold text-gray-900 mb-1">ULS — continuous data</h4>
+                  <p className="text-sm text-gray-700">
+                    Unweighted Least Squares on the Pearson correlation matrix. Appropriate when items
+                    are continuous or approximately interval-scaled.
+                  </p>
+                </div>
+                <div className="p-3 bg-green-50 rounded">
+                  <h4 className="font-semibold text-gray-900 mb-1">DWLS — ordinal / Likert data</h4>
+                  <p className="text-sm text-gray-700">
+                    Diagonally Weighted Least Squares on the <strong>polychoric</strong> correlation
+                    matrix, with a mean-adjusted (WLSMV-style) robust χ². This is the reference standard
+                    for Likert/ordered-categorical items (as in Mplus and lavaan) and avoids the loading
+                    attenuation that Pearson-based methods produce on ordinal data. Estimated item
+                    thresholds are reported alongside the loadings.
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500 mt-3">
+                Tip: if all your indicators are integer categories (e.g. 1–5), Auto will select DWLS.
+              </p>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4">Interactive Path Diagrams</h2>
+              <p className="text-sm text-gray-700 mb-3">
+                The CFA, SEM and Path Analysis diagrams are fully interactive so you can produce a clean,
+                publication-ready figure with no overlapping elements:
+              </p>
+              <ul className="text-sm text-gray-700 space-y-1.5">
+                <li>• <strong>Drag</strong> any factor/box to reposition it and separate overlapping nodes.</li>
+                <li>• <strong>Drag the background</strong> to pan; use zoom and <strong>Reset View</strong> to reframe.</li>
+                <li>• <strong>Double-click a latent factor</strong> to rename it (e.g. F1 → "Anxiety").</li>
+                <li>• <strong>Auto-Layout</strong> re-applies the automatic arrangement if you want to start over.</li>
+                <li>• <strong>Lock</strong> freezes the layout once arranged so nodes can't be moved by accident.</li>
+                <li>• <strong>Export PNG</strong> renders the arranged figure at 2× resolution, independent of the current zoom/pan.</li>
+              </ul>
+            </div>
+
             <div className="bg-amber-50 rounded-xl border-l-4 border-amber-500 p-6">
               <h3 className="font-semibold text-gray-900 mb-2">Reporting CFA Results</h3>
               <p className="text-sm text-gray-700 mb-2">Always report:</p>
               <ul className="text-sm text-gray-700 space-y-1">
                 <li>• All fit indices (not just the best ones)</li>
+                <li>• The estimator used (e.g. DWLS with robust χ² for ordinal data)</li>
                 <li>• Standardized factor loadings</li>
                 <li>• Factor correlations</li>
                 <li>• Modification indices if model revised</li>
@@ -1039,6 +1086,18 @@ export function Help() {
                 <p><strong>Adequate:</strong> 10-20 cases per estimated parameter</p>
                 <p><strong>Ideal:</strong> 500+ cases for complex models</p>
               </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4">Ordinal / Likert Estimation</h2>
+              <p className="text-sm text-gray-700">
+                Like CFA, the SEM engine supports an <strong>Auto / ULS / DWLS</strong> estimator choice.
+                For ordered-categorical (Likert) indicators, choose <strong>DWLS</strong> (or leave it on
+                Auto): the model is fitted to the <strong>polychoric</strong> correlation matrix with a
+                mean-adjusted robust (WLSMV-style) test statistic — the reference standard used by Mplus
+                and lavaan for ordinal data. The resulting figure is a fully interactive path diagram
+                (drag, pan, lock, double-click to rename, Export PNG).
+              </p>
             </div>
           </div>
         )}

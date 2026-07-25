@@ -27,6 +27,17 @@ const statements = [
   `CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_key ON users (lower(email))`,
   `CREATE UNIQUE INDEX IF NOT EXISTS sessions_token_key ON sessions (token)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS unp_user_key ON user_notification_preferences (user_id)`,
+  // The Supabase-era forum trigger looked up author emails from app_users; after
+  // the rename above that table no longer exists, which broke every forum post.
+  // Point the helper at the real users table.
+  `CREATE OR REPLACE FUNCTION public.get_user_email(user_uuid uuid)
+   RETURNS text LANGUAGE plpgsql AS $fn$
+   DECLARE v_email text;
+   BEGIN
+     SELECT email INTO v_email FROM users WHERE id = user_uuid;
+     RETURN COALESCE(v_email, 'Unknown User');
+   END;
+   $fn$`,
 ];
 
 const client2 = client;
