@@ -101,23 +101,17 @@ export function pearsonCorrelation(x: number[], y: number[]): number {
   if (!x || !y || x.length === 0 || y.length === 0 || x.length !== y.length) {
     return 0;
   }
-
+  // Tight single-pass loops (no reduce/closure allocation) — this is called
+  // thousands of times inside the PLS iteration and bootstrap.
   const n = x.length;
-  const meanX = x.reduce((a, b) => a + b, 0) / n;
-  const meanY = y.reduce((a, b) => a + b, 0) / n;
-
-  let num = 0;
-  let denX = 0;
-  let denY = 0;
-
+  let sx = 0, sy = 0;
+  for (let i = 0; i < n; i++) { sx += x[i]; sy += y[i]; }
+  const meanX = sx / n, meanY = sy / n;
+  let num = 0, denX = 0, denY = 0;
   for (let i = 0; i < n; i++) {
-    const dx = x[i] - meanX;
-    const dy = y[i] - meanY;
-    num += dx * dy;
-    denX += dx * dx;
-    denY += dy * dy;
+    const dx = x[i] - meanX, dy = y[i] - meanY;
+    num += dx * dy; denX += dx * dx; denY += dy * dy;
   }
-
   if (denX === 0 || denY === 0) return 0;
   return num / Math.sqrt(denX * denY);
 }
@@ -126,26 +120,25 @@ export function standardize(data: number[][]): number[][] {
   if (!data || data.length === 0 || !data[0]) {
     return [];
   }
-
-  const standardized: number[][] = [];
+  const rows = data.length;
   const m = data[0].length;
+  // Pre-allocate the result once; compute each column's mean/sd in a single
+  // pass over the rows instead of allocating map()/filter() arrays per column.
+  const out: number[][] = new Array(rows);
+  for (let i = 0; i < rows; i++) out[i] = new Array(m);
 
   for (let j = 0; j < m; j++) {
-    const col = data.map(row => row[j]).filter(v => isFinite(v));
-    if (col.length === 0) continue;
-
-    const mean = col.reduce((a, b) => a + b, 0) / col.length;
-    const std = Math.sqrt(
-      col.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / Math.max(1, col.length - 1)
-    );
-
-    data.forEach((row, i) => {
-      if (!standardized[i]) standardized[i] = [];
-      standardized[i][j] = std === 0 ? 0 : (row[j] - mean) / std;
-    });
+    let sum = 0, cnt = 0;
+    for (let i = 0; i < rows; i++) { const v = data[i][j]; if (isFinite(v)) { sum += v; cnt++; } }
+    if (cnt === 0) { for (let i = 0; i < rows; i++) out[i][j] = 0; continue; }
+    const mean = sum / cnt;
+    let ss = 0;
+    for (let i = 0; i < rows; i++) { const v = data[i][j]; if (isFinite(v)) { const d = v - mean; ss += d * d; } }
+    const std = Math.sqrt(ss / Math.max(1, cnt - 1));
+    if (std === 0) { for (let i = 0; i < rows; i++) out[i][j] = 0; }
+    else { for (let i = 0; i < rows; i++) out[i][j] = (data[i][j] - mean) / std; }
   }
-
-  return standardized;
+  return out;
 }
 
 function multipleRegression(y: number[], X: number[][]): number[] {
@@ -701,17 +694,18 @@ export function calculateRSquared(
   return calculateRSquaredForRegression(y, X);
 }
 
-export function bootstrap(
+export async function bootstrap(
   data: number[][],
   model: PLSSEMModel,
   settings: any,
   numSamples: number,
-  columns?: string[]
-): {
+  columns?: string[],
+  onProgress?: (done: number, total: number) => void
+): Promise<{
   pathCoefficients: { [path: string]: number[] };
   loadings: { [construct: string]: number[][] };
   outerWeights: { [construct: string]: number[][] };
-} {
+}> {
   const results = {
     pathCoefficients: {} as { [path: string]: number[] },
     loadings: {} as { [construct: string]: number[][] },
@@ -726,6 +720,15 @@ export function bootstrap(
   model.constructs.forEach(construct => {
     results.loadings[construct.id] = [];
     results.outerWeights[construct.id] = [];
+  });
+
+  // Precompute each construct's indicator column indices once (constant across
+  // resamples) so the loadings loop below avoids repeated columns.indexOf.
+  const constructColIdx: { [id: string]: number[] } = {};
+  model.constructs.forEach(c => {
+    constructColIdx[c.id] = c.indicators
+      .map(ind => (columns ? columns.indexOf(ind) : -1))
+      .filter(idx => idx !== -1);
   });
 
   for (let i = 0; i < numSamples; i++) {
@@ -782,21 +785,36 @@ export function bootstrap(
         }
       });
 
+      // Standardize the resample ONCE, then read loadings as the correlation of
+      // each standardized indicator column with the construct's latent score —
+      // instead of calculateOuterLoadings re-standardizing the whole sample per
+      // construct (the dominant redundant cost in the bootstrap).
+      const stdSample = standardize(sample);
       model.constructs.forEach(construct => {
         const latentScores = plsResults.latentScores[construct.id];
-        if (latentScores) {
-          const loadings = calculateOuterLoadings(sample, construct, latentScores, columns);
-          results.loadings[construct.id].push(loadings);
-
-          const weights = plsResults.outerWeights[construct.id] || [];
-          results.outerWeights[construct.id].push(weights);
-        }
+        if (!latentScores) return;
+        const idxs = constructColIdx[construct.id];
+        const loadings = idxs.map(colIdx => {
+          const col = new Array(stdSample.length);
+          for (let r = 0; r < stdSample.length; r++) col[r] = stdSample[r][colIdx];
+          return pearsonCorrelation(col, latentScores);
+        });
+        results.loadings[construct.id].push(loadings);
+        results.outerWeights[construct.id].push(plsResults.outerWeights[construct.id] || []);
       });
     } catch (e) {
       continue;
     }
+
+    // Yield to the event loop every ~200 subsamples so the UI can repaint a
+    // progress bar instead of freezing for the whole run.
+    if ((i & 199) === 0) {
+      onProgress?.(i, numSamples);
+      await new Promise<void>(r => setTimeout(r));
+    }
   }
 
+  onProgress?.(numSamples, numSamples);
   return results;
 }
 

@@ -31,6 +31,7 @@ export function PLSSEM() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [selectedDataset, setSelectedDataset] = useState<string>('');
   const [loading, setLoading] = useState(false);
+  const [bootProgress, setBootProgress] = useState(0);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [activeTab, setActiveTab] = useState<TabType>('setup');
@@ -249,6 +250,7 @@ export function PLSSEM() {
     }
 
     setLoading(true);
+    setBootProgress(0);
     setError('');
 
     try {
@@ -260,7 +262,10 @@ export function PLSSEM() {
         throw new Error(`Algorithm did not converge after ${plsResults.iterations} iterations`);
       }
 
-      const bootstrapResults = bootstrap(numericData, model, settings, settings.bootstrapSamples, currentDataset!.columns);
+      const bootstrapResults = await bootstrap(
+        numericData, model, settings, settings.bootstrapSamples, currentDataset!.columns,
+        (done, total) => setBootProgress(Math.round((done / total) * 100)),
+      );
 
       const measurementModel: any = {
         reflective: {},
@@ -1698,7 +1703,9 @@ export function PLSSEM() {
             {loading ? (
               <>
                 <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                <span className="hidden sm:inline">Analyzing...</span>
+                <span className="hidden sm:inline">
+                  {bootProgress > 0 && bootProgress < 100 ? `Bootstrapping ${bootProgress}%` : 'Analyzing…'}
+                </span>
               </>
             ) : (
               <>
@@ -1710,6 +1717,15 @@ export function PLSSEM() {
           </button>
         </div>
       </div>
+
+      {loading && bootProgress > 0 && bootProgress < 100 && (
+        <div className="mt-2">
+          <div className="h-1.5 w-full bg-blue-100 rounded-full overflow-hidden">
+            <div className="h-full bg-blue-600 transition-all duration-150" style={{ width: `${bootProgress}%` }} />
+          </div>
+          <p className="text-xs text-gray-500 mt-1">Running {(settings.bootstrapSamples).toLocaleString()} bootstrap subsamples… {bootProgress}%</p>
+        </div>
+      )}
 
       {error && (
         <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
