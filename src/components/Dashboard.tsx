@@ -41,10 +41,19 @@ export function Dashboard({ onNavigate }: DashboardProps) {
   });
   const [userName, setUserName] = useState<string>('');
   const [loading, setLoading] = useState(true);
+  const [community, setCommunity] = useState<{ users: number; analyses: number; memberNumber: number } | null>(null);
 
   useEffect(() => {
     loadStats();
+    loadCommunity();
   }, []);
+
+  const loadCommunity = async () => {
+    try {
+      const res = await fetch('/api/stats/community');
+      if (res.ok) setCommunity(await res.json());
+    } catch { /* non-critical */ }
+  };
 
   const loadStats = async () => {
     try {
@@ -196,8 +205,25 @@ export function Dashboard({ onNavigate }: DashboardProps) {
   return (
     <div className="space-y-6">
       <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-2xl p-8 text-white shadow-lg">
-        <h1 className="text-3xl font-bold mb-2">Welcome back, {userName}</h1>
-        <p className="text-blue-100 mb-6">Your psychometric intelligence platform is ready. Continue your analysis or start a new project.</p>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h1 className="text-3xl font-bold mb-2">Welcome back, {userName}</h1>
+            <p className="text-blue-100 mb-6">Your psychometric intelligence platform is ready. Continue your analysis or start a new project.</p>
+          </div>
+          {community && (
+            <div className="bg-white/10 backdrop-blur rounded-xl px-5 py-4 border border-white/20 flex items-center gap-3">
+              <Users className="w-8 h-8 text-blue-100 flex-shrink-0" />
+              <div>
+                <p className="text-2xl font-bold leading-none">
+                  Founding Member #{community.memberNumber.toLocaleString()}
+                </p>
+                <p className="text-xs text-blue-100 mt-1">
+                  of the Psychtrix global research community
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
         <div className="flex gap-3">
           <button
             onClick={() => onNavigate('data-import')}

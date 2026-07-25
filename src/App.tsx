@@ -3,6 +3,7 @@ import { useAuth } from './components/AuthProvider';
 import { LoginForm } from './components/LoginForm';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
+import { Footer } from './components/Footer';
 
 // Route-level code splitting: each module loads on first visit instead of
 // shipping one 1.6 MB bundle before the login screen can even paint.
@@ -137,6 +138,8 @@ function App() {
             </Suspense>
           </div>
         </main>
+
+        <Footer />
       </div>
     </div>
   );

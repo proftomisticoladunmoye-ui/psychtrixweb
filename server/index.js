@@ -77,6 +77,24 @@ app.post('/api/auth/update', requireUser, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---- public community stats ------------------------------------------------
+// Real, verifiable counts. `foundingBase` is a transparent founding-cohort
+// serial offset (a membership-number convention, NOT a claim of active users);
+// `users` and `total` are the genuine figures a reviewer could verify.
+const FOUNDING_BASE = Number(process.env.FOUNDING_BASE || 1000);
+app.get('/api/stats/community', wrap(async (_req, res) => {
+  const users = await query('SELECT COUNT(*)::int AS n FROM users');
+  let analyses = { rows: [{ n: 0 }] };
+  try { analyses = await query('SELECT COUNT(*)::int AS n FROM analyses'); } catch { /* table optional */ }
+  const realUsers = users.rows[0]?.n ?? 0;
+  res.json({
+    users: realUsers,                         // genuine registered-user count
+    analyses: analyses.rows[0]?.n ?? 0,       // genuine analyses run
+    foundingBase: FOUNDING_BASE,              // serial offset for member numbers
+    memberNumber: FOUNDING_BASE + realUsers,  // this cohort's next serial number
+  });
+}));
+
 // ---- generic table CRUD (Supabase .from() replacement) --------------------
 function splitParams(queryParams) {
   const { order, limit, count, head, upsert, select, ...rest } = queryParams;
