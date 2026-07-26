@@ -24,6 +24,7 @@ import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON, exportChartAsImage, exportPathAnalysisResults } from '../lib/exportUtils';
 import { saveAnalysisHistory } from '../lib/analysisHistory';
 import { PathDiagram } from './PathDiagram';
+import { PathModelBuilder, deriveModel, type BuilderGraph, type DerivedModel } from './PathModelBuilder';
 
 interface Dataset {
   id: string;
@@ -219,6 +220,18 @@ export function PathAnalysis() {
   const [analysisType, setAnalysisType] = useState<'basic' | 'mediation' | 'moderation' | 'full' | 'parallel-mediation' | 'serial-mediation' | 'moderated-mediation' | 'custom-lavaan'>('basic');
 
   const [estimatorType, setEstimatorType] = useState<'OLS' | 'MLE'>('OLS');
+
+  // Visual model builder (interactive editor). When active, the drawn graph is
+  // the source of truth and derives pathModel/mediators/moderators/analysisType.
+  const [builderMode, setBuilderMode] = useState<'visual' | 'classic'>('visual');
+  const [builderGraph, setBuilderGraph] = useState<BuilderGraph>({ nodes: [], edges: [] });
+
+  const applyDerived = (m: DerivedModel) => {
+    setPathModel(m.pathModel);
+    setMediators(m.mediators);
+    setModerators(m.moderators);
+    setAnalysisType(m.analysisType);
+  };
 
   // Custom lavaan syntax model state
   const [customSyntax, setCustomSyntax] = useState('');
@@ -2824,7 +2837,50 @@ export function PathAnalysis() {
             </select>
           </div>
 
-          {/* Analysis Type */}
+          {/* Model builder mode */}
+          {analysisType !== 'custom-lavaan' && currentDataset && (
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="block text-sm font-medium text-gray-700">Build Your Model</label>
+                <div className="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm">
+                  <button
+                    onClick={() => setBuilderMode('visual')}
+                    className={`px-3 py-1.5 font-medium transition ${builderMode === 'visual' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    Visual Builder
+                  </button>
+                  <button
+                    onClick={() => {
+                      // seed the classic view from the current visual model
+                      applyDerived(deriveModel(builderGraph));
+                      setBuilderMode('classic');
+                    }}
+                    className={`px-3 py-1.5 font-medium transition ${builderMode === 'classic' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    Classic (Dropdowns)
+                  </button>
+                </div>
+              </div>
+              {builderMode === 'visual' && (
+                <>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Add variables, switch to <strong>Draw path</strong> and click a source then a target to connect them,
+                    then click any path to set its type (Direct, Mediation, Moderation, Covariance). The model type is
+                    detected automatically and mean-centered interaction terms are created for moderation.
+                  </p>
+                  <PathModelBuilder
+                    columns={currentDataset.columns}
+                    graph={builderGraph}
+                    onGraphChange={setBuilderGraph}
+                    onModelDerived={applyDerived}
+                  />
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Analysis Type (manual selector — Classic mode only; Visual auto-detects) */}
+          {builderMode === 'classic' && (
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Analysis Type (Hayes PROCESS Models)</label>
 
@@ -2916,6 +2972,7 @@ export function PathAnalysis() {
                   is not deployed. Restore the button when an R service exists. */}
             </div>
           </div>
+          )}
 
           {/* Estimator Selection */}
           <div>
@@ -3067,8 +3124,9 @@ export function PathAnalysis() {
             </div>
           )}
 
-          {/* Path Specification, Mediators, Moderators — hidden for custom-lavaan */}
-          {analysisType !== 'custom-lavaan' && (<>
+          {/* Path Specification, Mediators, Moderators — classic dropdown builder
+              (the Visual Builder above replaces these in visual mode). */}
+          {analysisType !== 'custom-lavaan' && builderMode === 'classic' && (<>
             <div>
             <div className="flex items-center justify-between mb-2">
               <label className="block text-sm font-medium text-gray-700">Specify Paths</label>
