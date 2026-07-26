@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   MousePointer2, Spline, GitBranch, Zap, Link2, Trash2,
-  Undo2, Redo2, Maximize2, ZoomIn, ZoomOut, Plus,
+  Undo2, Redo2, Maximize2, ZoomIn, ZoomOut, Plus, LayoutGrid,
 } from 'lucide-react';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -406,8 +406,49 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
   };
 
   const onPointerUp = () => {
-    if (drag.current?.kind === 'node') { history.current.push(graph); future.current = []; derive(graph); }
+    if (drag.current?.kind === 'node' && drag.current.id) {
+      // snap the dropped node to a 20px grid for tidy alignment
+      const id = drag.current.id;
+      const snapped = graph.nodes.map(n => n.id === id
+        ? { ...n, x: Math.round(n.x / 20) * 20, y: Math.round(n.y / 20) * 20 }
+        : n);
+      history.current.push(graph); future.current = [];
+      onGraphChange({ ...graph, nodes: snapped }); derive({ ...graph, nodes: snapped });
+    }
     drag.current = null;
+  };
+
+  // ── Auto-layout: layer nodes left→right by causal depth ─────────────────────
+  const autoLayout = () => {
+    const directed = graph.edges.filter(e => e.type === 'direct' || e.type === 'mediation');
+    const ids = graph.nodes.map(n => n.id);
+    const depth: Record<string, number> = {};
+    ids.forEach(id => { depth[id] = 0; });
+    for (let iter = 0; iter < ids.length + 1; iter++) {
+      let changed = false;
+      directed.forEach(e => { if (depth[e.to] < depth[e.from] + 1) { depth[e.to] = depth[e.from] + 1; changed = true; } });
+      if (!changed) break;
+    }
+    // Moderator-only nodes sit just left of the path they moderate.
+    graph.edges.filter(e => e.type === 'moderation' && e.moderates).forEach(e => {
+      if (!directed.some(d => d.from === e.from || d.to === e.from)) {
+        depth[e.from] = Math.max(0, (depth[e.moderates!] ?? 0));
+      }
+    });
+    const maxDepth = Math.max(0, ...Object.values(depth));
+    const byDepth: Record<number, string[]> = {};
+    ids.forEach(id => { const d = depth[id]; (byDepth[d] = byDepth[d] || []).push(id); });
+    const colGap = maxDepth > 0 ? (LOGICAL_W - 320) / maxDepth : 0;
+    const next = graph.nodes.map(n => {
+      const d = depth[n.id];
+      const col = byDepth[d];
+      const idx = col.indexOf(n.id);
+      const x = 160 + d * colGap;
+      const y = LOGICAL_H / 2 + (idx - (col.length - 1) / 2) * 120;
+      return { ...n, x, y };
+    });
+    commit({ ...graph, nodes: next });
+    setZoom(1); setPan({ x: 0, y: 0 });
   };
 
   // ── Node palette ─────────────────────────────────────────────────────────────
@@ -469,6 +510,9 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
         <span className="text-xs font-medium text-gray-600 w-10 text-center">{Math.round(zoom * 100)}%</span>
         <button onClick={() => setZoom(z => Math.min(3, +(z + 0.1).toFixed(1)))} className="p-1.5 rounded hover:bg-gray-200" title="Zoom in"><ZoomIn className="w-4 h-4 text-gray-600" /></button>
         <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} className="p-1.5 rounded hover:bg-gray-200" title="Reset view"><Maximize2 className="w-4 h-4 text-gray-600" /></button>
+        <button onClick={autoLayout} disabled={graph.nodes.length === 0} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-200 disabled:opacity-40" title="Arrange nodes left→right by causal order">
+          <LayoutGrid className="w-4 h-4" /> Auto-layout
+        </button>
         {mode === 'connect' && (
           <span className="text-xs text-blue-700 ml-1">{pendingFrom ? `Click a target node to link from “${pendingFrom}”` : 'Click a source node, then a target node'}</span>
         )}

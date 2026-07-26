@@ -1,5 +1,6 @@
 import React from 'react';
-import { AlertTriangle, Activity, TrendingUp } from 'lucide-react';
+import { AlertTriangle, Activity, TrendingUp, ScatterChart } from 'lucide-react';
+import { normalInv } from '../lib/polychoric';
 
 // ─── Shared types (subset of PathAnalysisResults) ────────────────────────────
 
@@ -17,10 +18,12 @@ interface Moderation {
   plot?: ModPlot;
 }
 interface VifRow { dv: string; predictor: string; vif: number }
+interface ResidualSet { dv: string; fitted: number[]; residuals: number[]; stdResiduals: number[] }
 
 interface Props {
   moderation?: Moderation[];
   vif?: VifRow[];
+  residuals?: ResidualSet[];
 }
 
 // ─── SVG plot helpers ────────────────────────────────────────────────────────
@@ -160,6 +163,62 @@ function JohnsonNeymanPlot({ m }: { m: Moderation }) {
   );
 }
 
+// ─── Residual diagnostics (residual-vs-fitted + normal Q–Q) ──────────────────
+
+function downsample<T>(arr: T[], max = 400): T[] {
+  if (arr.length <= max) return arr;
+  const step = arr.length / max;
+  const out: T[] = [];
+  for (let i = 0; i < max; i++) out.push(arr[Math.floor(i * step)]);
+  return out;
+}
+
+function ResidualDiagnostics({ r }: { r: ResidualSet }) {
+  // residual vs fitted
+  const pts = downsample(r.fitted.map((f, i) => ({ f, e: r.residuals[i] })));
+  const fLo = Math.min(...r.fitted), fHi = Math.max(...r.fitted);
+  const eAbs = Math.max(...r.residuals.map(Math.abs)) || 1;
+
+  // normal Q–Q of standardised residuals
+  const sorted = [...r.stdResiduals].sort((a, b) => a - b);
+  const n = sorted.length;
+  const qq = downsample(sorted.map((s, i) => ({ theo: normalInv((i + 0.5) / n), samp: s })));
+  const qLim = Math.max(3, ...qq.map(p => Math.max(Math.abs(p.theo), Math.abs(p.samp))));
+
+  return (
+    <div>
+      <p className="text-sm font-semibold text-gray-800 mb-1">Residual diagnostics — {r.dv}</p>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div>
+          <p className="text-xs text-gray-500 mb-1">Residuals vs fitted</p>
+          <Axes xlo={fLo} xhi={fHi} ylo={-eAbs * 1.05} yhi={eAbs * 1.05} xlab="Fitted" ylab="Residual">
+            {((sx: (x: number) => number, sy: (y: number) => number) => (
+              <>
+                <line x1={ML} y1={sy(0)} x2={ML + PW} y2={sy(0)} stroke="#94a3b8" strokeDasharray="4 3" />
+                {pts.map((p, i) => <circle key={i} cx={sx(p.f)} cy={sy(p.e)} r={1.7} fill="#2563eb" fillOpacity={0.5} />)}
+              </>
+            )) as any}
+          </Axes>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500 mb-1">Normal Q–Q (standardised residuals)</p>
+          <Axes xlo={-qLim} xhi={qLim} ylo={-qLim} yhi={qLim} xlab="Theoretical quantiles" ylab="Sample quantiles">
+            {((sx: (x: number) => number, sy: (y: number) => number) => (
+              <>
+                <line x1={sx(-qLim)} y1={sy(-qLim)} x2={sx(qLim)} y2={sy(qLim)} stroke="#94a3b8" strokeDasharray="4 3" />
+                {qq.map((p, i) => <circle key={i} cx={sx(p.theo)} cy={sy(p.samp)} r={1.7} fill="#059669" fillOpacity={0.5} />)}
+              </>
+            )) as any}
+          </Axes>
+        </div>
+      </div>
+      <p className="text-xs text-gray-500 mt-1">
+        Look for no pattern / constant spread in residuals-vs-fitted (homoscedasticity) and points on the diagonal in the Q–Q plot (normality).
+      </p>
+    </div>
+  );
+}
+
 // ─── VIF table ────────────────────────────────────────────────────────────────
 
 function VifTable({ vif }: { vif: VifRow[] }) {
@@ -204,10 +263,11 @@ function VifTable({ vif }: { vif: VifRow[] }) {
 
 // ─── Panel ────────────────────────────────────────────────────────────────────
 
-export function PathDiagnostics({ moderation, vif }: Props) {
+export function PathDiagnostics({ moderation, vif, residuals }: Props) {
   const mods = (moderation || []).filter(m => m.plot);
   const hasVif = (vif || []).length > 0;
-  if (!hasVif && mods.length === 0) return null;
+  const resids = (residuals || []).filter(r => r.residuals.length > 5);
+  if (!hasVif && mods.length === 0 && resids.length === 0) return null;
 
   return (
     <div className="space-y-6">
@@ -217,6 +277,16 @@ export function PathDiagnostics({ moderation, vif }: Props) {
       </div>
 
       {hasVif && <VifTable vif={vif!} />}
+
+      {resids.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-6">
+          <div className="flex items-center gap-2">
+            <ScatterChart className="w-5 h-5 text-blue-600" />
+            <h4 className="text-lg font-bold text-gray-900">Residual Diagnostics</h4>
+          </div>
+          {resids.map((r, i) => <ResidualDiagnostics key={i} r={r} />)}
+        </div>
+      )}
 
       {mods.map((m, i) => (
         <div key={i} className="bg-white rounded-xl border border-gray-200 p-6">

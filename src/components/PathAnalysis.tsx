@@ -225,6 +225,7 @@ interface PathAnalysisResults {
     pvalue: number;
   }>;
   vif?: Array<{ dv: string; predictor: string; vif: number }>;
+  residuals?: Array<{ dv: string; fitted: number[]; residuals: number[]; stdResiduals: number[] }>;
 }
 
 export function PathAnalysis() {
@@ -1160,6 +1161,7 @@ export function PathAnalysis() {
       const rSquaredMap: { [v: string]: number } = {};
 
       const endoRegs: { [v: string]: ReturnType<typeof olsRegression> & { predictors: string[] } } = {};
+      const residualsResults: PathAnalysisResults['residuals'] = [];
 
       endoVars.forEach(endo => {
         if (!cols.includes(endo)) return;
@@ -1172,6 +1174,16 @@ export function PathAnalysis() {
         const reg = olsRegression(yVals, XVals);
         endoRegs[endo] = { ...reg, predictors: preds };
         rSquaredMap[endo] = reg.rSquared;
+
+        // Fitted + (standardised) residuals for residual diagnostics
+        const fitted = yVals.map((y, i) => y - reg.residuals[i]);
+        const rsd = Math.sqrt(Math.max(1e-12, reg.s2));
+        residualsResults!.push({
+          dv: endo,
+          fitted,
+          residuals: reg.residuals.slice(),
+          stdResiduals: reg.residuals.map(r => r / rsd),
+        });
 
         const sdY = colSD(yVals);
         preds.forEach((pred, pi) => {
@@ -1894,6 +1906,7 @@ export function PathAnalysis() {
         conditionalEffects: conditionalEffectsResults,
         correlations: correlationsResult,
         vif: vifResults,
+        residuals: residualsResults,
       };
 
       setResults(finalResults);
@@ -2194,8 +2207,8 @@ export function PathAnalysis() {
         />
         )}
 
-        {/* Diagnostics & visualizations (VIF, interaction & Johnson–Neyman plots) */}
-        <PathDiagnostics moderation={results.moderation} vif={results.vif} />
+        {/* Diagnostics & visualizations (VIF, residuals, interaction & Johnson–Neyman plots) */}
+        <PathDiagnostics moderation={results.moderation} vif={results.vif} residuals={results.residuals} />
 
         {/* Path Coefficients Table */}
         <div className="bg-white rounded-xl border border-gray-200 p-6">
