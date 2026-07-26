@@ -45,10 +45,13 @@ export function About() {
           <h2 className="text-xl font-bold text-gray-900">Leadership</h2>
         </div>
         <p className="text-gray-700 leading-relaxed">
-          This initiative is championed by{' '}
-          <strong>Associate Professor Enoch O. Oladunmoye</strong>, whose vision is to democratise
-          access to advanced measurement and statistics for the next generation of African — and
-          global — social scientists.
+          This initiative is led by{' '}
+          <strong>Associate Professor Enoch O. Oladunmoye, PhD</strong>, a specialist in
+          Psychometrics and Quantitative Psychology in the Department of Applied Psychology,
+          Kampala International University, Uganda. His vision is to democratise access to advanced
+          psychometric measurement, quantitative research methods, and statistical analytics,
+          empowering the next generation of African and global social scientists with world-class
+          research tools.
         </p>
       </section>
 
