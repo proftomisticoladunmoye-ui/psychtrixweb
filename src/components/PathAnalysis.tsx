@@ -25,6 +25,7 @@ import { exportResultsToPDF, exportToCSV, exportToJSON, exportChartAsImage, expo
 import { saveAnalysisHistory } from '../lib/analysisHistory';
 import { PathDiagram } from './PathDiagram';
 import { PathModelBuilder, deriveModel, type BuilderGraph, type DerivedModel, type BuilderResults } from './PathModelBuilder';
+import { PathDiagnostics } from './PathDiagnostics';
 
 // Map the engine's results into the shape the visual builder overlays on paths.
 function toBuilderResults(results: PathAnalysisResults | null): BuilderResults | null {
@@ -195,6 +196,13 @@ interface PathAnalysisResults {
       significance: 'always' | 'never' | 'conditional';
       conditionalRange?: [number, number];
     };
+    plot?: {
+      b0: number; b1: number; b2: number; b3: number;
+      v11: number; v33: number; v13: number;
+      tCrit: number; df: number;
+      xMin: number; xMax: number; wMin: number; wMax: number;
+      wLow: number; wHigh: number;
+    };
   }>;
   conditionalEffects?: Array<{
     focusVariable: string;
@@ -216,6 +224,7 @@ interface PathAnalysisResults {
     correlation: number;
     pvalue: number;
   }>;
+  vif?: Array<{ dv: string; predictor: string; vif: number }>;
 }
 
 export function PathAnalysis() {
@@ -1176,6 +1185,23 @@ export function PathAnalysis() {
         });
       });
 
+      // ── 1b. VIF (multicollinearity) per endogenous equation ──────────────────
+      // VIFⱼ = 1 / (1 − R²ⱼ), R²ⱼ from regressing predictor j on the other
+      // predictors of the same outcome. Only meaningful with ≥ 2 predictors.
+      const vifResults: PathAnalysisResults['vif'] = [];
+      endoVars.forEach(endo => {
+        const preds = validPaths.filter(p => p.to === endo).map(p => p.from).filter(p => cols.includes(p));
+        if (preds.length < 2) return;
+        preds.forEach(pred => {
+          const others = preds.filter(o => o !== pred);
+          const yv = getCol(mat, cols, pred);
+          const Xv = mat.map(row => others.map(o => row[cols.indexOf(o)]));
+          const r2 = olsRegression(yv, Xv).rSquared;
+          const vif = 1 / Math.max(1e-6, 1 - r2);
+          vifResults!.push({ dv: endo, predictor: pred, vif });
+        });
+      });
+
       // ── 2. Fit Indices ───────────────────────────────────────────────────────
       // All variables involved in the model
       const allModelVars = [...new Set([...validPaths.map(p => p.from), ...validPaths.map(p => p.to)])]
@@ -1506,17 +1532,19 @@ export function PathAnalysis() {
             // Johnson-Neyman: find values of W where the simple slope CI just crosses zero
             // t²(w*) = (b1 + b3·w*)² / [s²·(v11 + w*²·v33 + 2·w*·v13)] = t_crit²
             // Rearranging: (b3² - tc²·s²·v33)·w*² + 2·(b1·b3 - tc²·s²·v13)·w* + (b1² - tc²·s²·v11) = 0
+            // Exact two-tailed critical t at α=0.05 via bisection (shared by the
+            // Johnson-Neyman solution and the region-of-significance plot band).
+            const df4 = n - 4;
+            let tcLo = 1.5, tcHi = 5.0;
+            for (let iter = 0; iter < 60; iter++) {
+              const mid = (tcLo + tcHi) / 2;
+              const pMid = df4 > 0 ? incompleteBetaReg(df4 / (df4 + mid * mid), df4 / 2, 0.5) : 1;
+              if (pMid > 0.05) tcLo = mid; else tcHi = mid;
+            }
+            const tCrit = (tcLo + tcHi) / 2;
+
             let jnLower: number | null = null, jnUpper: number | null = null;
             {
-              const df = n - 4;
-              // Obtain exact two-tailed t_crit at α=0.05 via bisection on incompleteBetaReg
-              let tcLo = 1.5, tcHi = 5.0;
-              for (let iter = 0; iter < 60; iter++) {
-                const mid = (tcLo + tcHi) / 2;
-                const pMid = df > 0 ? incompleteBetaReg(df / (df + mid * mid), df / 2, 0.5) : 1;
-                if (pMid > 0.05) tcLo = mid; else tcHi = mid;
-              }
-              const tCrit = (tcLo + tcHi) / 2;
               const tc2s2 = tCrit ** 2 * s2Reg;
               const v11 = inv[1][1], v33 = inv[3][3], v13 = inv[1][3];
               const A = b3 ** 2 - tc2s2 * v33;
@@ -1547,6 +1575,16 @@ export function PathAnalysis() {
                   : p3 < 0.05 ? 'always' as const : 'never' as const,
                 conditionalRange: jnLower !== null && jnUpper !== null
                   ? [jnLower, jnUpper] as [number, number] : undefined,
+              },
+              // Everything the inline charts need (simple-slopes lines + J-N band),
+              // all on the mean-centered X / W metric the model was fitted in.
+              plot: {
+                b0, b1, b2, b3,
+                v11: s2Reg * inv[1][1], v33: s2Reg * inv[3][3], v13: s2Reg * inv[1][3],
+                tCrit, df: df4,
+                xMin: Math.min(...xC), xMax: Math.max(...xC),
+                wMin: Math.min(...wC), wMax: Math.max(...wC),
+                wLow: -wSD, wHigh: wSD,
               },
             };
           });
@@ -1855,6 +1893,7 @@ export function PathAnalysis() {
         moderatedMediation: moderatedMedResult,
         conditionalEffects: conditionalEffectsResults,
         correlations: correlationsResult,
+        vif: vifResults,
       };
 
       setResults(finalResults);
@@ -2154,6 +2193,9 @@ export function PathAnalysis() {
           }}
         />
         )}
+
+        {/* Diagnostics & visualizations (VIF, interaction & Johnson–Neyman plots) */}
+        <PathDiagnostics moderation={results.moderation} vif={results.vif} />
 
         {/* Path Coefficients Table */}
         <div className="bg-white rounded-xl border border-gray-200 p-6">
