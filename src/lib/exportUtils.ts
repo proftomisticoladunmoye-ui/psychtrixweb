@@ -3575,6 +3575,120 @@ export const exportInvarianceToHTML = (results: any, studyName: string = 'Measur
 };
 
 
+// ── APA-style path analysis report (diagram + tables + auto narrative) ────────
+
+const apaP = (p: number) => p < 0.001 ? '< .001' : '= ' + p.toFixed(3).replace(/^0/, '');
+const apaB = (v: number) => (v < 0 ? '−' : '') + Math.abs(v).toFixed(2).replace(/^0\./, '.');
+
+export const exportPathAnalysisAPAReport = (results: any, diagramDataUrl?: string, meta?: { estimator?: string; n?: number; analysisType?: string; datasetName?: string }) => {
+  if (!results || !results.paths) { console.error('No results to export'); return; }
+  const est = meta?.estimator === 'MLE' ? 'maximum likelihood' : 'ordinary least squares (OLS)';
+  const fi = results.fitIndices || {};
+  const paths: any[] = results.paths || [];
+  const sig = paths.filter(p => p.pvalue < 0.05);
+  const med: any[] = results.mediation || [];
+  const mod: any[] = results.moderation || [];
+  const vif: any[] = results.vif || [];
+
+  // Auto-generated APA results narrative.
+  const narrative: string[] = [];
+  narrative.push(`A path analysis was estimated using ${est} on the observed variables${meta?.datasetName ? ` from the “${meta.datasetName}” dataset` : ''}${meta?.n ? ` (N = ${meta.n})` : ''}. Standardized path coefficients (β) are reported; model fit was χ²(${fi.df ?? '—'}) = ${fi.chisq != null ? fi.chisq.toFixed(2) : '—'}, p ${fi.pvalue != null ? apaP(fi.pvalue) : '= —'}, CFI = ${fi.cfi != null ? fi.cfi.toFixed(3) : '—'}, RMSEA = ${fi.rmsea != null ? fi.rmsea.toFixed(3) : '—'}, SRMR = ${fi.srmr != null ? fi.srmr.toFixed(3) : '—'}.`);
+  if (sig.length) {
+    narrative.push('Significant direct effects: ' + sig.map(p =>
+      `${p.from} → ${p.to} (β = ${apaB(p.beta)}, p ${apaP(p.pvalue)})`).join('; ') + '.');
+  } else {
+    narrative.push('No direct paths reached statistical significance at α = .05.');
+  }
+  med.forEach(m => {
+    const ci = m.bootstrapCI || [];
+    const s = m.mediationType === 'none' ? 'was not supported' : `indicated ${m.mediationType} mediation`;
+    narrative.push(`The indirect effect of ${m.iv} on ${m.dv} through ${m.mediator} was ${apaB(m.indirectEffect)}` +
+      (ci.length === 2 ? ` (95% bootstrap CI [${apaB(ci[0])}, ${apaB(ci[1])}])` : '') +
+      `; this ${s}.`);
+  });
+  mod.forEach(m => {
+    const jn = m.johnsonNeyman;
+    let jnTxt = '';
+    if (jn?.significance === 'conditional' && jn.lowerBound != null && jn.upperBound != null)
+      jnTxt = ` The Johnson–Neyman analysis indicated the effect was significant outside the interval [${jn.lowerBound.toFixed(2)}, ${jn.upperBound.toFixed(2)}] of ${m.moderator}.`;
+    else if (jn?.significance === 'always') jnTxt = ` The conditional effect was significant across the observed range of ${m.moderator}.`;
+    else if (jn?.significance === 'never') jnTxt = ` The conditional effect was non-significant across the range of ${m.moderator}.`;
+    narrative.push(`The ${m.iv} × ${m.moderator} interaction on ${m.dv} was ${m.interactionP < 0.05 ? 'significant' : 'not significant'} (b = ${apaB(m.interactionEffect)}, p ${apaP(m.interactionP)}).${jnTxt}`);
+  });
+
+  const fitRows = [
+    ['χ²', fi.chisq != null ? fi.chisq.toFixed(2) : '—'], ['df', fi.df ?? '—'],
+    ['p', fi.pvalue != null ? fi.pvalue.toFixed(3) : '—'], ['CFI', fi.cfi != null ? fi.cfi.toFixed(3) : '—'],
+    ['TLI', fi.tli != null ? fi.tli.toFixed(3) : '—'], ['RMSEA', fi.rmsea != null ? fi.rmsea.toFixed(3) : '—'],
+    ['SRMR', fi.srmr != null ? fi.srmr.toFixed(3) : '—'], ['AIC', fi.aic != null ? fi.aic.toFixed(2) : '—'], ['BIC', fi.bic != null ? fi.bic.toFixed(2) : '—'],
+  ];
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Path Analysis — APA Report</title>
+    <style>
+      body { font-family: 'Times New Roman', Times, serif; font-size: 12pt; line-height: 2; color: #111; margin: 48px; max-width: 900px; }
+      h1 { font-size: 15pt; text-align: center; } h2 { font-size: 13pt; margin-top: 24px; } h3 { font-size: 12pt; font-style: italic; }
+      p { text-align: justify; } .meta { text-align: center; font-size: 10pt; color: #444; line-height: 1.4; }
+      table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 11pt; }
+      th, td { padding: 4px 8px; text-align: left; } thead th { border-top: 1px solid #000; border-bottom: 1px solid #000; }
+      tbody tr:last-child td { border-bottom: 1px solid #000; }
+      .num { text-align: right; } figure { text-align: center; margin: 16px 0; } figure img { max-width: 100%; border: 1px solid #ddd; }
+      .cap { font-size: 10pt; font-style: italic; } .note { font-size: 10pt; color: #444; }
+      .print-btn { background:#2563eb;color:#fff;border:none;padding:10px 18px;border-radius:6px;cursor:pointer;font-family:sans-serif;margin-bottom:16px; }
+      @media print { .print-btn { display:none; } body { margin: 24px; } }
+    </style></head><body>
+    <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
+    <h1>Path Analysis</h1>
+    <p class="meta">Generated ${new Date().toLocaleString()} · Psychtrix Web${meta?.analysisType ? ` · ${meta.analysisType} model` : ''}</p>
+
+    <h2>Method</h2>
+    <p>${narrative[0]}</p>
+
+    ${diagramDataUrl ? `<figure><img src="${diagramDataUrl}" alt="Path model diagram" />
+      <figcaption class="cap">Figure 1. Path model with standardized coefficients. * p &lt; .05, ** p &lt; .01, *** p &lt; .001.</figcaption></figure>` : ''}
+
+    <h2>Model Fit</h2>
+    <table><thead><tr><th>Index</th><th class="num">Value</th></tr></thead><tbody>
+      ${fitRows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${v}</td></tr>`).join('')}
+    </tbody></table>
+
+    <h2>Results</h2>
+    ${narrative.slice(1).map(t => `<p>${t}</p>`).join('')}
+
+    <h3>Table 1. Path coefficients</h3>
+    <table><thead><tr><th>Predictor</th><th>Outcome</th><th class="num">B</th><th class="num">SE</th><th class="num">β</th><th class="num">t</th><th class="num">p</th></tr></thead><tbody>
+      ${paths.map(p => `<tr><td>${p.from}</td><td>${p.to}</td><td class="num">${p.coefficient.toFixed(3)}</td><td class="num">${p.se.toFixed(3)}</td><td class="num">${apaB(p.beta)}</td><td class="num">${p.t.toFixed(2)}</td><td class="num">${p.pvalue < .001 ? '<.001' : p.pvalue.toFixed(3)}</td></tr>`).join('')}
+    </tbody></table>
+
+    ${med.length ? `<h3>Table 2. Indirect effects</h3>
+    <table><thead><tr><th>IV</th><th>Mediator</th><th>DV</th><th class="num">Indirect</th><th class="num">95% CI</th><th>Type</th></tr></thead><tbody>
+      ${med.map(m => `<tr><td>${m.iv}</td><td>${m.mediator}</td><td>${m.dv}</td><td class="num">${m.indirectEffect.toFixed(3)}</td><td class="num">${m.bootstrapCI ? `[${m.bootstrapCI[0].toFixed(3)}, ${m.bootstrapCI[1].toFixed(3)}]` : '—'}</td><td>${m.mediationType}</td></tr>`).join('')}
+    </tbody></table>` : ''}
+
+    ${mod.length ? `<h3>Table 3. Simple slopes (moderation)</h3>
+    <table><thead><tr><th>Interaction</th><th>Moderator level</th><th class="num">Slope</th><th class="num">SE</th><th class="num">t</th><th class="num">p</th></tr></thead><tbody>
+      ${mod.flatMap(m => (['low', 'mean', 'high'] as const).map(lv => {
+        const s = m.simpleSlopes?.[lv]; if (!s) return '';
+        const lab = lv === 'low' ? '−1 SD' : lv === 'high' ? '+1 SD' : 'Mean';
+        return `<tr><td>${m.iv} × ${m.moderator} → ${m.dv}</td><td>${lab}</td><td class="num">${s.slope.toFixed(3)}</td><td class="num">${s.se.toFixed(3)}</td><td class="num">${s.t.toFixed(2)}</td><td class="num">${s.p < .001 ? '<.001' : s.p.toFixed(3)}</td></tr>`;
+      })).join('')}
+    </tbody></table>` : ''}
+
+    ${vif.length ? `<h3>Table ${med.length || mod.length ? (2 + (med.length ? 1 : 0) + (mod.length ? 1 : 0)) : 2}. Multicollinearity (VIF)</h3>
+    <table><thead><tr><th>Outcome</th><th>Predictor</th><th class="num">VIF</th><th class="num">Tolerance</th></tr></thead><tbody>
+      ${vif.map(r => `<tr><td>${r.dv}</td><td>${r.predictor}</td><td class="num">${r.vif.toFixed(2)}</td><td class="num">${(1 / r.vif).toFixed(3)}</td></tr>`).join('')}
+    </tbody></table>` : ''}
+
+    <p class="note">Note. β = standardized coefficient. ${med.length ? 'Indirect-effect confidence intervals are bootstrap percentile intervals. ' : ''}Report generated by Psychtrix Web.</p>
+    </body></html>`;
+
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `Path_Analysis_APA_Report_${new Date().toISOString().split('T')[0]}.html`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+};
+
 export const exportPathAnalysisResults = (results: any) => {
   if (!results || !results.paths) {
     console.error('No results to export');

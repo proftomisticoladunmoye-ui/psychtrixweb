@@ -21,10 +21,10 @@ import {
 import { rAnalysisClient } from '../lib/rAnalysisClient';
 import { normalCDF, chiSqPValue, ncpRmseaBound } from '../lib/statDistributions';
 import { Bar } from 'react-chartjs-2';
-import { exportResultsToPDF, exportToCSV, exportToJSON, exportChartAsImage, exportPathAnalysisResults } from '../lib/exportUtils';
+import { exportResultsToPDF, exportToCSV, exportToJSON, exportChartAsImage, exportPathAnalysisResults, exportPathAnalysisAPAReport } from '../lib/exportUtils';
 import { saveAnalysisHistory } from '../lib/analysisHistory';
 import { PathDiagram } from './PathDiagram';
-import { PathModelBuilder, deriveModel, type BuilderGraph, type DerivedModel, type BuilderResults } from './PathModelBuilder';
+import { PathModelBuilder, deriveModel, renderDiagramDataUrl, roleFor, type BuilderGraph, type DerivedModel, type BuilderResults } from './PathModelBuilder';
 import { PathDiagnostics } from './PathDiagnostics';
 
 // Map the engine's results into the shape the visual builder overlays on paths.
@@ -2841,7 +2841,22 @@ export function PathAnalysis() {
         {/* Export Section */}
         <div className="bg-white rounded-xl border border-gray-200 p-6">
           <h4 className="text-lg font-bold text-gray-900 mb-4">Export Results</h4>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <button
+              onClick={() => {
+                const diagram = builderMode === 'visual' && builderGraph.nodes.length > 0
+                  ? renderDiagramDataUrl(builderGraph, { results: toBuilderResults(results), showSE: false, showCI: false, showR2: true, roleOf: roleFor(builderGraph) })
+                  : undefined;
+                exportPathAnalysisAPAReport(results, diagram, {
+                  estimator: results?.estimator, n: currentDataset?.data?.length,
+                  analysisType, datasetName: currentDataset?.name,
+                });
+              }}
+              className="flex items-center justify-center gap-2 px-6 py-3 bg-blue-700 hover:bg-blue-800 text-white rounded-lg transition font-medium"
+            >
+              <Download className="w-5 h-5" />
+              APA Report
+            </button>
             <button
               onClick={() => handleExport('html')}
               className="flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-medium"

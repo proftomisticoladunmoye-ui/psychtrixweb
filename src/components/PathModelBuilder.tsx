@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   MousePointer2, Spline, GitBranch, Zap, Link2, Trash2,
-  Undo2, Redo2, Maximize2, ZoomIn, ZoomOut, Plus, LayoutGrid,
+  Undo2, Redo2, Maximize2, ZoomIn, ZoomOut, Plus, LayoutGrid, Download,
 } from 'lucide-react';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -128,6 +128,146 @@ function valuePill(ctx: CanvasRenderingContext2D, lines: string[], x: number, y:
   ctx.restore();
 }
 
+// Draws the edges + nodes of the model (shared by the live canvas and the
+// high-resolution export). Interactive extras (grid, pending line, selection
+// highlight) are opt-in via `opts` so the exported figure stays clean.
+interface SceneOpts {
+  results?: BuilderResults | null;
+  showSE?: boolean; showCI?: boolean; showR2?: boolean;
+  roleOf: (id: string) => 'exo' | 'med' | 'out' | 'mod';
+  selectedEdge?: string | null;
+  mode?: 'select' | 'connect';
+  pendingFrom?: string | null;
+  hoverPoint?: { x: number; y: number } | null;
+}
+function drawScene(ctx: CanvasRenderingContext2D, graph: BuilderGraph, opts: SceneOpts) {
+  const { results, showSE, showCI, showR2, roleOf, selectedEdge, mode, pendingFrom, hoverPoint } = opts;
+  const pos = new Map(graph.nodes.map(n => [n.id, n]));
+
+  graph.edges.forEach(edge => {
+    const a = pos.get(edge.from), b = pos.get(edge.to);
+    if (!a || !b) return;
+    const meta = TYPE_META[edge.type];
+    const sel = edge.id === selectedEdge;
+    ctx.save();
+    ctx.strokeStyle = meta.color; ctx.lineWidth = sel ? 3 : 2;
+
+    if (edge.type === 'covariance') {
+      const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2 - 46;
+      ctx.setLineDash([6, 4]);
+      const [sx, sy] = rectEdgePoint(a.x, a.y, Math.atan2(midY - a.y, midX - a.x));
+      const [ex, ey] = rectEdgePoint(b.x, b.y, Math.atan2(midY - b.y, midX - b.x));
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.quadraticCurveTo(midX, midY, ex, ey); ctx.stroke();
+      ctx.setLineDash([]);
+      arrowhead(ctx, sx, sy, Math.atan2(sy - midY, sx - midX), meta.color, 8);
+      arrowhead(ctx, ex, ey, Math.atan2(ey - midY, ex - midX), meta.color, 8);
+    } else if (edge.type === 'moderation') {
+      const iv = edge.moderates ? pos.get(edge.moderates) : null;
+      const target = iv ? { x: (iv.x + b.x) / 2, y: (iv.y + b.y) / 2 } : b;
+      const ang = Math.atan2(target.y - a.y, target.x - a.x);
+      const [sx, sy] = rectEdgePoint(a.x, a.y, ang);
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(target.x, target.y); ctx.stroke();
+      ctx.setLineDash([]);
+      arrowhead(ctx, target.x, target.y, ang, meta.color, 9);
+      const mstat = edge.moderates ? results?.moderation?.[`${edge.from}*${edge.moderates}->${edge.to}`] : undefined;
+      if (mstat) valuePill(ctx, ['int ' + fmtCoef(mstat.beta) + pStar(mstat.pvalue)], target.x, target.y - 14, mstat.pvalue < 0.05 ? '#7c3aed' : '#6b7280');
+    } else {
+      const ang = Math.atan2(b.y - a.y, b.x - a.x);
+      const [sx, sy] = rectEdgePoint(a.x, a.y, ang);
+      const [ex, ey] = rectEdgePoint(b.x, b.y, ang + Math.PI);
+      const stat = results?.paths[`${edge.from}->${edge.to}`];
+      if (stat) {
+        const sig = stat.pvalue < 0.05;
+        ctx.strokeStyle = sig ? meta.color : '#9ca3af';
+        ctx.lineWidth = sig ? Math.max(2, Math.min(5, 1.5 + Math.abs(stat.beta) * 4)) : 1.6;
+        if (!sig) ctx.setLineDash([6, 4]);
+      }
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+      ctx.setLineDash([]);
+      arrowhead(ctx, ex, ey, ang, ctx.strokeStyle as string, 10);
+      if (stat) {
+        const lines = [fmtCoef(stat.beta) + pStar(stat.pvalue)];
+        if (showSE) lines.push(`SE ${stat.se.toFixed(2)}`);
+        if (showCI) lines.push(`[${fmtCoef(stat.beta - 1.96 * stat.se)}, ${fmtCoef(stat.beta + 1.96 * stat.se)}]`);
+        const mx = (sx + ex) / 2 - Math.sin(ang) * 16;
+        const my = (sy + ey) / 2 + Math.cos(ang) * 16;
+        valuePill(ctx, lines, mx, my, stat.pvalue < 0.05 ? '#1f2937' : '#6b7280');
+      }
+    }
+    ctx.restore();
+  });
+
+  if (mode === 'connect' && pendingFrom && hoverPoint) {
+    const a = pos.get(pendingFrom);
+    if (a) { ctx.save(); ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1.6; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(hoverPoint.x, hoverPoint.y); ctx.stroke(); ctx.restore(); }
+  }
+
+  graph.nodes.forEach(n => {
+    const role = roleOf(n.id);
+    const fill = role === 'med' ? '#fef9c3' : role === 'out' ? '#dcfce7' : role === 'mod' ? '#f3e8ff' : '#dbeafe';
+    const stroke = role === 'med' ? '#b45309' : role === 'out' ? '#16a34a' : role === 'mod' ? '#7c3aed' : '#2563eb';
+    const isPending = n.id === pendingFrom;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.08)'; ctx.shadowBlur = 5; ctx.shadowOffsetY = 2;
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = isPending ? '#ef4444' : stroke;
+    ctx.lineWidth = isPending ? 3 : 2;
+    ctx.beginPath();
+    (ctx as any).roundRect?.(n.x - NODE_W / 2, n.y - NODE_H / 2, NODE_W, NODE_H, 6) ?? ctx.rect(n.x - NODE_W / 2, n.y - NODE_H / 2, NODE_W, NODE_H);
+    ctx.fill(); ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#1e293b';
+    ctx.font = 'bold 12px system-ui,Arial,sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    let txt = n.id; const maxW = NODE_W - 12;
+    while (ctx.measureText(txt).width > maxW && txt.length > 1) txt = txt.slice(0, -1);
+    if (txt !== n.id) txt = txt.slice(0, -1) + '…';
+    ctx.fillText(txt, n.x, n.y);
+    const r2 = results?.rSquared[n.id];
+    if (showR2 && r2 != null && (role === 'med' || role === 'out')) {
+      ctx.fillStyle = '#4b5563';
+      ctx.font = 'bold 10px system-ui,Arial,sans-serif';
+      ctx.fillText(`R² = ${fmtCoef(r2)}`, n.x, n.y + NODE_H / 2 + 10);
+    }
+    ctx.restore();
+  });
+}
+
+// Role classifier for a graph (exogenous / mediator / outcome / moderator).
+export function roleFor(graph: BuilderGraph): (id: string) => 'exo' | 'med' | 'out' | 'mod' {
+  const derived = deriveModel(graph);
+  return (id: string) => {
+    if (graph.edges.some(e => e.type === 'moderation' && e.from === id)) return 'mod';
+    if (derived.mediators.includes(id)) return 'med';
+    const hasOut = graph.edges.some(e => (e.type === 'direct' || e.type === 'mediation') && e.from === id);
+    const hasIn = graph.edges.some(e => (e.type === 'direct' || e.type === 'mediation') && e.to === id);
+    if (hasIn && !hasOut) return 'out';
+    return 'exo';
+  };
+}
+
+// Renders the model to a tight, white-background 2× PNG data URL (for download
+// or embedding in the APA report). Returns '' for an empty model.
+export function renderDiagramDataUrl(graph: BuilderGraph, opts: Omit<SceneOpts, 'selectedEdge' | 'mode' | 'pendingFrom' | 'hoverPoint'>): string {
+  if (graph.nodes.length === 0) return '';
+  const xs = graph.nodes.map(n => n.x), ys = graph.nodes.map(n => n.y);
+  const pad = 90;
+  const minX = Math.min(...xs) - NODE_W / 2 - pad, maxX = Math.max(...xs) + NODE_W / 2 + pad;
+  const minY = Math.min(...ys) - NODE_H / 2 - pad, maxY = Math.max(...ys) + NODE_H / 2 + pad;
+  const w = Math.max(200, maxX - minX), h = Math.max(160, maxY - minY);
+  const SS = 2;
+  const off = document.createElement('canvas');
+  off.width = Math.round(w * SS); off.height = Math.round(h * SS);
+  const ctx = off.getContext('2d');
+  if (!ctx) return '';
+  ctx.setTransform(SS, 0, 0, SS, -minX * SS, -minY * SS);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(minX, minY, w, h);
+  drawScene(ctx, graph, { ...opts, selectedEdge: null });
+  return off.toDataURL('image/png', 1.0);
+}
+
 function arrowhead(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number, color: string, sz = 10) {
   ctx.save();
   ctx.fillStyle = color;
@@ -196,14 +336,7 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
   const scale = (displayW / LOGICAL_W) * zoom;
 
   const derived = deriveModel(graph);
-  const roleOf = (id: string): 'exo' | 'med' | 'out' | 'mod' => {
-    if (graph.edges.some(e => e.type === 'moderation' && e.from === id)) return 'mod';
-    if (derived.mediators.includes(id)) return 'med';
-    const hasOut = graph.edges.some(e => (e.type === 'direct' || e.type === 'mediation') && e.from === id);
-    const hasIn = graph.edges.some(e => (e.type === 'direct' || e.type === 'mediation') && e.to === id);
-    if (hasIn && !hasOut) return 'out';
-    return 'exo';
-  };
+  const roleOf = roleFor(graph);
 
   // ── Drawing ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -225,109 +358,19 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
     for (let x = 0; x < LOGICAL_W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, LOGICAL_H); ctx.stroke(); }
     for (let y = 0; y < LOGICAL_H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(LOGICAL_W, y); ctx.stroke(); }
 
-    const pos = new Map(graph.nodes.map(n => [n.id, n]));
-
-    // edges
-    graph.edges.forEach(edge => {
-      const a = pos.get(edge.from), b = pos.get(edge.to);
-      if (!a || !b) return;
-      const meta = TYPE_META[edge.type];
-      const sel = edge.id === selectedEdge;
-      ctx.save();
-      ctx.strokeStyle = meta.color; ctx.lineWidth = sel ? 3 : 2;
-
-      if (edge.type === 'covariance') {
-        // dashed double-headed arc
-        const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2 - 46;
-        ctx.setLineDash([6, 4]);
-        const [sx, sy] = rectEdgePoint(a.x, a.y, Math.atan2(midY - a.y, midX - a.x));
-        const [ex, ey] = rectEdgePoint(b.x, b.y, Math.atan2(midY - b.y, midX - b.x));
-        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.quadraticCurveTo(midX, midY, ex, ey); ctx.stroke();
-        ctx.setLineDash([]);
-        arrowhead(ctx, sx, sy, Math.atan2(sy - midY, sx - midX), meta.color, 8);
-        arrowhead(ctx, ex, ey, Math.atan2(ey - midY, ex - midX), meta.color, 8);
-      } else if (edge.type === 'moderation') {
-        // arrow from moderator to the midpoint of the moderated path (or to the DV)
-        const iv = edge.moderates ? pos.get(edge.moderates) : null;
-        const target = iv ? { x: (iv.x + b.x) / 2, y: (iv.y + b.y) / 2 } : b;
-        const ang = Math.atan2(target.y - a.y, target.x - a.x);
-        const [sx, sy] = rectEdgePoint(a.x, a.y, ang);
-        ctx.setLineDash([2, 3]);
-        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(target.x, target.y); ctx.stroke();
-        ctx.setLineDash([]);
-        arrowhead(ctx, target.x, target.y, ang, meta.color, 9);
-        const mstat = edge.moderates ? results?.moderation?.[`${edge.from}*${edge.moderates}->${edge.to}`] : undefined;
-        if (mstat) {
-          valuePill(ctx, ['int ' + fmtCoef(mstat.beta) + pStar(mstat.pvalue)], target.x, target.y - 14, mstat.pvalue < 0.05 ? '#7c3aed' : '#6b7280');
-        }
-      } else {
-        const ang = Math.atan2(b.y - a.y, b.x - a.x);
-        const [sx, sy] = rectEdgePoint(a.x, a.y, ang);
-        const [ex, ey] = rectEdgePoint(b.x, b.y, ang + Math.PI);
-        const stat = results?.paths[`${edge.from}->${edge.to}`];
-        if (stat) {
-          // color/weight by significance & magnitude once estimates exist
-          const sig = stat.pvalue < 0.05;
-          ctx.strokeStyle = sig ? meta.color : '#9ca3af';
-          ctx.lineWidth = sig ? Math.max(2, Math.min(5, 1.5 + Math.abs(stat.beta) * 4)) : 1.6;
-          if (!sig) ctx.setLineDash([6, 4]);
-        }
-        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
-        ctx.setLineDash([]);
-        arrowhead(ctx, ex, ey, ang, ctx.strokeStyle as string, 10);
-        if (stat) {
-          const lines = [fmtCoef(stat.beta) + pStar(stat.pvalue)];
-          if (showSE) lines.push(`SE ${stat.se.toFixed(2)}`);
-          if (showCI) lines.push(`[${fmtCoef(stat.beta - 1.96 * stat.se)}, ${fmtCoef(stat.beta + 1.96 * stat.se)}]`);
-          const mx = (sx + ex) / 2 - Math.sin(ang) * 16;
-          const my = (sy + ey) / 2 + Math.cos(ang) * 16;
-          valuePill(ctx, lines, mx, my, stat.pvalue < 0.05 ? '#1f2937' : '#6b7280');
-        }
-      }
-      ctx.restore();
-    });
-
-    // pending connect preview
-    if (mode === 'connect' && pendingFrom && hoverPoint) {
-      const a = pos.get(pendingFrom);
-      if (a) {
-        ctx.save(); ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1.6; ctx.setLineDash([4, 4]);
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(hoverPoint.x, hoverPoint.y); ctx.stroke(); ctx.restore();
-      }
-    }
-
-    // nodes
-    graph.nodes.forEach(n => {
-      const role = roleOf(n.id);
-      const fill = role === 'med' ? '#fef9c3' : role === 'out' ? '#dcfce7' : role === 'mod' ? '#f3e8ff' : '#dbeafe';
-      const stroke = role === 'med' ? '#b45309' : role === 'out' ? '#16a34a' : role === 'mod' ? '#7c3aed' : '#2563eb';
-      const isPending = n.id === pendingFrom;
-      ctx.save();
-      ctx.shadowColor = 'rgba(0,0,0,0.08)'; ctx.shadowBlur = 5; ctx.shadowOffsetY = 2;
-      ctx.fillStyle = fill;
-      ctx.strokeStyle = isPending ? '#ef4444' : stroke;
-      ctx.lineWidth = isPending ? 3 : 2;
-      ctx.beginPath();
-      (ctx as any).roundRect?.(n.x - NODE_W / 2, n.y - NODE_H / 2, NODE_W, NODE_H, 6) ?? ctx.rect(n.x - NODE_W / 2, n.y - NODE_H / 2, NODE_W, NODE_H);
-      ctx.fill(); ctx.stroke();
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = '#1e293b';
-      ctx.font = 'bold 12px system-ui,Arial,sans-serif';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      let txt = n.id; const maxW = NODE_W - 12;
-      while (ctx.measureText(txt).width > maxW && txt.length > 1) txt = txt.slice(0, -1);
-      if (txt !== n.id) txt = txt.slice(0, -1) + '…';
-      ctx.fillText(txt, n.x, n.y);
-      // R² for endogenous nodes
-      const r2 = results?.rSquared[n.id];
-      if (showR2 && r2 != null && (role === 'med' || role === 'out')) {
-        ctx.fillStyle = '#4b5563';
-        ctx.font = 'bold 10px system-ui,Arial,sans-serif';
-        ctx.fillText(`R² = ${fmtCoef(r2)}`, n.x, n.y + NODE_H / 2 + 10);
-      }
-      ctx.restore();
-    });
+    drawScene(ctx, graph, { results, showSE, showCI, showR2, roleOf, selectedEdge, mode, pendingFrom, hoverPoint });
   }, [graph, displayW, displayH, scale, pan, zoom, mode, pendingFrom, hoverPoint, selectedEdge, results, showSE, showCI, showR2]);
+
+  // ── High-resolution PNG export (clean figure, no grid/selection) ─────────────
+  const exportPNG = () => {
+    if (graph.nodes.length === 0) return;
+    const url = renderDiagramDataUrl(graph, { results, showSE, showCI, showR2, roleOf: roleFor(graph) });
+    if (!url) return;
+    const link = document.createElement('a');
+    link.download = `path-model-${new Date().toISOString().split('T')[0]}.png`;
+    link.href = url;
+    link.click();
+  };
 
   // ── Hit testing ──────────────────────────────────────────────────────────────
   const toLogical = (clientX: number, clientY: number) => {
@@ -512,6 +555,9 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
         <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} className="p-1.5 rounded hover:bg-gray-200" title="Reset view"><Maximize2 className="w-4 h-4 text-gray-600" /></button>
         <button onClick={autoLayout} disabled={graph.nodes.length === 0} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-200 disabled:opacity-40" title="Arrange nodes left→right by causal order">
           <LayoutGrid className="w-4 h-4" /> Auto-layout
+        </button>
+        <button onClick={exportPNG} disabled={graph.nodes.length === 0} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-200 disabled:opacity-40" title="Export the diagram as a high-resolution PNG">
+          <Download className="w-4 h-4" /> PNG
         </button>
         {mode === 'connect' && (
           <span className="text-xs text-blue-700 ml-1">{pendingFrom ? `Click a target node to link from “${pendingFrom}”` : 'Click a source node, then a target node'}</span>
