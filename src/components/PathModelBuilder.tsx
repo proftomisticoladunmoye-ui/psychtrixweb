@@ -27,11 +27,19 @@ export interface DerivedModel {
     | 'parallel-mediation' | 'serial-mediation' | 'moderated-mediation';
 }
 
+export interface PathStat { beta: number; se: number; pvalue: number }
+export interface BuilderResults {
+  paths: { [key: string]: PathStat };          // key `from->to`
+  rSquared: { [node: string]: number };
+  moderation?: { [key: string]: PathStat };    // key `moderator*iv->dv`
+}
+
 interface Props {
   columns: string[];
   graph: BuilderGraph;
   onGraphChange: (g: BuilderGraph) => void;
   onModelDerived: (m: DerivedModel) => void;
+  results?: BuilderResults | null;             // when present, overlays estimates on the drawn paths
 }
 
 // ─── Model derivation (feeds the existing OLS/MLE engine) ─────────────────────
@@ -90,6 +98,36 @@ function rectEdgePoint(cx: number, cy: number, angle: number): [number, number] 
   return [cx + cos * t, cy + sin * t];
 }
 
+// AMOS convention: two decimals, no leading zero (.85, -.31)
+function fmtCoef(v: number): string {
+  return v.toFixed(2).replace(/^(-?)0\./, '$1.');
+}
+function pStar(p: number): string {
+  if (p < 0.001) return '***';
+  if (p < 0.01) return '**';
+  if (p < 0.05) return '*';
+  return '';
+}
+
+function valuePill(ctx: CanvasRenderingContext2D, lines: string[], x: number, y: number, color: string) {
+  ctx.save();
+  ctx.font = 'bold 10px system-ui,Arial,sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + 10;
+  const lh = 13;
+  const h = lines.length * lh + 4;
+  ctx.fillStyle = 'rgba(255,255,255,0.95)';
+  ctx.strokeStyle = '#d1d5db';
+  ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  (ctx as any).roundRect?.(x - w / 2, y - h / 2, w, h, 3) ?? ctx.rect(x - w / 2, y - h / 2, w, h);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = color;
+  lines.forEach((l, i) => ctx.fillText(l, x, y - h / 2 + 2 + lh / 2 + i * lh));
+  ctx.restore();
+}
+
 function arrowhead(ctx: CanvasRenderingContext2D, x: number, y: number, angle: number, color: string, sz = 10) {
   ctx.save();
   ctx.fillStyle = color;
@@ -104,7 +142,7 @@ function arrowhead(ctx: CanvasRenderingContext2D, x: number, y: number, angle: n
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived }: Props) {
+export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived, results }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [containerW, setContainerW] = useState(900);
@@ -114,6 +152,10 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
   const [pendingFrom, setPendingFrom] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
   const [hoverPoint, setHoverPoint] = useState<{ x: number; y: number } | null>(null);
+  // Results-overlay display options (only relevant once `results` is present).
+  const [showSE, setShowSE] = useState(false);
+  const [showCI, setShowCI] = useState(false);
+  const [showR2, setShowR2] = useState(true);
 
   // Undo/redo history of graph snapshots
   const history = useRef<BuilderGraph[]>([]);
@@ -214,12 +256,33 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
         ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(target.x, target.y); ctx.stroke();
         ctx.setLineDash([]);
         arrowhead(ctx, target.x, target.y, ang, meta.color, 9);
+        const mstat = edge.moderates ? results?.moderation?.[`${edge.from}*${edge.moderates}->${edge.to}`] : undefined;
+        if (mstat) {
+          valuePill(ctx, ['int ' + fmtCoef(mstat.beta) + pStar(mstat.pvalue)], target.x, target.y - 14, mstat.pvalue < 0.05 ? '#7c3aed' : '#6b7280');
+        }
       } else {
         const ang = Math.atan2(b.y - a.y, b.x - a.x);
         const [sx, sy] = rectEdgePoint(a.x, a.y, ang);
         const [ex, ey] = rectEdgePoint(b.x, b.y, ang + Math.PI);
+        const stat = results?.paths[`${edge.from}->${edge.to}`];
+        if (stat) {
+          // color/weight by significance & magnitude once estimates exist
+          const sig = stat.pvalue < 0.05;
+          ctx.strokeStyle = sig ? meta.color : '#9ca3af';
+          ctx.lineWidth = sig ? Math.max(2, Math.min(5, 1.5 + Math.abs(stat.beta) * 4)) : 1.6;
+          if (!sig) ctx.setLineDash([6, 4]);
+        }
         ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
-        arrowhead(ctx, ex, ey, ang, meta.color, 10);
+        ctx.setLineDash([]);
+        arrowhead(ctx, ex, ey, ang, ctx.strokeStyle as string, 10);
+        if (stat) {
+          const lines = [fmtCoef(stat.beta) + pStar(stat.pvalue)];
+          if (showSE) lines.push(`SE ${stat.se.toFixed(2)}`);
+          if (showCI) lines.push(`[${fmtCoef(stat.beta - 1.96 * stat.se)}, ${fmtCoef(stat.beta + 1.96 * stat.se)}]`);
+          const mx = (sx + ex) / 2 - Math.sin(ang) * 16;
+          const my = (sy + ey) / 2 + Math.cos(ang) * 16;
+          valuePill(ctx, lines, mx, my, stat.pvalue < 0.05 ? '#1f2937' : '#6b7280');
+        }
       }
       ctx.restore();
     });
@@ -255,9 +318,16 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
       while (ctx.measureText(txt).width > maxW && txt.length > 1) txt = txt.slice(0, -1);
       if (txt !== n.id) txt = txt.slice(0, -1) + '…';
       ctx.fillText(txt, n.x, n.y);
+      // R² for endogenous nodes
+      const r2 = results?.rSquared[n.id];
+      if (showR2 && r2 != null && (role === 'med' || role === 'out')) {
+        ctx.fillStyle = '#4b5563';
+        ctx.font = 'bold 10px system-ui,Arial,sans-serif';
+        ctx.fillText(`R² = ${fmtCoef(r2)}`, n.x, n.y + NODE_H / 2 + 10);
+      }
       ctx.restore();
     });
-  }, [graph, displayW, displayH, scale, pan, zoom, mode, pendingFrom, hoverPoint, selectedEdge]);
+  }, [graph, displayW, displayH, scale, pan, zoom, mode, pendingFrom, hoverPoint, selectedEdge, results, showSE, showCI, showR2]);
 
   // ── Hit testing ──────────────────────────────────────────────────────────────
   const toLogical = (clientX: number, clientY: number) => {
@@ -401,6 +471,14 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
         <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} className="p-1.5 rounded hover:bg-gray-200" title="Reset view"><Maximize2 className="w-4 h-4 text-gray-600" /></button>
         {mode === 'connect' && (
           <span className="text-xs text-blue-700 ml-1">{pendingFrom ? `Click a target node to link from “${pendingFrom}”` : 'Click a source node, then a target node'}</span>
+        )}
+        {results && (
+          <div className="flex items-center gap-3 ml-auto text-xs text-gray-600">
+            <span className="font-medium text-gray-500">Show on paths:</span>
+            <label className="flex items-center gap-1 cursor-pointer"><input type="checkbox" checked={showSE} onChange={e => setShowSE(e.target.checked)} className="rounded" /> SE</label>
+            <label className="flex items-center gap-1 cursor-pointer"><input type="checkbox" checked={showCI} onChange={e => setShowCI(e.target.checked)} className="rounded" /> 95% CI</label>
+            <label className="flex items-center gap-1 cursor-pointer"><input type="checkbox" checked={showR2} onChange={e => setShowR2(e.target.checked)} className="rounded" /> R²</label>
+          </div>
         )}
       </div>
 

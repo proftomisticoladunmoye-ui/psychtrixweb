@@ -24,7 +24,19 @@ import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON, exportChartAsImage, exportPathAnalysisResults } from '../lib/exportUtils';
 import { saveAnalysisHistory } from '../lib/analysisHistory';
 import { PathDiagram } from './PathDiagram';
-import { PathModelBuilder, deriveModel, type BuilderGraph, type DerivedModel } from './PathModelBuilder';
+import { PathModelBuilder, deriveModel, type BuilderGraph, type DerivedModel, type BuilderResults } from './PathModelBuilder';
+
+// Map the engine's results into the shape the visual builder overlays on paths.
+function toBuilderResults(results: PathAnalysisResults | null): BuilderResults | null {
+  if (!results) return null;
+  const paths: BuilderResults['paths'] = {};
+  results.paths.forEach(p => { paths[`${p.from}->${p.to}`] = { beta: p.beta, se: p.se, pvalue: p.pvalue }; });
+  const moderation: BuilderResults['moderation'] = {};
+  (results.moderation || []).forEach(m => {
+    moderation![`${m.moderator}*${m.iv}->${m.dv}`] = { beta: m.interactionEffect, se: 0, pvalue: m.interactionP };
+  });
+  return { paths, rSquared: results.rSquared || {}, moderation };
+}
 
 interface Dataset {
   id: string;
@@ -2099,7 +2111,23 @@ export function PathAnalysis() {
           </div>
         )}
 
-        {/* Path Diagram */}
+        {/* Path Diagram — annotated on the user's own drawn layout when built
+            visually; otherwise the auto-laid-out results diagram. */}
+        {builderMode === 'visual' && builderGraph.nodes.length > 0 ? (
+          <div className="bg-white rounded-xl border border-gray-200 p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-lg font-bold text-gray-900">Path Model — your layout</h4>
+              <span className="text-xs text-gray-500">Standardized estimates on the paths you drew · drag nodes to tidy · toggle SE / CI / R²</span>
+            </div>
+            <PathModelBuilder
+              columns={currentDataset?.columns || []}
+              graph={builderGraph}
+              onGraphChange={setBuilderGraph}
+              onModelDerived={applyDerived}
+              results={toBuilderResults(results)}
+            />
+          </div>
+        ) : (
         <PathDiagram
           paths={results.paths.map(p => ({
             from: p.from,
@@ -2125,6 +2153,7 @@ export function PathAnalysis() {
             srmr: results.fitIndices?.srmr,
           }}
         />
+        )}
 
         {/* Path Coefficients Table */}
         <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -2873,6 +2902,7 @@ export function PathAnalysis() {
                     graph={builderGraph}
                     onGraphChange={setBuilderGraph}
                     onModelDerived={applyDerived}
+                    results={toBuilderResults(results)}
                   />
                 </>
               )}
