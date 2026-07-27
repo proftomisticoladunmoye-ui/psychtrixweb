@@ -289,6 +289,9 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [mode, setMode] = useState<'select' | 'connect'>('select');
+  // Which kind of edge the "connect" mode draws: a directed path or an
+  // undirected covariance. (Moderation is still assigned via the edge inspector.)
+  const [drawType, setDrawType] = useState<'direct' | 'covariance'>('direct');
   const [pendingFrom, setPendingFrom] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
   const [hoverPoint, setHoverPoint] = useState<{ x: number; y: number } | null>(null);
@@ -413,7 +416,12 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
       if (nid) {
         if (!pendingFrom) { setPendingFrom(nid); }
         else if (pendingFrom !== nid) {
-          const newEdge: BuilderEdge = { id: `e${Date.now()}`, from: pendingFrom, to: nid, type: 'direct' };
+          // Covariance is undirected — skip if this pair already has one (either direction).
+          const dupCov = drawType === 'covariance' && graph.edges.some(e =>
+            e.type === 'covariance' &&
+            ((e.from === pendingFrom && e.to === nid) || (e.from === nid && e.to === pendingFrom)));
+          if (dupCov) { setPendingFrom(null); return; }
+          const newEdge: BuilderEdge = { id: `e${Date.now()}`, from: pendingFrom, to: nid, type: drawType };
           commit({ ...graph, edges: [...graph.edges, newEdge] });
           setPendingFrom(null); setSelectedEdge(newEdge.id);
         } else { setPendingFrom(null); }
@@ -541,9 +549,16 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
           className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition ${mode === 'select' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-200'}`}>
           <MousePointer2 className="w-4 h-4" /> Select / Move
         </button>
-        <button onClick={() => { setMode('connect'); setPendingFrom(null); }}
-          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition ${mode === 'connect' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-200'}`}>
+        <button onClick={() => { setMode('connect'); setDrawType('direct'); setPendingFrom(null); }}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition ${mode === 'connect' && drawType === 'direct' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-200'}`}
+          title="Draw a directed path (direct, mediation, moderation) between two variables">
           <Spline className="w-4 h-4" /> Draw path
+        </button>
+        <button onClick={() => { setMode('connect'); setDrawType('covariance'); setPendingFrom(null); }}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition ${mode === 'connect' && drawType === 'covariance' ? 'text-white' : 'text-gray-600 hover:bg-gray-200'}`}
+          style={mode === 'connect' && drawType === 'covariance' ? { background: TYPE_META.covariance.color } : undefined}
+          title="Draw an undirected covariance / correlation between two variables">
+          <Link2 className="w-4 h-4" /> Draw covariance
         </button>
         <div className="w-px h-5 bg-gray-300 mx-1" />
         <button onClick={undo} disabled={history.current.length === 0} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-40" title="Undo"><Undo2 className="w-4 h-4 text-gray-600" /></button>
@@ -560,7 +575,11 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
           <Download className="w-4 h-4" /> PNG
         </button>
         {mode === 'connect' && (
-          <span className="text-xs text-blue-700 ml-1">{pendingFrom ? `Click a target node to link from “${pendingFrom}”` : 'Click a source node, then a target node'}</span>
+          <span className="text-xs ml-1" style={{ color: drawType === 'covariance' ? TYPE_META.covariance.color : '#1d4ed8' }}>
+            {drawType === 'covariance'
+              ? (pendingFrom ? `Click the variable to correlate with “${pendingFrom}”` : 'Click two variables to draw a covariance between them')
+              : (pendingFrom ? `Click a target node to link from “${pendingFrom}”` : 'Click a source node, then a target node')}
+          </span>
         )}
         {results && (
           <div className="flex items-center gap-3 ml-auto text-xs text-gray-600">
