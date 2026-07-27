@@ -32,6 +32,7 @@ export interface BuilderResults {
   paths: { [key: string]: PathStat };          // key `from->to`
   rSquared: { [node: string]: number };
   moderation?: { [key: string]: PathStat };    // key `moderator*iv->dv`
+  covariances?: { [key: string]: PathStat };   // key `from<->to`; beta = correlation r
 }
 
 interface Props {
@@ -161,6 +162,13 @@ function drawScene(ctx: CanvasRenderingContext2D, graph: BuilderGraph, opts: Sce
       ctx.setLineDash([]);
       arrowhead(ctx, sx, sy, Math.atan2(sy - midY, sx - midX), meta.color, 8);
       arrowhead(ctx, ex, ey, Math.atan2(ey - midY, ex - midX), meta.color, 8);
+      const cstat = results?.covariances?.[`${edge.from}<->${edge.to}`] ?? results?.covariances?.[`${edge.to}<->${edge.from}`];
+      if (cstat) {
+        const lines = ['r ' + fmtCoef(cstat.beta) + pStar(cstat.pvalue)];
+        if (showSE) lines.push(`SE ${cstat.se.toFixed(2)}`);
+        if (showCI) lines.push(`[${fmtCoef(cstat.beta - 1.96 * cstat.se)}, ${fmtCoef(cstat.beta + 1.96 * cstat.se)}]`);
+        valuePill(ctx, lines, midX, midY - 2, cstat.pvalue < 0.05 ? meta.color : '#6b7280');
+      }
     } else if (edge.type === 'moderation') {
       const iv = edge.moderates ? pos.get(edge.moderates) : null;
       const target = iv ? { x: (iv.x + b.x) / 2, y: (iv.y + b.y) / 2 } : b;

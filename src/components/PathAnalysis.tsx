@@ -36,7 +36,13 @@ function toBuilderResults(results: PathAnalysisResults | null): BuilderResults |
   (results.moderation || []).forEach(m => {
     moderation![`${m.moderator}*${m.iv}->${m.dv}`] = { beta: m.interactionEffect, se: 0, pvalue: m.interactionP };
   });
-  return { paths, rSquared: results.rSquared || {}, moderation };
+  const covariances: BuilderResults['covariances'] = {};
+  (results.covariances || []).forEach(c => {
+    const stat = { beta: c.correlation, se: c.se, pvalue: c.pvalue };
+    covariances![`${c.var1}<->${c.var2}`] = stat; // undirected: register both orders
+    covariances![`${c.var2}<->${c.var1}`] = stat;
+  });
+  return { paths, rSquared: results.rSquared || {}, moderation, covariances };
 }
 
 interface Dataset {
@@ -226,6 +232,8 @@ interface PathAnalysisResults {
   }>;
   vif?: Array<{ dv: string; predictor: string; vif: number }>;
   residuals?: Array<{ dv: string; fitted: number[]; residuals: number[]; stdResiduals: number[] }>;
+  // Covariance edges drawn in the visual builder: sample covariance + correlation.
+  covariances?: Array<{ var1: string; var2: string; covariance: number; correlation: number; se: number; pvalue: number }>;
 }
 
 export function PathAnalysis() {
@@ -1883,6 +1891,32 @@ export function PathAnalysis() {
         }
       }
 
+      // ── 10b. Covariance edges from the visual builder ────────────────────
+      // Each covariance arc the user drew gets its sample covariance,
+      // standardized correlation r and a two-tailed p-value for display.
+      let covariancesResult: PathAnalysisResults['covariances'];
+      if (builderMode === 'visual') {
+        const covEdges = builderGraph.edges.filter(e => e.type === 'covariance');
+        if (covEdges.length) {
+          covariancesResult = [];
+          const seen = new Set<string>();
+          for (const e of covEdges) {
+            if (!cols.includes(e.from) || !cols.includes(e.to)) continue;
+            const key = [e.from, e.to].sort().join('');
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const xv = getCol(mat, cols, e.from), yv = getCol(mat, cols, e.to);
+            const { r, p } = pearsonCorr(xv, yv);
+            const mx = colMean(xv), my = colMean(yv);
+            let cov = 0;
+            for (let i = 0; i < xv.length; i++) cov += (xv[i] - mx) * (yv[i] - my);
+            cov /= Math.max(1, xv.length - 1);
+            const se = xv.length > 2 ? Math.sqrt(Math.max(0, (1 - r * r) / (xv.length - 2))) : 0;
+            covariancesResult.push({ var1: e.from, var2: e.to, covariance: cov, correlation: r, se, pvalue: p });
+          }
+        }
+      }
+
       // ── Assemble results ─────────────────────────────────────────────────
       const useMLE = estimatorType === 'MLE' && mleOutput;
       const finalResults: PathAnalysisResults = {
@@ -1905,6 +1939,7 @@ export function PathAnalysis() {
         moderatedMediation: moderatedMedResult,
         conditionalEffects: conditionalEffectsResults,
         correlations: correlationsResult,
+        covariances: covariancesResult,
         vif: vifResults,
         residuals: residualsResults,
       };
