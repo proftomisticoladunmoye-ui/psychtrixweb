@@ -29,7 +29,7 @@ export function Footer() {
               <Shield className="w-4 h-4" />
               Privacy Policy
             </button>
-            <a href="mailto:support@psychtrix.app" className="hover:text-blue-600 transition">
+            <a href="mailto:support@psychtrixweb.online" className="hover:text-blue-600 transition">
               Contact
             </a>
           </div>
@@ -132,8 +132,8 @@ export function Footer() {
                 <h3 className="font-semibold text-gray-900 mb-1">7. Contact</h3>
                 <p>
                   Questions about this policy or your data can be sent to{' '}
-                  <a href="mailto:support@psychtrix.app" className="text-blue-600 hover:underline">
-                    support@psychtrix.app
+                  <a href="mailto:support@psychtrixweb.online" className="text-blue-600 hover:underline">
+                    support@psychtrixweb.online
                   </a>.
                 </p>
               </section>

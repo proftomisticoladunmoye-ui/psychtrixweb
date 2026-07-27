@@ -1944,7 +1944,7 @@ export function Help() {
           </p>
           <div className="flex flex-col sm:flex-row gap-3 justify-center">
             <a
-              href="mailto:support@psychtrixinnovative.com"
+              href="mailto:support@psychtrixweb.online"
               className="bg-white text-blue-600 px-6 py-3 rounded-lg font-medium hover:bg-gray-100 transition flex items-center justify-center gap-2"
             >
               <Mail className="w-5 h-5" />

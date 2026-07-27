@@ -1891,7 +1891,7 @@ export const exportScaleAnalysisToHTML = (
 
           <p style="margin-top: 20px;"><strong>Important Note:</strong> This analysis follows established psychometric standards and best practices. Results should be interpreted by qualified researchers or psychometricians. Consult relevant ethical guidelines (e.g., APA Ethics Code) and professional standards when developing and using psychological assessments.</p>
 
-          <p style="margin-top: 15px; font-style: italic;">For questions or support, contact: support@psychtrixinnovative.com</p>
+          <p style="margin-top: 15px; font-style: italic;">For questions or support, contact: support@psychtrixweb.online</p>
         </div>
       </div>
 
@@ -2736,7 +2736,7 @@ export const exportCulturalAdaptationToHTML = (
 
           <p style="margin-top: 20px;"><strong>Important Note:</strong> Cross-cultural adaptation and validation require specialized expertise in both psychometrics and cultural psychology. This analysis follows international best practices (ITC Guidelines, 2017) but should be interpreted by qualified cross-cultural measurement specialists. Consult with cultural experts before making high-stakes decisions based on these results.</p>
 
-          <p style="margin-top: 15px; font-style: italic;">For questions or consultation: support@psychtrixinnovative.com</p>
+          <p style="margin-top: 15px; font-style: italic;">For questions or consultation: support@psychtrixweb.online</p>
         </div>
       </div>
 
