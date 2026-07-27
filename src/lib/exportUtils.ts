@@ -3589,6 +3589,7 @@ export const exportPathAnalysisAPAReport = (results: any, diagramDataUrl?: strin
   const med: any[] = results.mediation || [];
   const mod: any[] = results.moderation || [];
   const vif: any[] = results.vif || [];
+  const cov: any[] = results.covariances || [];
 
   // Auto-generated APA results narrative.
   const narrative: string[] = [];
@@ -3615,6 +3616,9 @@ export const exportPathAnalysisAPAReport = (results: any, diagramDataUrl?: strin
     else if (jn?.significance === 'never') jnTxt = ` The conditional effect was non-significant across the range of ${m.moderator}.`;
     narrative.push(`The ${m.iv} × ${m.moderator} interaction on ${m.dv} was ${m.interactionP < 0.05 ? 'significant' : 'not significant'} (b = ${apaB(m.interactionEffect)}, p ${apaP(m.interactionP)}).${jnTxt}`);
   });
+  cov.forEach(c => {
+    narrative.push(`${c.var1} and ${c.var2} were ${c.pvalue < 0.05 ? 'significantly ' : ''}correlated (r = ${apaB(c.correlation)}, p ${apaP(c.pvalue)}).`);
+  });
 
   const fitRows = [
     ['χ²', fi.chisq != null ? fi.chisq.toFixed(2) : '—'], ['df', fi.df ?? '—'],
@@ -3622,6 +3626,11 @@ export const exportPathAnalysisAPAReport = (results: any, diagramDataUrl?: strin
     ['TLI', fi.tli != null ? fi.tli.toFixed(3) : '—'], ['RMSEA', fi.rmsea != null ? fi.rmsea.toFixed(3) : '—'],
     ['SRMR', fi.srmr != null ? fi.srmr.toFixed(3) : '—'], ['AIC', fi.aic != null ? fi.aic.toFixed(2) : '—'], ['BIC', fi.bic != null ? fi.bic.toFixed(2) : '—'],
   ];
+
+  // Running table counter so optional tables number sequentially regardless
+  // of which are present. `${t++}` inside a ternary only fires when the table
+  // is actually rendered, so absent tables don't consume a number.
+  let t = 1;
 
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Path Analysis — APA Report</title>
     <style>
@@ -3654,17 +3663,17 @@ export const exportPathAnalysisAPAReport = (results: any, diagramDataUrl?: strin
     <h2>Results</h2>
     ${narrative.slice(1).map(t => `<p>${t}</p>`).join('')}
 
-    <h3>Table 1. Path coefficients</h3>
+    <h3>Table ${t++}. Path coefficients</h3>
     <table><thead><tr><th>Predictor</th><th>Outcome</th><th class="num">B</th><th class="num">SE</th><th class="num">β</th><th class="num">t</th><th class="num">p</th></tr></thead><tbody>
       ${paths.map(p => `<tr><td>${p.from}</td><td>${p.to}</td><td class="num">${p.coefficient.toFixed(3)}</td><td class="num">${p.se.toFixed(3)}</td><td class="num">${apaB(p.beta)}</td><td class="num">${p.t.toFixed(2)}</td><td class="num">${p.pvalue < .001 ? '<.001' : p.pvalue.toFixed(3)}</td></tr>`).join('')}
     </tbody></table>
 
-    ${med.length ? `<h3>Table 2. Indirect effects</h3>
+    ${med.length ? `<h3>Table ${t++}. Indirect effects</h3>
     <table><thead><tr><th>IV</th><th>Mediator</th><th>DV</th><th class="num">Indirect</th><th class="num">95% CI</th><th>Type</th></tr></thead><tbody>
       ${med.map(m => `<tr><td>${m.iv}</td><td>${m.mediator}</td><td>${m.dv}</td><td class="num">${m.indirectEffect.toFixed(3)}</td><td class="num">${m.bootstrapCI ? `[${m.bootstrapCI[0].toFixed(3)}, ${m.bootstrapCI[1].toFixed(3)}]` : '—'}</td><td>${m.mediationType}</td></tr>`).join('')}
     </tbody></table>` : ''}
 
-    ${mod.length ? `<h3>Table 3. Simple slopes (moderation)</h3>
+    ${mod.length ? `<h3>Table ${t++}. Simple slopes (moderation)</h3>
     <table><thead><tr><th>Interaction</th><th>Moderator level</th><th class="num">Slope</th><th class="num">SE</th><th class="num">t</th><th class="num">p</th></tr></thead><tbody>
       ${mod.flatMap(m => (['low', 'mean', 'high'] as const).map(lv => {
         const s = m.simpleSlopes?.[lv]; if (!s) return '';
@@ -3673,10 +3682,16 @@ export const exportPathAnalysisAPAReport = (results: any, diagramDataUrl?: strin
       })).join('')}
     </tbody></table>` : ''}
 
-    ${vif.length ? `<h3>Table ${med.length || mod.length ? (2 + (med.length ? 1 : 0) + (mod.length ? 1 : 0)) : 2}. Multicollinearity (VIF)</h3>
+    ${vif.length ? `<h3>Table ${t++}. Multicollinearity (VIF)</h3>
     <table><thead><tr><th>Outcome</th><th>Predictor</th><th class="num">VIF</th><th class="num">Tolerance</th></tr></thead><tbody>
       ${vif.map(r => `<tr><td>${r.dv}</td><td>${r.predictor}</td><td class="num">${r.vif.toFixed(2)}</td><td class="num">${(1 / r.vif).toFixed(3)}</td></tr>`).join('')}
     </tbody></table>` : ''}
+
+    ${cov.length ? `<h3>Table ${t++}. Covariances</h3>
+    <table><thead><tr><th>Variable 1</th><th>Variable 2</th><th class="num">Covariance</th><th class="num">r</th><th class="num">SE</th><th class="num">p</th></tr></thead><tbody>
+      ${cov.map(c => `<tr><td>${c.var1}</td><td>${c.var2}</td><td class="num">${c.covariance.toFixed(3)}</td><td class="num">${apaB(c.correlation)}</td><td class="num">${c.se.toFixed(3)}</td><td class="num">${c.pvalue < .001 ? '<.001' : c.pvalue.toFixed(3)}</td></tr>`).join('')}
+    </tbody></table>
+    <p class="note">Note. r = standardized correlation; covariances are unstandardized. Two-tailed p-values.</p>` : ''}
 
     <p class="note">Note. β = standardized coefficient. ${med.length ? 'Indirect-effect confidence intervals are bootstrap percentile intervals. ' : ''}Report generated by Psychtrix Web.</p>
     </body></html>`;
