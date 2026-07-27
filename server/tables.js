@@ -16,7 +16,11 @@ export const TABLES = {
   // column (capability-URL pattern — the public survey page loads a project
   // by its unguessable shareable_link token).
   sandbox_scale_projects:        { owner: 'user_id', publicReadBy: 'shareable_link' },
-  scale_responses:               { owner: null, publicInsert: true }, // public survey submissions
+  // Anyone with the survey link may submit (publicInsert), but the raw
+  // response rows are readable only by the researcher who owns the parent
+  // project — reads are scoped through sandbox_scale_projects.user_id.
+  scale_responses:               { owner: null, publicInsert: true,
+                                   readParent: { table: 'sandbox_scale_projects', localKey: 'project_id', parentOwner: 'user_id' } },
   expert_ratings:                { owner: null, publicInsert: true },
   analysis_history:              { owner: 'user_id' },
   cultural_groups:               { owner: 'user_id' },
@@ -107,6 +111,17 @@ export async function selectRows(table, user, params) {
   if (cfg.owner && !cfg.readAll && !anonymousByToken) {
     if (!user) throw Object.assign(new Error('Not signed in'), { status: 401 });
     clauses.push(`"${cfg.owner}" = $${i++}`);
+    values.push(user.id);
+  }
+
+  // Child tables with no own user_id are scoped through their parent's owner:
+  // restrict rows to those whose parent row belongs to the signed-in user.
+  if (cfg.readParent) {
+    if (!user) throw Object.assign(new Error('Not signed in'), { status: 401 });
+    const p = cfg.readParent;
+    clauses.push(
+      `"${assertIdent(p.localKey)}" IN (SELECT "id" FROM "${assertIdent(p.table)}" WHERE "${assertIdent(p.parentOwner)}" = $${i++})`,
+    );
     values.push(user.id);
   }
 

@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import {
   HelpCircle, Book, Video, MessageCircle, Mail, ExternalLink, ChevronRight,
   BarChart3, TrendingUp, Target, Network, Users, GitBranch, FileText, CheckCircle,
-  Upload, Zap, FlaskConical, Globe, Download, PlayCircle, AlertCircle, Lightbulb
+  Upload, Zap, FlaskConical, Globe, Download, PlayCircle, AlertCircle, Lightbulb,
+  RefreshCw, Filter, Share2, Link as LinkIcon
 } from 'lucide-react';
 
 type Section = 'overview' | 'getting-started' | 'data-import' | 'ctt' | 'irt' | 'validity' |
@@ -290,6 +291,45 @@ export function Help() {
                   <div>
                     <h4 className="font-medium text-gray-900">Reverse-Code Before Upload</h4>
                     <p className="text-sm text-gray-600">Pre-process reverse-scored items in your original file</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4">Built-in Cleaning &amp; Quality Tools</h2>
+              <p className="text-sm text-gray-700 mb-3">
+                After a dataset is uploaded, open it with the <strong>eye icon</strong> to reach the
+                spreadsheet view, where the platform can inspect and clean the data for you — no need
+                to pre-process everything in Excel first:
+              </p>
+              <div className="space-y-3">
+                <div className="flex gap-3">
+                  <BarChart3 className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="font-medium text-gray-900">Data Quality Report</h4>
+                    <p className="text-sm text-gray-600">Missing-value counts and percentages per column, plus per-column descriptives (mean, median, SD, min, max) and IQR-based outlier detection (1.5 × IQR rule).</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <RefreshCw className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="font-medium text-gray-900">Reverse Coding</h4>
+                    <p className="text-sm text-gray-600">Select the reverse-scored columns, set the scale maximum, and the platform recodes them (new = max + 1 − value). You no longer have to reverse items before uploading.</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <Filter className="w-5 h-5 text-orange-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="font-medium text-gray-900">Remove Missing Values</h4>
+                    <p className="text-sm text-gray-600">Drop rows with any missing cell (listwise deletion) with one click, then review how many rows remain.</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <Download className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="font-medium text-gray-900">Export or Save Cleaned Data</h4>
+                    <p className="text-sm text-gray-600">Download the cleaned data as CSV, or save it back as a new dataset (the original is kept untouched) ready for any analysis module.</p>
                   </div>
                 </div>
               </div>
@@ -742,6 +782,21 @@ export function Help() {
                 </div>
               </div>
             </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4">Visual Model Builder, Diagnostics &amp; Export</h2>
+              <p className="text-sm text-gray-700 mb-3">
+                Path Analysis includes an interactive workspace for drawing and reporting your model
+                without writing any syntax:
+              </p>
+              <ul className="text-sm text-gray-700 space-y-1.5">
+                <li>• <strong>Draw the model visually</strong> — add variables and connect them with typed paths (direct, mediation, moderation, covariance). Drag to reposition, pan/zoom, undo/redo, and use <strong>Auto-Layout</strong> to arrange nodes automatically.</li>
+                <li>• <strong>Moderation is handled for you</strong> — drawing a moderation path builds the interaction term automatically, with optional mean-centering.</li>
+                <li>• <strong>Results on the diagram</strong> — standardized coefficients are shown on each path, optionally with standard errors, 95% CIs, and R² for endogenous variables; paths are colored and weighted by significance.</li>
+                <li>• <strong>Integrated diagnostics</strong> — VIF (multicollinearity), residual-vs-fitted and normal Q-Q plots, and for moderation: simple-slopes plots and the Johnson–Neyman region of significance.</li>
+                <li>• <strong>Publication export</strong> — one-click <strong>APA report</strong> (embedded diagram + tables + auto-written narrative) and a <strong>high-resolution PNG</strong> of the diagram (2× resolution) for papers and slides.</li>
+              </ul>
+            </div>
           </div>
         )}
 
@@ -852,6 +907,72 @@ export function Help() {
                   </div>
                 </div>
               </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <Share2 className="w-5 h-5 text-green-600" />
+                Collecting Data with Shareable Links
+              </h2>
+              <p className="text-sm text-gray-700 mb-4">
+                Every scale you build gets its own public survey link, so you can gather responses
+                from <strong>anyone — respondents do not need a Psychtrix account</strong>. This is
+                the fastest way to pilot a new instrument.
+              </p>
+              <div className="space-y-3">
+                <div className="flex gap-3">
+                  <div className="flex-shrink-0 w-8 h-8 bg-green-600 text-white rounded-full flex items-center justify-center font-bold text-sm">1</div>
+                  <div>
+                    <h4 className="font-semibold text-gray-900">Open “Share &amp; Collect Data”</h4>
+                    <p className="text-sm text-gray-600">From a scale’s Edit view (or the Share button on its card), open the sharing panel to reveal the survey link.</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <div className="flex-shrink-0 w-8 h-8 bg-green-600 text-white rounded-full flex items-center justify-center font-bold text-sm">2</div>
+                  <div>
+                    <h4 className="font-semibold text-gray-900 flex items-center gap-2"><LinkIcon className="w-4 h-4" /> Copy or send the link</h4>
+                    <p className="text-sm text-gray-600">Copy the link, or share it directly via WhatsApp, email, Facebook, or X (Twitter). It opens a clean, mobile-friendly survey on any device.</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <div className="flex-shrink-0 w-8 h-8 bg-green-600 text-white rounded-full flex items-center justify-center font-bold text-sm">3</div>
+                  <div>
+                    <h4 className="font-semibold text-gray-900">Responses arrive anonymously</h4>
+                    <p className="text-sm text-gray-600">Each submission is stored anonymously (no names or emails collected) and the live response counter updates automatically. Only you, the owner, can view or analyse the raw responses.</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <div className="flex-shrink-0 w-8 h-8 bg-green-600 text-white rounded-full flex items-center justify-center font-bold text-sm">4</div>
+                  <div>
+                    <h4 className="font-semibold text-gray-900">Run the analysis</h4>
+                    <p className="text-sm text-gray-600">Once you have at least <strong>10 completed responses</strong> (100+ recommended), click <strong>Run Analysis</strong> to compute reliability, item statistics, and norms directly from the collected data.</p>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 p-3 bg-blue-50 rounded-lg text-sm text-gray-700">
+                <strong>Ethics tip:</strong> the survey intro tells respondents their answers are anonymous
+                and used for research only. Add your own consent statement to the scale description if your
+                institution’s review board requires it.
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4">Reliability &amp; Validation Outputs</h2>
+              <p className="text-sm text-gray-700 mb-3">
+                The analysis follows current psychometric reporting standards and reports:
+              </p>
+              <ul className="text-sm text-gray-700 space-y-1.5">
+                <li>• <strong>Cronbach’s α</strong> with a bootstrap <strong>95% confidence interval</strong></li>
+                <li>• <strong>McDonald’s ω</strong> (single-factor loadings) and <strong>split-half</strong> reliability</li>
+                <li>• <strong>Per-subscale α</strong> for any subscales you define</li>
+                <li>• <strong>Corrected item-total correlations</strong> and <strong>α-if-item-deleted</strong> for every item</li>
+                <li>• <strong>Standard error of measurement (SEM)</strong> and <strong>floor/ceiling effects</strong> (flagged above 15%, Terwee et al., 2007)</li>
+                <li>• <strong>Percentile norms</strong> for interpreting individual scores</li>
+              </ul>
+              <p className="text-xs text-gray-500 mt-3">
+                Reverse-scored items are automatically recoded before any statistic is computed, so mark them
+                as “reversed” when adding them rather than pre-recoding.
+              </p>
             </div>
 
             <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -1486,7 +1607,7 @@ export function Help() {
                   <p className="text-sm text-gray-700 mb-2">Solutions:</p>
                   <ul className="text-sm text-gray-700 space-y-1 ml-4">
                     <li>• Ensure file is in CSV format (not Excel .xlsx)</li>
-                    <li>• Check file size is under 10MB</li>
+                    <li>• Check file size is under 50MB</li>
                     <li>• Remove special characters from filename</li>
                     <li>• Try exporting CSV with UTF-8 encoding</li>
                   </ul>

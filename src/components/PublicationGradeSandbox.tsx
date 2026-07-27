@@ -9,7 +9,6 @@ import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON } from '../lib/exportUtils';
 import {
   calculateCronbachAlpha,
-  calculateItemTotalCorrelation,
   calculateCorrectedItemTotalCorrelation,
   calculateSplitHalfReliability,
   calculateInterItemCorrelationMatrix,
@@ -347,7 +346,9 @@ export function EnhancedPsychometricsSandbox() {
         const variance = itemScores.reduce((sum, s) => sum + Math.pow(s - mean, 2), 0) / itemScores.length;
         const sd = Math.sqrt(variance);
 
-        const itemTotal = calculateItemTotalCorrelation(responseMatrix, idx);
+        // Corrected item-total correlation (item excluded from the total) —
+        // the SPSS / psych::alpha standard; the ≥.30/≥.50 thresholds below assume it.
+        const itemTotal = calculateCorrectedItemTotalCorrelation(responseMatrix, idx);
 
         const responsesWithout = responseMatrix.map(r => r.filter((_, i) => i !== idx));
         const alphaWithout = calculateCronbachAlpha(responsesWithout);
