@@ -16,16 +16,16 @@ export const TABLES = {
   // column (capability-URL pattern — the public survey page loads a project
   // by its unguessable shareable_link token).
   sandbox_scale_projects:        { owner: 'user_id', publicReadBy: 'shareable_link' },
-  // Anyone with the survey link may submit (publicInsert), but the raw
-  // response rows are readable only by the researcher who owns the parent
-  // project — reads are scoped through sandbox_scale_projects.user_id.
+  // Anyone with the survey link may submit (publicInsert), but the rows are
+  // only readable/mutable by the researcher who owns the parent project.
   scale_responses:               { owner: null, publicInsert: true,
-                                   readParent: { table: 'sandbox_scale_projects', localKey: 'project_id', parentOwner: 'user_id' } },
-  expert_ratings:                { owner: null, publicInsert: true },
+                                   scope: { chain: [{ key: 'project_id', table: 'sandbox_scale_projects' }], owner: 'user_id' } },
+  expert_ratings:                { owner: null, publicInsert: true,
+                                   scope: { chain: [{ key: 'project_id', table: 'sandbox_scale_projects' }], owner: 'user_id' } },
   analysis_history:              { owner: 'user_id' },
   cultural_groups:               { owner: 'user_id' },
   translation_items:             { owner: 'user_id' },
-  cultural_responses:            { owner: null },
+  cultural_responses:            { owner: null, scope: { chain: [{ key: 'group_id', table: 'cultural_groups' }], owner: 'user_id' } },
   dif_analyses:                  { owner: 'user_id' },
   forum_admins:                  { owner: null, readAll: true, readonly: true },
   forum_categories:              { owner: null, readAll: true, readonly: true },
@@ -37,18 +37,18 @@ export const TABLES = {
   user_notification_preferences: { owner: 'user_id', conflictKey: 'user_id' },
   email_queue:                   { owner: 'user_id' },
   cat_item_banks:                { owner: 'user_id' },
-  cat_items:                     { owner: null }, // scoped through its bank
+  cat_items:                     { owner: null, scope: { chain: [{ key: 'item_bank_id', table: 'cat_item_banks' }], owner: 'user_id' } },
   cat_sessions:                  { owner: 'user_id' },
-  cat_session_responses:         { owner: null }, // scoped through its session
+  cat_session_responses:         { owner: null, scope: { chain: [{ key: 'session_id', table: 'cat_sessions' }], owner: 'user_id' } },
   network_projects:              { owner: 'user_id' },
-  network_datasets:              { owner: null },
-  network_estimations:           { owner: null },
-  network_centrality:            { owner: null },
-  network_communities:           { owner: null },
-  network_stability:             { owner: null },
-  network_comparisons:           { owner: null },
+  network_datasets:              { owner: null, scope: { chain: [{ key: 'project_id', table: 'network_projects' }], owner: 'user_id' } },
+  network_estimations:           { owner: null, scope: { chain: [{ key: 'project_id', table: 'network_projects' }], owner: 'user_id' } },
+  network_centrality:            { owner: null, scope: { chain: [{ key: 'estimation_id', table: 'network_estimations' }, { key: 'project_id', table: 'network_projects' }], owner: 'user_id' } },
+  network_communities:           { owner: null, scope: { chain: [{ key: 'estimation_id', table: 'network_estimations' }, { key: 'project_id', table: 'network_projects' }], owner: 'user_id' } },
+  network_stability:             { owner: null, scope: { chain: [{ key: 'estimation_id', table: 'network_estimations' }, { key: 'project_id', table: 'network_projects' }], owner: 'user_id' } },
+  network_comparisons:           { owner: null, scope: { chain: [{ key: 'project_id', table: 'network_projects' }], owner: 'user_id' } },
   plssem_models:                 { owner: 'user_id' },
-  plssem_analyses:               { owner: null },
+  plssem_analyses:               { owner: null, scope: { chain: [{ key: 'model_id', table: 'plssem_models' }], owner: 'user_id' } },
   r_analysis_jobs:               { owner: 'user_id' },
   r_analysis_templates:          { owner: null, readAll: true, readonly: true },
   r_analysis_logs:               { owner: 'user_id' },
@@ -100,6 +100,21 @@ function buildFilters(params, startIndex = 1) {
   return { clauses, values, nextIndex: i };
 }
 
+// Ownership scope for child tables that have no user_id of their own. `scope`
+// is a chain of hops from the child up to the table that carries the owner
+// column, e.g. network_centrality → network_estimations → network_projects.
+// Produces a WHERE fragment restricting rows to those whose parent chain ends
+// at a row owned by the signed-in user. Consumes exactly one bind param ($idx).
+function scopeClause(scope, idx) {
+  const chain = scope.chain;
+  const owner = assertIdent(scope.owner);
+  let sub = `SELECT "id" FROM "${assertIdent(chain[chain.length - 1].table)}" WHERE "${owner}" = $${idx}`;
+  for (let k = chain.length - 1; k >= 1; k--) {
+    sub = `SELECT "id" FROM "${assertIdent(chain[k - 1].table)}" WHERE "${assertIdent(chain[k].key)}" IN (${sub})`;
+  }
+  return `"${assertIdent(chain[0].key)}" IN (${sub})`;
+}
+
 export async function selectRows(table, user, params) {
   const cfg = tableConfig(table);
   const { clauses, values, nextIndex } = buildFilters(params.filters ?? {});
@@ -115,13 +130,10 @@ export async function selectRows(table, user, params) {
   }
 
   // Child tables with no own user_id are scoped through their parent's owner:
-  // restrict rows to those whose parent row belongs to the signed-in user.
-  if (cfg.readParent) {
+  // restrict rows to those whose parent chain belongs to the signed-in user.
+  if (cfg.scope && !anonymousByToken) {
     if (!user) throw Object.assign(new Error('Not signed in'), { status: 401 });
-    const p = cfg.readParent;
-    clauses.push(
-      `"${assertIdent(p.localKey)}" IN (SELECT "id" FROM "${assertIdent(p.table)}" WHERE "${assertIdent(p.parentOwner)}" = $${i++})`,
-    );
+    clauses.push(scopeClause(cfg.scope, i++));
     values.push(user.id);
   }
 
@@ -198,6 +210,10 @@ export async function updateRows(table, user, filters, patch) {
     clauses.push(`"${cfg.owner}" = $${i++}`);
     fv.push(user.id);
   }
+  if (cfg.scope) {
+    clauses.push(scopeClause(cfg.scope, i++));
+    fv.push(user.id);
+  }
   if (!clauses.length) throw Object.assign(new Error('Refusing unfiltered update'), { status: 400 });
 
   const sql = `UPDATE "${assertIdent(table)}" SET ${sets.join(', ')} WHERE ${clauses.join(' AND ')} RETURNING *`;
@@ -214,6 +230,10 @@ export async function deleteRows(table, user, filters) {
   let i = nextIndex;
   if (cfg.owner) {
     clauses.push(`"${cfg.owner}" = $${i++}`);
+    values.push(user.id);
+  }
+  if (cfg.scope) {
+    clauses.push(scopeClause(cfg.scope, i++));
     values.push(user.id);
   }
   if (!clauses.length) throw Object.assign(new Error('Refusing unfiltered delete'), { status: 400 });
