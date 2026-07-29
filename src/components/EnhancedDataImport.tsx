@@ -14,8 +14,10 @@ import {
   Filter,
   X,
   Save,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Table2,
 } from 'lucide-react';
+import { DataGridEditor } from './DataGridEditor';
 
 interface Dataset {
   id: string;
@@ -61,7 +63,7 @@ export function EnhancedDataImport() {
   const [reverseCodeColumns, setReverseCodeColumns] = useState<string[]>([]);
   const [maxValue, setMaxValue] = useState<number>(5);
   const [cleanedData, setCleanedData] = useState<any[] | null>(null);
-  const [dataView, setDataView] = useState<'list' | 'spreadsheet' | 'quality'>('list');
+  const [dataView, setDataView] = useState<'list' | 'spreadsheet' | 'quality' | 'editor'>('list');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
@@ -102,6 +104,29 @@ export function EnhancedDataImport() {
     }
   };
 
+  // Shared persistence: turns columns + row objects into a saved dataset.
+  const persistDataset = async (
+    name: string, columns: string[], data: any[], fileName: string, fileSize: number, source: string,
+  ) => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error('Not authenticated');
+    const { error: insertError } = await supabase.from('datasets').insert({
+      user_id: user.id,
+      name,
+      file_name: fileName,
+      file_size: fileSize,
+      columns,
+      data,
+      rows_count: data.length,
+      metadata: {
+        uploadedAt: new Date().toISOString(),
+        source,
+        columnTypes: columns.map((col) => ({ name: col, type: detectColumnType(data, col) })),
+      },
+    });
+    if (insertError) throw insertError;
+  };
+
   const processFile = async (file: File) => {
     const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
@@ -109,88 +134,67 @@ export function EnhancedDataImport() {
       setError('File size exceeds 50MB limit');
       return;
     }
-
     if (!file.name.toLowerCase().endsWith('.csv')) {
-      setError('Please upload a CSV file');
+      setError('Please upload a CSV file (or use “Enter Data Manually” to type/paste your data)');
       return;
     }
 
     setUploading(true);
     setError('');
     setSuccess('');
-    setUploadProgress('Reading file...');
-
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
-
-      setUploadProgress('Parsing CSV data...');
-
-      Papa.parse(file, {
-        header: true,
-        skipEmptyLines: true,
-        complete: async (results) => {
-          try {
-            if (results.errors.length > 0) {
-              const criticalErrors = results.errors.filter(e => e.type === 'FieldMismatch');
-              if (criticalErrors.length > 0) {
-                throw new Error(`CSV parsing errors: ${criticalErrors[0].message}`);
-              }
+    setUploadProgress('Parsing CSV data...');
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: async (results) => {
+        try {
+          if (results.errors.length > 0) {
+            const criticalErrors = results.errors.filter(e => e.type === 'FieldMismatch');
+            if (criticalErrors.length > 0) {
+              throw new Error(`CSV parsing errors: ${criticalErrors[0].message}`);
             }
-
-            const columns = results.meta.fields || [];
-
-            if (columns.length === 0) {
-              throw new Error('No columns found in CSV file');
-            }
-
-            const data = results.data.filter((row: any) =>
-              Object.values(row).some(val => val !== null && val !== '')
-            );
-
-            if (data.length === 0) {
-              throw new Error('No valid data rows found in CSV file');
-            }
-
-            setUploadProgress('Saving to database...');
-
-            const { error: insertError } = await supabase.from('datasets').insert({
-              user_id: user.id,
-              name: file.name.replace(/\.[^/.]+$/, ''),
-              file_name: file.name,
-              file_size: file.size,
-              columns: columns,
-              data: data,
-              rows_count: data.length,
-              metadata: {
-                uploadedAt: new Date().toISOString(),
-                columnTypes: columns.map((col) => ({ name: col, type: detectColumnType(data, col) })),
-              },
-            });
-
-            if (insertError) throw insertError;
-
-            setSuccess(`Dataset uploaded successfully! ${data.length} rows, ${columns.length} columns`);
-            setUploadProgress('');
-            loadDatasets();
-          } catch (err: any) {
-            setError(err.message);
-            setUploadProgress('');
-          } finally {
-            setUploading(false);
           }
-        },
-        error: (err) => {
-          setError(`Failed to parse CSV: ${err.message}`);
-          setUploading(false);
+
+          const columns = results.meta.fields || [];
+          if (columns.length === 0) throw new Error('No columns found in CSV file');
+
+          const data = results.data.filter((row: any) =>
+            Object.values(row).some(val => val !== null && val !== '')
+          );
+          if (data.length === 0) throw new Error('No valid data rows found in CSV file');
+
+          setUploadProgress('Saving to database...');
+          await persistDataset(file.name.replace(/\.[^/.]+$/, ''), columns, data, file.name, file.size, 'csv-import');
+
+          setSuccess(`Dataset uploaded successfully! ${data.length} rows, ${columns.length} columns`);
           setUploadProgress('');
-        },
-      });
-    } catch (err: any) {
-      setError(err.message);
-      setUploading(false);
-      setUploadProgress('');
-    }
+          loadDatasets();
+        } catch (err: any) {
+          setError(err.message);
+          setUploadProgress('');
+        } finally {
+          setUploading(false);
+        }
+      },
+      error: (err) => {
+        setError(`Failed to parse CSV: ${err.message}`);
+        setUploading(false);
+        setUploadProgress('');
+      },
+    });
+  };
+
+  // Save a dataset entered by hand / pasted into the grid editor.
+  const saveManualDataset = async (name: string, columns: string[], rows: string[][]) => {
+    const data = rows.map((r) => {
+      const obj: any = {};
+      columns.forEach((c, i) => { obj[c] = r[i] ?? ''; });
+      return obj;
+    });
+    await persistDataset(name, columns, data, `${name}.csv`, JSON.stringify(data).length, 'manual-entry');
+    setSuccess(`Dataset "${name}" saved (${data.length} rows, ${columns.length} variables)`);
+    setDataView('list');
+    loadDatasets();
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -422,6 +426,16 @@ export function EnhancedDataImport() {
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   };
+
+  if (dataView === 'editor') {
+    return (
+      <DataGridEditor
+        saving={uploading}
+        onSave={saveManualDataset}
+        onCancel={() => { setDataView('list'); setError(''); }}
+      />
+    );
+  }
 
   if (dataView === 'spreadsheet' && viewingDataset) {
     const displayData = cleanedData || viewingDataset.data;
@@ -703,9 +717,18 @@ export function EnhancedDataImport() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold text-gray-900">Data Import</h1>
-        <p className="text-gray-600 mt-1">Upload and manage your datasets for analysis</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Data Import</h1>
+          <p className="text-gray-600 mt-1">Upload a file, or enter your data directly — no external CSV needed</p>
+        </div>
+        <button
+          onClick={() => { setError(''); setSuccess(''); setDataView('editor'); }}
+          className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-medium shadow-sm"
+        >
+          <Table2 className="w-5 h-5" />
+          Enter Data Manually
+        </button>
       </div>
 
       {error && (
@@ -753,9 +776,9 @@ export function EnhancedDataImport() {
         ) : (
           <>
             <Upload className={`w-16 h-16 mx-auto mb-4 ${isDragging ? 'text-blue-600' : 'text-gray-400'}`} />
-            <h3 className="text-lg font-semibold text-gray-900 mb-2">Upload Dataset</h3>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Upload a CSV File</h3>
             <p className="text-gray-600 mb-4">
-              {isDragging ? 'Drop your file here...' : 'Drag and drop or click to browse CSV files'}
+              {isDragging ? 'Drop your file here...' : 'Drag and drop or click to browse — or use “Enter Data Manually” to type or paste data'}
             </p>
             <p className="text-sm text-gray-500 mb-4">Maximum file size: 50MB</p>
             <label className="inline-block">
