@@ -13,6 +13,7 @@ import {
   LinkingResults,
   DIFResults
 } from '../lib/itemResponseTheory';
+import { estimatePolytomousIRT } from '../lib/polytomousIRT';
 import { exportToCSV, exportToJSON, exportChartAsImage } from '../lib/exportUtils';
 import { saveAnalysisHistory } from '../lib/analysisHistory';
 import { rAnalysisClient } from '../lib/rAnalysisClient';
@@ -33,7 +34,8 @@ export function EnhancedIRTAnalysis() {
   const [activeTab, setActiveTab] = useState<AnalysisTab>('calibration');
   const [selectedDataset, setSelectedDataset] = useState<string>('');
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
-  const [model, setModel] = useState<'1PL' | '2PL' | '3PL' | '4PL'>('2PL');
+  const [model, setModel] = useState<'1PL' | '2PL' | '3PL' | '4PL' | 'GRM' | 'GPCM'>('2PL');
+  const [crcItem, setCrcItem] = useState(0);
   const [results, setResults] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -153,8 +155,15 @@ export function EnhancedIRTAnalysis() {
 
     try {
       let irtResults;
+      const isPoly = model === 'GRM' || model === 'GPCM';
 
-      if (useRBackend) {
+      if (isPoly) {
+        // Polytomous: keep the ordered categories as-is (no binarizing).
+        const itemData = currentDataset.data.map((row: any) =>
+          selectedItems.map((item) => parseFloat(row[item]))
+        );
+        irtResults = estimatePolytomousIRT(itemData, selectedItems, model as 'GRM' | 'GPCM', 150, 0.001);
+      } else if (useRBackend) {
         irtResults = await runIRTCalibrationWithR();
       } else {
         const itemData = currentDataset.data.map((row: any) =>
@@ -172,11 +181,11 @@ export function EnhancedIRTAnalysis() {
           throw new Error('Need at least 30 respondents with binary responses');
         }
 
-        irtResults = IRTEstimator.estimate(validData, selectedItems, model, 100, 0.001);
-        setResults(irtResults);
+        irtResults = IRTEstimator.estimate(validData, selectedItems, model as '1PL' | '2PL' | '3PL' | '4PL', 100, 0.001);
       }
 
       setResults(irtResults);
+      setCrcItem(0);
 
       await saveAnalysisHistory({
         analysis_type: 'irt',
@@ -266,8 +275,8 @@ export function EnhancedIRTAnalysis() {
         secondItems.map((item) => Math.round(parseFloat(row[item]) || 0))
       );
 
-      const params1 = IRTEstimator.estimate(itemData1, selectedItems, model, 100, 0.001).itemParameters;
-      const params2 = IRTEstimator.estimate(itemData2, secondItems, model, 100, 0.001).itemParameters;
+      const params1 = IRTEstimator.estimate(itemData1, selectedItems, model as '1PL' | '2PL' | '3PL' | '4PL', 100, 0.001).itemParameters;
+      const params2 = IRTEstimator.estimate(itemData2, secondItems, model as '1PL' | '2PL' | '3PL' | '4PL', 100, 0.001).itemParameters;
 
       const irtParams1: IRTParameters[] = params1.map(p => ({
         discrimination: p.discrimination,
@@ -284,7 +293,7 @@ export function EnhancedIRTAnalysis() {
       }));
 
       const meanSigmaLink = IRTEstimator.linkMeanSigma(irtParams1, irtParams2);
-      const stockingLordLink = IRTEstimator.linkStockingLord(irtParams1, irtParams2, model);
+      const stockingLordLink = IRTEstimator.linkStockingLord(irtParams1, irtParams2, model as '1PL' | '2PL' | '3PL' | '4PL');
 
       setLinkingResults({
         meanSigma: meanSigmaLink,
@@ -385,12 +394,23 @@ export function EnhancedIRTAnalysis() {
               className="w-full px-3 py-2 border border-gray-300 rounded-lg"
               disabled={useRBackend && (model === '1PL' || model === '4PL')}
             >
-              <option value="1PL">1PL (Rasch) {useRBackend && '(not available in R)'}</option>
-              <option value="2PL">2PL</option>
-              <option value="3PL">3PL</option>
-              <option value="4PL">4PL {useRBackend && '(not available in R)'}</option>
+              <optgroup label="Dichotomous (0/1 items)">
+                <option value="1PL">1PL (Rasch) {useRBackend && '(not available in R)'}</option>
+                <option value="2PL">2PL</option>
+                <option value="3PL">3PL</option>
+                <option value="4PL">4PL {useRBackend && '(not available in R)'}</option>
+              </optgroup>
+              <optgroup label="Polytomous (ordered/Likert items)">
+                <option value="GRM">GRM — Graded Response Model</option>
+                <option value="GPCM">GPCM — Generalized Partial Credit</option>
+              </optgroup>
             </select>
-            {useRBackend && (model === '1PL' || model === '4PL') && (
+            {(model === 'GRM' || model === 'GPCM') ? (
+              <p className="text-xs text-gray-500 mt-1">
+                For ordered-category (Likert/rating) items. Estimated locally via marginal maximum
+                likelihood (Bock–Aitkin EM) with EAP scoring — the R backend is not used.
+              </p>
+            ) : useRBackend && (model === '1PL' || model === '4PL') && (
               <p className="text-xs text-amber-600 mt-1">
                 R backend supports 2PL and 3PL models. Select 2PL or 3PL for R analysis.
               </p>
@@ -440,7 +460,98 @@ export function EnhancedIRTAnalysis() {
         </div>
       )}
 
-      {results && (
+      {results && Array.isArray(results.crc) && (
+        <div className="space-y-6">
+          {/* ── Polytomous (GRM/GPCM) results ─────────────────────────────── */}
+          <div className="bg-white rounded-lg shadow p-6">
+            <h3 className="text-lg font-semibold mb-4">Model Fit &amp; Reliability</h3>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              <div><p className="text-sm text-gray-600">Log-Likelihood</p><p className="text-xl font-bold">{results.fitStatistics.logLikelihood}</p></div>
+              <div><p className="text-sm text-gray-600">AIC</p><p className="text-xl font-bold">{results.fitStatistics.aic}</p></div>
+              <div><p className="text-sm text-gray-600">BIC</p><p className="text-xl font-bold">{results.fitStatistics.bic}</p></div>
+              <div><p className="text-sm text-gray-600">Empirical Rel.</p><p className="text-xl font-bold">{results.reliability.empirical}</p></div>
+              <div><p className="text-sm text-gray-600">Marginal Rel.</p><p className="text-xl font-bold">{results.reliability.marginal}</p></div>
+            </div>
+            <p className="text-xs text-gray-500 mt-3">
+              {results.model} · {results.nCases} complete cases
+              {results.droppedCases > 0 ? ` (${results.droppedCases} incomplete rows dropped)` : ''} ·
+              {' '}{results.fitStatistics.nParameters} parameters
+            </p>
+          </div>
+
+          <div className="bg-white rounded-lg shadow p-6">
+            <h3 className="text-lg font-semibold mb-4">Item Parameters</h3>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead>
+                  <tr>
+                    <th className="px-4 py-2 text-left text-sm font-medium text-gray-700">Item</th>
+                    <th className="px-4 py-2 text-left text-sm font-medium text-gray-700">Discrimination (a)</th>
+                    <th className="px-4 py-2 text-left text-sm font-medium text-gray-700">Categories</th>
+                    <th className="px-4 py-2 text-left text-sm font-medium text-gray-700">{results.model === 'GRM' ? 'Thresholds (b₁…b₍ₖ₋₁₎)' : 'Step difficulties (d₁…d₍ₖ₋₁₎)'}</th>
+                    <th className="px-4 py-2 text-left text-sm font-medium text-gray-700">Info (θ=0)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {results.itemParameters.map((item: any, idx: number) => (
+                    <tr key={idx}>
+                      <td className="px-4 py-2 text-sm">{item.item}</td>
+                      <td className="px-4 py-2 text-sm">{item.discrimination}</td>
+                      <td className="px-4 py-2 text-sm">{item.categories}</td>
+                      <td className="px-4 py-2 text-sm font-mono">{item.thresholds.join(', ')}</td>
+                      <td className="px-4 py-2 text-sm">{item.information}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-lg shadow p-6">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <h3 className="text-lg font-semibold">Category Response Curves</h3>
+              <select value={crcItem} onChange={(e) => setCrcItem(Number(e.target.value))}
+                className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm">
+                {results.crc.map((c: any, i: number) => <option key={i} value={i}>{c.item}</option>)}
+              </select>
+            </div>
+            {results.crc[crcItem] && (
+              <Line
+                data={{
+                  labels: results.crc[crcItem].abilityLevels.map((a: number) => a.toFixed(1)),
+                  datasets: results.crc[crcItem].categoryProbs.map((probs: number[], k: number) => ({
+                    label: `Category ${k + 1}`,
+                    data: probs,
+                    borderColor: `hsl(${(k * 360) / results.crc[crcItem].categoryProbs.length}, 70%, 50%)`,
+                    backgroundColor: 'transparent',
+                    tension: 0.4,
+                    pointRadius: 0,
+                  })),
+                }}
+                options={{
+                  responsive: true,
+                  plugins: { legend: { display: true, position: 'bottom' as const }, title: { display: true, text: `${results.crc[crcItem].item} — P(category | θ)` } },
+                  scales: { x: { title: { display: true, text: 'Ability (θ)' } }, y: { title: { display: true, text: 'Probability' }, min: 0, max: 1 } },
+                }}
+              />
+            )}
+            <p className="text-xs text-gray-500 mt-2">Each curve is the probability of selecting a response category across the ability continuum.</p>
+          </div>
+
+          <div className="bg-white rounded-lg shadow p-6">
+            <h3 className="text-lg font-semibold mb-4">Test Information Function</h3>
+            <Line
+              data={{
+                labels: results.tif.abilityLevels.map((a: number) => a.toFixed(1)),
+                datasets: [{ label: 'Test Information', data: results.tif.information, borderColor: 'rgb(59, 130, 246)', backgroundColor: 'rgba(59, 130, 246, 0.1)', tension: 0.4, pointRadius: 0 }],
+              }}
+              options={{ responsive: true, plugins: { legend: { display: true }, title: { display: true, text: 'Test Information Function' } }, scales: { x: { title: { display: true, text: 'Ability (θ)' } }, y: { title: { display: true, text: 'Information' } } } }}
+            />
+          </div>
+        </div>
+      )}
+
+      {results && !Array.isArray(results.crc) && (
         <div className="space-y-6">
           <div className="bg-white rounded-lg shadow p-6">
             <h3 className="text-lg font-semibold mb-4">Model Fit Indices</h3>
