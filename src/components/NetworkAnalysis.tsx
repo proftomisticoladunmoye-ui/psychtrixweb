@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import Papa from 'papaparse';
 import { supabase } from '../lib/supabase';
-import { NetworkVisualization } from './NetworkVisualization';
+import { NetworkVisualization, COMMUNITY_COLORS } from './NetworkVisualization';
 import {
   validateNetworkData,
   ebicGlasso,
@@ -82,6 +82,12 @@ export function NetworkAnalysis() {
   const [projectName, setProjectName] = useState('Network Analysis Project');
   const [data, setData] = useState<number[][]>([]);
   const [variables, setVariables] = useState<string[]>([]);
+  // Which of the loaded variables to include in the network, and an optional
+  // construct/group label per variable (for colouring the graph by construct).
+  const [selectedVars, setSelectedVars] = useState<string[]>([]);
+  const [groupOf, setGroupOf] = useState<Record<string, string>>({});
+  // The variable subset actually analysed in the last run (drives results/export).
+  const [analysisVars, setAnalysisVars] = useState<string[]>([]);
   const [dataType, setDataType] = useState<'continuous' | 'binary'>('continuous');
   const [dataSource, setDataSource] = useState<'csv' | 'supabase'>('csv');
   const [storedDatasets, setStoredDatasets] = useState<StoredDataset[]>([]);
@@ -99,7 +105,7 @@ export function NetworkAnalysis() {
     nBootstraps: 1000,
     communityAlgorithm: 'walktrap' as 'walktrap' | 'louvain',
     threshold: 0,
-    correlationMethod: 'spearman' as 'spearman' | 'pearson',
+    correlationMethod: 'spearman' as 'spearman' | 'pearson' | 'polychoric',
   });
 
   const [isProcessing, setIsProcessing] = useState(false);
@@ -217,6 +223,8 @@ export function NetworkAnalysis() {
 
     setVariables(finalHeaders);
     setData(finalData);
+    setSelectedVars(finalHeaders);   // include all by default; user can narrow
+    setGroupOf({});
     setSuccess(`${successMsg}: ${finalData.length} rows × ${finalHeaders.length} variables`);
     setView('data');
     setTimeout(() => setSuccess(''), 4000);
@@ -254,15 +262,26 @@ export function NetworkAnalysis() {
 
   const estimateNetwork = async () => {
     setError('');
+
+    // Restrict to the variables the user selected, in their original order.
+    const idx = variables.map((_, i) => i).filter(i => selectedVars.includes(variables[i]));
+    const useVars = idx.map(i => variables[i]);
+    const useData = data.map(row => idx.map(i => row[i]));
+    if (useVars.length < 3) {
+      setError('Select at least 3 variables to estimate a network.');
+      return;
+    }
+
     setIsProcessing(true);
     setProgress({ percent: 0, stage: 'Validating data...' });
 
-    const validation = validateNetworkData(data, variables);
+    const validation = validateNetworkData(useData, useVars);
     if (!validation.valid) {
       setError(validation.errors.join('. '));
       setIsProcessing(false);
       return;
     }
+    setAnalysisVars(useVars);
     if (validation.warnings.length > 0) {
       console.warn('Validation warnings:', validation.warnings);
     }
@@ -282,7 +301,7 @@ export function NetworkAnalysis() {
         setCommunities(msg.communities);
         setBootstrap(msg.bootstrap);
         try {
-          await saveToDatabase(msg.network, msg.centrality, msg.communities, msg.bootstrap);
+          await saveToDatabase(msg.network, msg.centrality, msg.communities, msg.bootstrap, useVars, useData);
         } catch (saveErr: any) {
           console.warn('Failed to save results:', saveErr?.message);
         }
@@ -303,8 +322,8 @@ export function NetworkAnalysis() {
     };
 
     worker.postMessage({
-      data,
-      variables,
+      data: useData,
+      variables: useVars,
       settings: {
         method: settings.method,
         gamma: settings.gamma,
@@ -319,7 +338,9 @@ export function NetworkAnalysis() {
     net: EBICglassoResult | IsingResult,
     cent: CentralityMetrics[],
     comm: CommunityDetectionResult,
-    boot: BootstrapResult
+    boot: BootstrapResult,
+    vars: string[],
+    dataMatrix: number[][]
   ) => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
@@ -333,7 +354,7 @@ export function NetworkAnalysis() {
 
       const { data: dataset, error: datasetError } = await supabase
         .from('network_datasets')
-        .insert({ project_id: project.id, name: 'Main Dataset', variables, raw_data: data, sample_size: data.length })
+        .insert({ project_id: project.id, name: 'Main Dataset', variables: vars, raw_data: dataMatrix, sample_size: dataMatrix.length })
         .select().single();
       if (datasetError) throw datasetError;
 
@@ -375,10 +396,10 @@ export function NetworkAnalysis() {
     if (!network) return;
     if (format === 'edge_list') {
       const edges: any[] = [];
-      for (let i = 0; i < variables.length; i++) {
-        for (let j = i + 1; j < variables.length; j++) {
+      for (let i = 0; i < analysisVars.length; i++) {
+        for (let j = i + 1; j < analysisVars.length; j++) {
           if (Math.abs(network.adjacency[i][j]) > settings.threshold) {
-            edges.push({ from: variables[i], to: variables[j], weight: network.adjacency[i][j].toFixed(4) });
+            edges.push({ from: analysisVars[i], to: analysisVars[j], weight: network.adjacency[i][j].toFixed(4) });
           }
         }
       }
@@ -386,8 +407,8 @@ export function NetworkAnalysis() {
     } else if (format === 'adjacency') {
       exportToCSV(
         network.adjacency.map((row, i) => {
-          const obj: any = { node: variables[i] };
-          row.forEach((val, j) => { obj[variables[j]] = val.toFixed(4); });
+          const obj: any = { node: analysisVars[i] };
+          row.forEach((val, j) => { obj[analysisVars[j]] = val.toFixed(4); });
           return obj;
         }),
         'network_adjacency'
@@ -401,6 +422,16 @@ export function NetworkAnalysis() {
   if (view === 'results' && network && centrality.length > 0) {
     const stabilityInterpretation = bootstrap ? interpretStability(bootstrap) : null;
     const edgeCount = network.adjacency.flatMap((row, i) => row.slice(i + 1)).filter(w => Math.abs(w) > 1e-6).length;
+
+    // User-defined construct groups → colour indices for the graph + legend.
+    const groupNames = [...new Set(analysisVars.map(v => (groupOf[v] || '').trim()).filter(Boolean))];
+    const hasGroups = groupNames.length > 0;
+    const nodeGroups: { [node: string]: number } | undefined = hasGroups
+      ? Object.fromEntries(analysisVars.map(v => {
+          const g = (groupOf[v] || '').trim();
+          return [v, g ? groupNames.indexOf(g) : groupNames.length]; // ungrouped → last colour
+        }))
+      : undefined;
 
     return (
       <div className="space-y-6">
@@ -427,7 +458,7 @@ export function NetworkAnalysis() {
         {/* Summary cards */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
           {[
-            { icon: Network, label: 'Nodes', value: variables.length, color: 'blue' },
+            { icon: Network, label: 'Nodes', value: analysisVars.length, color: 'blue' },
             { icon: GitCompare, label: 'Edges', value: edgeCount, color: 'green' },
             { icon: Layers, label: 'Communities', value: communities?.nCommunities || 0, color: 'purple' },
             { icon: Shield, label: 'Sparsity', value: `${(network.sparsity * 100).toFixed(1)}%`, color: 'orange' },
@@ -444,12 +475,24 @@ export function NetworkAnalysis() {
         <div className="bg-white rounded-xl border border-gray-200 p-4 sm:p-6">
           <h4 className="text-lg font-bold text-gray-900 mb-4">Network Visualization</h4>
           <NetworkVisualization
-            nodes={variables}
+            nodes={analysisVars}
             adjacency={network.adjacency}
             communities={communities?.communities}
+            groups={nodeGroups}
             centrality={centrality.reduce((acc, c) => ({ ...acc, [c.node]: c.strength }), {})}
             threshold={settings.threshold}
           />
+          {hasGroups && (
+            <div className="flex flex-wrap gap-3 mt-4 pt-4 border-t border-gray-100">
+              <span className="text-xs font-semibold text-gray-500">Constructs:</span>
+              {groupNames.map((g, i) => (
+                <span key={g} className="inline-flex items-center gap-1.5 text-xs text-gray-700">
+                  <span className="w-3 h-3 rounded-full inline-block" style={{ background: COMMUNITY_COLORS[i % COMMUNITY_COLORS.length] }} />
+                  {g}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Edge weight threshold slider */}
@@ -585,7 +628,7 @@ export function NetworkAnalysis() {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <h3 className="text-xl sm:text-2xl font-bold text-gray-900">Configure Network Estimation</h3>
-            <p className="text-gray-600 mt-1 text-sm">{data.length} observations, {variables.length} variables</p>
+            <p className="text-gray-600 mt-1 text-sm">{data.length} observations · {selectedVars.length} of {variables.length} variables selected</p>
           </div>
           <button onClick={() => setView('home')}
             className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white text-sm rounded-lg transition">
@@ -639,10 +682,15 @@ export function NetworkAnalysis() {
                 <select value={settings.correlationMethod}
                   onChange={e => setSettings({ ...settings, correlationMethod: e.target.value as any })}
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm">
-                  <option value="spearman">Spearman rank — recommended for ordinal/Likert data</option>
+                  <option value="polychoric">Polychoric — gold standard for ordinal/Likert items</option>
+                  <option value="spearman">Spearman rank — robust for ordinal data (faster)</option>
                   <option value="pearson">Pearson — continuous, normally distributed data</option>
                 </select>
-                <p className="text-xs text-gray-500 mt-1">Likert/ordinal items violate Pearson assumptions; Spearman avoids edge attenuation (cf. qgraph cor_auto)</p>
+                <p className="text-xs text-gray-500 mt-1">
+                  Likert/ordinal items violate Pearson assumptions. Polychoric models the latent continuous
+                  correlation (as qgraph's cor_auto does) — the most accurate for ordered categories.
+                  {settings.correlationMethod === 'polychoric' && ' Note: polychoric is slower, especially the bootstrap — lower the iterations for large item sets.'}
+                </p>
               </div>
             )}
 
@@ -692,17 +740,43 @@ export function NetworkAnalysis() {
           )}
         </div>
 
-        {/* Variable preview */}
+        {/* Variable selection & construct grouping */}
         <div className="bg-white rounded-xl border border-gray-200 p-4 sm:p-6">
-          <h4 className="text-sm font-bold text-gray-900 mb-3">Variables ({variables.length})</h4>
-          <div className="flex flex-wrap gap-2">
-            {variables.map(v => (
-              <span key={v} className="px-2 py-1 bg-blue-50 border border-blue-200 text-blue-800 text-xs rounded-lg font-medium">
-                {v}
-              </span>
-            ))}
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <h4 className="text-sm font-bold text-gray-900">
+              Select Variables — {selectedVars.length} of {variables.length}
+            </h4>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setSelectedVars(variables)}
+                className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">Select all</button>
+              <button onClick={() => setSelectedVars([])}
+                className="text-xs px-2 py-1 rounded border border-gray-300 hover:bg-gray-50">None</button>
+            </div>
           </div>
-          <p className="text-xs text-gray-500 mt-3">{data.length} observations</p>
+          <p className="text-xs text-gray-500 mb-3">
+            Choose which items enter the network. Optionally assign each to a construct/group to colour the graph by construct.
+          </p>
+          <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+            {variables.map(v => {
+              const on = selectedVars.includes(v);
+              return (
+                <div key={v} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border ${on ? 'border-blue-200 bg-blue-50/40' : 'border-gray-100'}`}>
+                  <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+                    <input type="checkbox" checked={on}
+                      onChange={e => setSelectedVars(prev => e.target.checked ? [...prev, v] : prev.filter(x => x !== v))}
+                      className="rounded flex-shrink-0" />
+                    <span className={`text-sm truncate ${on ? 'text-gray-900 font-medium' : 'text-gray-400'}`}>{v}</span>
+                  </label>
+                  {on && (
+                    <input type="text" value={groupOf[v] || ''} placeholder="construct (optional)"
+                      onChange={e => setGroupOf(prev => ({ ...prev, [v]: e.target.value }))}
+                      className="w-36 flex-shrink-0 px-2 py-1 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-blue-400" />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-xs text-gray-500 mt-3">{data.length} observations · {selectedVars.length} variables selected for analysis</p>
         </div>
       </div>
     );
@@ -806,7 +880,8 @@ export function NetworkAnalysis() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-gray-700">
           {[
             ['Gaussian Graphical Models', 'Partial correlation networks with LASSO regularization'],
-            ['EBICglasso', 'Optimal tuning parameter selection via EBIC'],
+            ['Ordinal Correlations', 'Pearson, Spearman, or polychoric (cor_auto) for Likert items'],
+            ['Variable Selection & Grouping', 'Choose which items to include and colour nodes by construct'],
             ['Comprehensive Centrality', 'Strength, betweenness, closeness, expected influence'],
             ['Bootstrap Stability', 'Edge accuracy & CS-coefficient (Epskamp et al. 2018)'],
             ['Community Detection', 'Walktrap & Louvain algorithms'],

@@ -16,7 +16,7 @@ export interface NetworkWorkerRequest {
     gamma: number;
     nBootstraps: number;
     communityAlgorithm: 'walktrap' | 'louvain';
-    correlationMethod: 'spearman' | 'pearson';
+    correlationMethod: 'spearman' | 'pearson' | 'polychoric';
   };
 }
 

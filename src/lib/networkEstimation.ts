@@ -1,3 +1,7 @@
+import { polychoricMatrix } from './polychoric';
+
+export type CorrelationMethod = 'pearson' | 'spearman' | 'polychoric';
+
 export interface NetworkMatrix {
   nodes: string[];
   adjacency: number[][];
@@ -8,7 +12,7 @@ export interface EBICglassoResult extends NetworkMatrix {
   lambda: number;
   ebic: number;
   gamma: number;
-  correlationMethod: 'pearson' | 'spearman';
+  correlationMethod: CorrelationMethod;
   /** mgm-style node predictability: share of each node's variance explained
    *  by its neighbors, R²_i = 1 − 1/θ_ii on the correlation scale. */
   predictability: number[];
@@ -319,11 +323,13 @@ export function ebicGlasso(
   variables: string[],
   gamma: number = 0.5,
   nLambda: number = 50,
-  correlationMethod: 'pearson' | 'spearman' = 'spearman',
+  correlationMethod: CorrelationMethod = 'spearman',
   fixedLambda?: number
 ): EBICglassoResult {
   const S = correlationMethod === 'spearman'
     ? calculateSpearmanMatrix(data)
+    : correlationMethod === 'polychoric'
+    ? polychoricMatrix(data, data[0] ? data[0].map((_, j) => j) : []).R
     : calculateCorrelationMatrix(data);
   const n = data.length;
   const p = variables.length;

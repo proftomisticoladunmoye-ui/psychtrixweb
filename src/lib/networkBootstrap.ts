@@ -1,4 +1,4 @@
-import { ebicGlasso, estimateIsingModel, standardizeData } from './networkEstimation';
+import { ebicGlasso, estimateIsingModel, standardizeData, CorrelationMethod } from './networkEstimation';
 import { calculateAllCentrality, CentralityMetrics } from './networkCentrality';
 
 export interface EdgeAccuracyResult {
@@ -33,7 +33,7 @@ export function bootstrapEdgeWeights(
   nBootstraps: number = 1000,
   ciLevel: number = 0.95,
   gamma: number = 0.5,
-  correlationMethod: 'pearson' | 'spearman' = 'spearman',
+  correlationMethod: CorrelationMethod = 'spearman',
   onProgress?: (fraction: number) => void
 ): EdgeAccuracyResult[] {
   const n = data.length;
@@ -112,7 +112,7 @@ export function caseDropBootstrap(
   sampleProportions: number[] = [0.25, 0.5, 0.75],
   nBootstraps: number = 100,
   gamma: number = 0.5,
-  correlationMethod: 'pearson' | 'spearman' = 'spearman',
+  correlationMethod: CorrelationMethod = 'spearman',
   onProgress?: (fraction: number) => void
 ): CentralityStabilityResult[] {
   const n = data.length;
@@ -245,7 +245,7 @@ export function performFullBootstrapAnalysis(
   gamma: number = 0.5,
   nBootstraps: number = 1000,
   onProgress?: (progress: number, stage: string) => void,
-  correlationMethod: 'pearson' | 'spearman' = 'spearman'
+  correlationMethod: CorrelationMethod = 'spearman'
 ): BootstrapResult {
   onProgress?.(0, 'Computing edge accuracy...');
 

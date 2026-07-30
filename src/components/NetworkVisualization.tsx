@@ -10,6 +10,7 @@ interface NetworkNode {
   fx?: number | null;
   fy?: number | null;
   community?: number;
+  group?: number;
   centrality?: number;
 }
 
@@ -23,12 +24,15 @@ interface NetworkVisualizationProps {
   nodes: string[];
   adjacency: number[][];
   communities?: { [node: string]: number };
+  /** Optional user-defined construct groups; when present, nodes are coloured
+   *  by group instead of by detected community. */
+  groups?: { [node: string]: number };
   centrality?: { [node: string]: number };
   showEdgeWeights?: boolean;
   threshold?: number;
 }
 
-const COMMUNITY_COLORS = [
+export const COMMUNITY_COLORS = [
   '#3b82f6', '#10b981', '#f59e0b', '#ef4444',
   '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16',
 ];
@@ -86,12 +90,13 @@ function drawFrame(
     ctx.beginPath();
     ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
 
+    const colorIdx = node.group != null ? node.group : node.community;
     if (node.id === selectedNode) {
       ctx.fillStyle = '#f59e0b';
     } else if (node.id === dragNodeId) {
       ctx.fillStyle = '#a78bfa';
-    } else if (node.community != null) {
-      ctx.fillStyle = COMMUNITY_COLORS[node.community % COMMUNITY_COLORS.length];
+    } else if (colorIdx != null) {
+      ctx.fillStyle = COMMUNITY_COLORS[colorIdx % COMMUNITY_COLORS.length];
     } else {
       ctx.fillStyle = '#3b82f6';
     }
@@ -113,6 +118,7 @@ export function NetworkVisualization({
   nodes,
   adjacency,
   communities,
+  groups,
   centrality,
   showEdgeWeights = false,
   threshold = 0,
@@ -173,6 +179,7 @@ export function NetworkVisualization({
         vx: 0,
         vy: 0,
         community: communities?.[id],
+        group: groups?.[id],
         centrality: centrality?.[id],
       };
     });
@@ -189,7 +196,7 @@ export function NetworkVisualization({
     nodesRef.current = newNodes;
     edgesRef.current = newEdges;
     startSimulation();
-  }, [nodes, adjacency, communities, threshold]);
+  }, [nodes, adjacency, communities, groups, threshold]);
 
   const startSimulation = () => {
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
@@ -425,7 +432,8 @@ export function NetworkVisualization({
     });
     nodesRef.current.forEach(node => {
       const r = nodeRadius(node);
-      const color = node.community != null ? COMMUNITY_COLORS[node.community % COMMUNITY_COLORS.length] : '#3b82f6';
+      const colorIdx = node.group != null ? node.group : node.community;
+      const color = colorIdx != null ? COMMUNITY_COLORS[colorIdx % COMMUNITY_COLORS.length] : '#3b82f6';
       svg += `<circle cx="${node.x}" cy="${node.y}" r="${r}" fill="${color}" stroke="#ffffff" stroke-width="2" />`;
       svg += `<text x="${node.x}" y="${node.y + r + 12}" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="bold" fill="#1f2937">${node.id}</text>`;
     });
