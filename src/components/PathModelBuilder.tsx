@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  MousePointer2, Spline, GitBranch, Zap, Link2, Trash2,
+  MousePointer2, Spline, GitBranch, Zap, Link2, Trash2, Eraser,
   Undo2, Redo2, Maximize2, ZoomIn, ZoomOut, Plus, LayoutGrid, Download,
 } from 'lucide-react';
 
@@ -129,6 +129,30 @@ function valuePill(ctx: CanvasRenderingContext2D, lines: string[], x: number, y:
   ctx.restore();
 }
 
+// ─── Covariance-arc geometry ─────────────────────────────────────────────────
+// Covariance edges are drawn as curves that bow perpendicular to the node-pair
+// line. Each covariance gets its own "lane" (increasing bow) so multiple arcs
+// never overlap and every r-value stays readable at its own apex.
+const COV_BASE = 48, COV_STEP = 34;
+
+function covLaneMap(edges: BuilderEdge[]): Map<string, number> {
+  const cov = edges.filter(e => e.type === 'covariance');
+  return new Map(cov.map((e, i) => [e.id, i]));
+}
+// Quadratic-Bézier control point for a covariance arc (bows "upward").
+function covControl(a: { x: number; y: number }, b: { x: number; y: number }, lane: number) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len = Math.hypot(dx, dy) || 1;
+  let px = -dy / len, py = dx / len;          // unit perpendicular
+  if (py > 0) { px = -px; py = -py; }         // ensure the arc bows up
+  const off = COV_BASE + lane * COV_STEP;
+  return { cx: (a.x + b.x) / 2 + px * off, cy: (a.y + b.y) / 2 + py * off, px, py };
+}
+function quadAt(p0: { x: number; y: number }, c: { x: number; y: number }, p2: { x: number; y: number }, t: number) {
+  const mt = 1 - t;
+  return { x: mt * mt * p0.x + 2 * mt * t * c.x + t * t * p2.x, y: mt * mt * p0.y + 2 * mt * t * c.y + t * t * p2.y };
+}
+
 // Draws the edges + nodes of the model (shared by the live canvas and the
 // high-resolution export). Interactive extras (grid, pending line, selection
 // highlight) are opt-in via `opts` so the exported figure stays clean.
@@ -137,13 +161,14 @@ interface SceneOpts {
   showSE?: boolean; showCI?: boolean; showR2?: boolean;
   roleOf: (id: string) => 'exo' | 'med' | 'out' | 'mod';
   selectedEdge?: string | null;
-  mode?: 'select' | 'connect';
+  mode?: 'select' | 'connect' | 'erase';
   pendingFrom?: string | null;
   hoverPoint?: { x: number; y: number } | null;
 }
 function drawScene(ctx: CanvasRenderingContext2D, graph: BuilderGraph, opts: SceneOpts) {
   const { results, showSE, showCI, showR2, roleOf, selectedEdge, mode, pendingFrom, hoverPoint } = opts;
   const pos = new Map(graph.nodes.map(n => [n.id, n]));
+  const covLanes = covLaneMap(graph.edges);
 
   graph.edges.forEach(edge => {
     const a = pos.get(edge.from), b = pos.get(edge.to);
@@ -154,20 +179,24 @@ function drawScene(ctx: CanvasRenderingContext2D, graph: BuilderGraph, opts: Sce
     ctx.strokeStyle = meta.color; ctx.lineWidth = sel ? 3 : 2;
 
     if (edge.type === 'covariance') {
-      const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2 - 46;
+      // Curved, lane-staggered arc so multiple covariances never overlap.
+      const { cx, cy, px, py } = covControl(a, b, covLanes.get(edge.id) ?? 0);
+      const c = { x: cx, y: cy };
       ctx.setLineDash([6, 4]);
-      const [sx, sy] = rectEdgePoint(a.x, a.y, Math.atan2(midY - a.y, midX - a.x));
-      const [ex, ey] = rectEdgePoint(b.x, b.y, Math.atan2(midY - b.y, midX - b.x));
-      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.quadraticCurveTo(midX, midY, ex, ey); ctx.stroke();
+      const [sx, sy] = rectEdgePoint(a.x, a.y, Math.atan2(cy - a.y, cx - a.x));
+      const [ex, ey] = rectEdgePoint(b.x, b.y, Math.atan2(cy - b.y, cx - b.x));
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.quadraticCurveTo(cx, cy, ex, ey); ctx.stroke();
       ctx.setLineDash([]);
-      arrowhead(ctx, sx, sy, Math.atan2(sy - midY, sx - midX), meta.color, 8);
-      arrowhead(ctx, ex, ey, Math.atan2(ey - midY, ex - midX), meta.color, 8);
+      arrowhead(ctx, sx, sy, Math.atan2(sy - cy, sx - cx), meta.color, 8);
+      arrowhead(ctx, ex, ey, Math.atan2(ey - cy, ex - cx), meta.color, 8);
       const cstat = results?.covariances?.[`${edge.from}<->${edge.to}`] ?? results?.covariances?.[`${edge.to}<->${edge.from}`];
       if (cstat) {
+        // r-value pill at the arc's apex (t=0.5), nudged outward so it never hides behind the curve.
+        const apex = quadAt({ x: sx, y: sy }, c, { x: ex, y: ey }, 0.5);
         const lines = ['r ' + fmtCoef(cstat.beta) + pStar(cstat.pvalue)];
         if (showSE) lines.push(`SE ${cstat.se.toFixed(2)}`);
         if (showCI) lines.push(`[${fmtCoef(cstat.beta - 1.96 * cstat.se)}, ${fmtCoef(cstat.beta + 1.96 * cstat.se)}]`);
-        valuePill(ctx, lines, midX, midY - 2, cstat.pvalue < 0.05 ? meta.color : '#6b7280');
+        valuePill(ctx, lines, apex.x + px * 8, apex.y + py * 8, cstat.pvalue < 0.05 ? meta.color : '#6b7280');
       }
     } else if (edge.type === 'moderation') {
       const iv = edge.moderates ? pos.get(edge.moderates) : null;
@@ -296,7 +325,7 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
   const [containerW, setContainerW] = useState(900);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [mode, setMode] = useState<'select' | 'connect'>('select');
+  const [mode, setMode] = useState<'select' | 'connect' | 'erase'>('select');
   // Which kind of edge the "connect" mode draws: a directed path or an
   // undirected covariance. (Moderation is still assigned via the edge inspector.)
   const [drawType, setDrawType] = useState<'direct' | 'covariance'>('direct');
@@ -372,6 +401,22 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
     drawScene(ctx, graph, { results, showSE, showCI, showR2, roleOf, selectedEdge, mode, pendingFrom, hoverPoint });
   }, [graph, displayW, displayH, scale, pan, zoom, mode, pendingFrom, hoverPoint, selectedEdge, results, showSE, showCI, showR2]);
 
+  // Delete / Backspace removes the currently selected path (when not typing).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      const el = document.activeElement as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
+      if (!selectedEdge) return;
+      e.preventDefault();
+      commit({ ...graph, edges: graph.edges.filter(ed => ed.id !== selectedEdge) });
+      setSelectedEdge(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedEdge, graph, commit]);
+
   // ── High-resolution PNG export (clean figure, no grid/selection) ─────────────
   const exportPNG = () => {
     if (graph.nodes.length === 0) return;
@@ -397,10 +442,22 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
   };
   const edgeAt = (x: number, y: number): string | null => {
     const pos = new Map(graph.nodes.map(n => [n.id, n]));
+    const covLanes = covLaneMap(graph.edges);
     for (const e of graph.edges) {
       const a = pos.get(e.from), b = pos.get(e.to);
       if (!a || !b) continue;
-      // distance to segment a-b
+      if (e.type === 'covariance') {
+        // Sample the drawn quadratic arc so the curve itself is clickable.
+        const { cx, cy } = covControl(a, b, covLanes.get(e.id) ?? 0);
+        let minD = Infinity;
+        for (let t = 0; t <= 1.0001; t += 0.05) {
+          const q = quadAt(a, { x: cx, y: cy }, b, t);
+          minD = Math.min(minD, Math.hypot(x - q.x, y - q.y));
+        }
+        if (minD < 12) return e.id;
+        continue;
+      }
+      // distance to segment a-b (directed / moderation paths)
       const dx = b.x - a.x, dy = b.y - a.y;
       const len2 = dx * dx + dy * dy || 1;
       let t = ((x - a.x) * dx + (y - a.y) * dy) / len2;
@@ -419,6 +476,14 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
     e.currentTarget.setPointerCapture(e.pointerId);
     const p = toLogical(e.clientX, e.clientY);
     const nid = nodeAt(p.x, p.y);
+
+    // Erase tool: click a path to delete it, or a variable to remove it (with its paths).
+    if (mode === 'erase') {
+      const eid = edgeAt(p.x, p.y);
+      if (eid) { commit({ ...graph, edges: graph.edges.filter(ed => ed.id !== eid) }); if (selectedEdge === eid) setSelectedEdge(null); }
+      else if (nid) { removeNode(nid); }
+      return;
+    }
 
     if (mode === 'connect') {
       if (nid) {
@@ -568,6 +633,11 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
           title="Draw an undirected covariance / correlation between two variables">
           <Link2 className="w-4 h-4" /> Draw covariance
         </button>
+        <button onClick={() => { setMode('erase'); setPendingFrom(null); setSelectedEdge(null); }}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition ${mode === 'erase' ? 'bg-red-600 text-white' : 'text-gray-600 hover:bg-gray-200'}`}
+          title="Erase: click a path to delete it (or a variable to remove it and its paths)">
+          <Eraser className="w-4 h-4" /> Erase
+        </button>
         <div className="w-px h-5 bg-gray-300 mx-1" />
         <button onClick={undo} disabled={history.current.length === 0} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-40" title="Undo"><Undo2 className="w-4 h-4 text-gray-600" /></button>
         <button onClick={redo} disabled={future.current.length === 0} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-40" title="Redo"><Redo2 className="w-4 h-4 text-gray-600" /></button>
@@ -588,6 +658,9 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
               ? (pendingFrom ? `Click the variable to correlate with “${pendingFrom}”` : 'Click two variables to draw a covariance between them')
               : (pendingFrom ? `Click a target node to link from “${pendingFrom}”` : 'Click a source node, then a target node')}
           </span>
+        )}
+        {mode === 'erase' && (
+          <span className="text-xs ml-1 text-red-600">Click any path to delete it (or a variable to remove it and its paths).</span>
         )}
         {results && (
           <div className="flex items-center gap-3 ml-auto text-xs text-gray-600">
@@ -615,7 +688,7 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
       <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
         <canvas
           ref={canvasRef}
-          style={{ display: 'block', width: displayW, height: displayH, cursor: mode === 'connect' ? 'crosshair' : 'grab' }}
+          style={{ display: 'block', width: displayW, height: displayH, cursor: mode === 'connect' ? 'crosshair' : mode === 'erase' ? 'pointer' : 'grab' }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
