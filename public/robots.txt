@@ -8,7 +8,7 @@ Disallow: /api/
 Disallow: /*.json$
 
 # Sitemap
-Sitemap: https://psychtrixweb.com/sitemap.xml
+Sitemap: https://psychtrixweb.online/sitemap.xml
 
 # Crawl delay for politeness
 Crawl-delay: 1
