@@ -26,3 +26,6 @@ dist-ssr
 
 # Supabase data export — contains real user data, never commit
 supabase-export/
+
+# test build output
+tests/.build/

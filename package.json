@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "start": "node --env-file-if-exists=.env server/index.js",
-    "server:dev": "node --env-file-if-exists=.env server/index.js"
+    "server:dev": "node --env-file-if-exists=.env server/index.js",
+    "test": "node tests/run.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
