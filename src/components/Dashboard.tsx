@@ -204,17 +204,32 @@ export function Dashboard({ onNavigate }: DashboardProps) {
 
   return (
     <div className="space-y-6">
-      <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-2xl p-8 text-white shadow-lg">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <h1 className="text-3xl font-bold mb-2">Welcome back, {userName}</h1>
-            <p className="text-blue-100 mb-6">Your psychometric intelligence platform is ready. Continue your analysis or start a new project.</p>
+      <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-2xl p-6 sm:p-8 text-white shadow-lg">
+        <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-6">
+          <div className="max-w-2xl min-w-0">
+            <h1 className="text-2xl sm:text-3xl font-bold mb-2 break-words">Welcome back, {userName}</h1>
+            <p className="text-blue-100">Your psychometric intelligence platform is ready. Continue your analysis or start a new project.</p>
+            <div className="flex flex-wrap gap-3 mt-6">
+              <button
+                onClick={() => onNavigate('data-import')}
+                className="bg-white text-blue-600 px-6 py-3 rounded-lg font-medium hover:bg-blue-50 transition flex items-center gap-2"
+              >
+                <Upload className="w-5 h-5" />
+                Import New Data
+              </button>
+              <button
+                onClick={() => onNavigate('help')}
+                className="bg-blue-500 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-600 transition border-2 border-blue-400"
+              >
+                View Tutorial
+              </button>
+            </div>
           </div>
           {community && (
-            <div className="bg-white/10 backdrop-blur rounded-xl px-5 py-4 border border-white/20 flex items-center gap-3">
+            <div className="bg-white/10 backdrop-blur rounded-xl px-5 py-4 border border-white/20 flex items-center gap-3 self-start flex-shrink-0">
               <Users className="w-8 h-8 text-blue-100 flex-shrink-0" />
-              <div>
-                <p className="text-2xl font-bold leading-none">
+              <div className="min-w-0">
+                <p className="text-xl sm:text-2xl font-bold leading-tight">
                   Founding Member #{community.memberNumber.toLocaleString()}
                 </p>
                 <p className="text-xs text-blue-100 mt-1">
@@ -223,21 +238,6 @@ export function Dashboard({ onNavigate }: DashboardProps) {
               </div>
             </div>
           )}
-        </div>
-        <div className="flex gap-3">
-          <button
-            onClick={() => onNavigate('data-import')}
-            className="bg-white text-blue-600 px-6 py-3 rounded-lg font-medium hover:bg-blue-50 transition flex items-center gap-2"
-          >
-            <Upload className="w-5 h-5" />
-            Import New Data
-          </button>
-          <button
-            onClick={() => onNavigate('help')}
-            className="bg-blue-500 text-white px-6 py-3 rounded-lg font-medium hover:bg-blue-600 transition border-2 border-blue-400"
-          >
-            View Tutorial
-          </button>
         </div>
       </div>
 
