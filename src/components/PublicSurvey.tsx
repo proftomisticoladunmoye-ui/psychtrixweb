@@ -60,6 +60,11 @@ export function PublicSurvey({ token }: PublicSurveyProps) {
     loadSurvey();
   }, [token]);
 
+  // Hooks must run on every render — compute the Likert layout here, before any
+  // of the early returns below (project is null until the survey loads).
+  const numOptions = project ? project.response_scale.max - project.response_scale.min + 1 : 5;
+  const likertLayout = useLikertLayout(numOptions);
+
   const loadSurvey = async () => {
     try {
       const { data, error } = await supabase
@@ -228,8 +233,6 @@ export function PublicSurvey({ token }: PublicSurveyProps) {
   // ─── Responding ─────────────────────────────────────────────────────────
   const item = project.items[currentItem];
   const isLastItem = currentItem === project.items.length - 1;
-  const numOptions = rs.max - rs.min + 1;
-  const likertLayout = useLikertLayout(numOptions);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex flex-col">

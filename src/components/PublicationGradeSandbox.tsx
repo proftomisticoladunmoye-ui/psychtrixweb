@@ -458,9 +458,25 @@ export function EnhancedPsychometricsSandbox() {
       case 'pdf':
         exportResultsToPDF(exportData, `${currentProject.name}_Analysis`);
         break;
-      case 'csv':
-        exportToCSV(validationResults.itemAnalysis, `${currentProject.name}_ItemAnalysis`);
+      case 'csv': {
+        // Export readable item text + subscale alongside the statistics,
+        // rather than the internal item ids.
+        const rows = validationResults.itemAnalysis.map((a, i) => {
+          const item = currentProject.items.find(it => it.id === a.itemId);
+          return {
+            item: i + 1,
+            content: item?.content ?? a.itemId,
+            subscale: item?.subscale ?? '',
+            reversed: item?.reversed ? 'yes' : 'no',
+            mean: a.mean.toFixed(3),
+            sd: a.sd.toFixed(3),
+            corrected_item_total: a.itemTotal.toFixed(3),
+            alpha_if_deleted: a.alpha_if_deleted.toFixed(3),
+          };
+        });
+        exportToCSV(rows, `${currentProject.name}_ItemAnalysis`);
         break;
+      }
       case 'json':
         exportToJSON(exportData, `${currentProject.name}_Complete`);
         break;
