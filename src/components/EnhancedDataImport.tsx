@@ -16,8 +16,10 @@ import {
   Save,
   FileSpreadsheet,
   Table2,
+  PieChart,
 } from 'lucide-react';
 import { DataGridEditor } from './DataGridEditor';
+import { analyzeMissingness, littleMCAR, imputeMean, imputeMedian, imputeEM, MissingnessReport, MCARResult } from '../lib/missingData';
 
 interface Dataset {
   id: string;
@@ -60,6 +62,11 @@ export function EnhancedDataImport() {
   const [viewingDataset, setViewingDataset] = useState<Dataset | null>(null);
   const [qualityReport, setQualityReport] = useState<DataQualityReport | null>(null);
   const [showQualityReport, setShowQualityReport] = useState(false);
+  const [showMissing, setShowMissing] = useState(false);
+  const [missingReport, setMissingReport] = useState<MissingnessReport | null>(null);
+  const [mcarResult, setMcarResult] = useState<MCARResult | null>(null);
+  const [imputeMethod, setImputeMethod] = useState<'em' | 'mean' | 'median' | 'listwise'>('em');
+  const [missingBusy, setMissingBusy] = useState(false);
   const [reverseCodeColumns, setReverseCodeColumns] = useState<string[]>([]);
   const [maxValue, setMaxValue] = useState<number>(5);
   const [cleanedData, setCleanedData] = useState<any[] | null>(null);
@@ -361,6 +368,73 @@ export function EnhancedDataImport() {
     setSuccess(`Removed ${viewingDataset.data.length - cleaned.length} rows with missing values`);
   };
 
+  // ── Missing-data handling ──────────────────────────────────────────────────
+  const MISS = (v: any) => v === null || v === undefined || v === '';
+  // The numeric (item) columns the missing-data model operates on.
+  const numericMissingCols = (ds: Dataset): string[] =>
+    ds.columns.filter(col =>
+      ds.data.some(r => !MISS(r[col])) &&
+      ds.data.every(r => MISS(r[col]) || (typeof r[col] !== 'object' && isFinite(Number(r[col])))));
+
+  const buildMatrix = (ds: Dataset, cols: string[]): number[][] =>
+    ds.data.map(row => cols.map(col => (MISS(row[col]) ? NaN : Number(row[col]))));
+
+  const runMissingAnalysis = () => {
+    if (!viewingDataset) return;
+    setMissingBusy(true);
+    setError('');
+    try {
+      const cols = numericMissingCols(viewingDataset);
+      if (cols.length < 2) throw new Error('Need at least two numeric variables to analyse missingness.');
+      const matrix = buildMatrix(viewingDataset, cols);
+      setMissingReport(analyzeMissingness(matrix, cols));
+      // Little's MCAR needs at least one incomplete case to be meaningful.
+      const anyMissing = matrix.some(r => r.some(v => isNaN(v)));
+      setMcarResult(anyMissing ? littleMCAR(matrix) : null);
+      setShowMissing(true);
+    } catch (err: any) {
+      setError(err.message || 'Could not analyse missing data');
+    } finally {
+      setMissingBusy(false);
+    }
+  };
+
+  const createCompletedDataset = async () => {
+    if (!viewingDataset) return;
+    setMissingBusy(true);
+    setError('');
+    try {
+      const cols = numericMissingCols(viewingDataset);
+      const matrix = buildMatrix(viewingDataset, cols);
+      let completed: any[];
+      let label: string;
+      if (imputeMethod === 'listwise') {
+        completed = viewingDataset.data.filter(row => cols.every(col => !MISS(row[col])));
+        label = 'listwise';
+        if (completed.length === 0) throw new Error('Listwise deletion would remove every row.');
+      } else {
+        const filled = imputeMethod === 'mean' ? imputeMean(matrix)
+          : imputeMethod === 'median' ? imputeMedian(matrix)
+          : imputeEM(matrix);
+        const round4 = (x: number) => Math.round(x * 1e4) / 1e4;
+        completed = viewingDataset.data.map((row, i) => {
+          const out: any = { ...row };
+          cols.forEach((col, j) => { if (MISS(row[col])) out[col] = round4(filled[i][j]); });
+          return out;
+        });
+        label = imputeMethod === 'mean' ? 'mean-imputed' : imputeMethod === 'median' ? 'median-imputed' : 'EM-imputed';
+      }
+      const name = `${viewingDataset.name} (${label})`;
+      await persistDataset(name, viewingDataset.columns, completed, `${name}.csv`, JSON.stringify(completed).length, `missing-${imputeMethod}`);
+      setSuccess(`Saved "${name}" — ${completed.length} rows. Find it in Your Datasets.`);
+      loadDatasets();
+    } catch (err: any) {
+      setError(err.message || 'Could not create the completed dataset');
+    } finally {
+      setMissingBusy(false);
+    }
+  };
+
   const handleExportCleanedData = () => {
     if (!cleanedData || !viewingDataset) return;
 
@@ -501,6 +575,14 @@ export function EnhancedDataImport() {
             <Filter className="w-5 h-5" />
             Remove Missing Values
           </button>
+          <button
+            onClick={() => (showMissing ? setShowMissing(false) : runMissingAnalysis())}
+            disabled={missingBusy}
+            className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white font-medium py-2 px-4 rounded-lg transition flex items-center gap-2"
+          >
+            <PieChart className="w-5 h-5" />
+            {missingBusy ? 'Analysing…' : showMissing ? 'Hide Missing Data' : 'Missing Data'}
+          </button>
           {cleanedData && (
             <>
               <button
@@ -520,6 +602,85 @@ export function EnhancedDataImport() {
             </>
           )}
         </div>
+
+        {showMissing && missingReport && (
+          <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-5">
+            <h3 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+              <PieChart className="w-5 h-5 text-purple-600" /> Missing Data
+            </h3>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="bg-purple-50 rounded-lg p-4">
+                <p className="text-sm text-gray-600 mb-1">Overall Missing</p>
+                <p className="text-2xl font-bold text-purple-700">{missingReport.overallMissingPct.toFixed(1)}%</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-sm text-gray-600 mb-1">Complete Cases</p>
+                <p className="text-2xl font-bold text-gray-900">{missingReport.nComplete}<span className="text-base text-gray-500"> / {missingReport.nCases}</span></p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-sm text-gray-600 mb-1">Cases w/ Missing</p>
+                <p className="text-2xl font-bold text-gray-900">{missingReport.casesWithMissing}</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-4">
+                <p className="text-sm text-gray-600 mb-1">Variables</p>
+                <p className="text-2xl font-bold text-gray-900">{missingReport.nVariables}</p>
+              </div>
+            </div>
+
+            {mcarResult && (
+              <div className={`p-4 rounded-lg border ${mcarResult.mcar ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}`}>
+                <p className="text-sm font-semibold text-gray-900 mb-1">
+                  Little&apos;s MCAR test: χ²({mcarResult.df}) = {mcarResult.chiSquare.toFixed(2)}, p {mcarResult.pValue < 0.001 ? '< .001' : `= ${mcarResult.pValue.toFixed(3)}`}
+                </p>
+                <p className="text-sm text-gray-700">{mcarResult.interpretation}</p>
+              </div>
+            )}
+
+            <div>
+              <h4 className="font-semibold text-gray-900 mb-2">Missing by Variable</h4>
+              <div className="space-y-1.5 max-h-56 overflow-y-auto">
+                {missingReport.perVariable.filter(v => v.missing > 0).sort((a, b) => b.pct - a.pct).map(v => (
+                  <div key={v.variable} className="flex items-center gap-3">
+                    <span className="text-sm text-gray-700 w-32 truncate">{v.variable}</span>
+                    <div className="flex-1 bg-gray-200 rounded-full h-3 overflow-hidden">
+                      <div className={`h-full ${v.pct > 20 ? 'bg-red-500' : v.pct > 10 ? 'bg-orange-500' : 'bg-yellow-500'}`} style={{ width: `${v.pct}%` }} />
+                    </div>
+                    <span className="text-sm text-gray-600 w-24 text-right">{v.missing} ({v.pct.toFixed(1)}%)</span>
+                  </div>
+                ))}
+                {missingReport.perVariable.every(v => v.missing === 0) && (
+                  <p className="text-sm text-green-600">No missing values in the numeric variables. 🎉</p>
+                )}
+              </div>
+            </div>
+
+            {missingReport.casesWithMissing > 0 && (
+              <div className="border-t border-gray-200 pt-4">
+                <h4 className="font-semibold text-gray-900 mb-2">Create a Completed Dataset</h4>
+                <div className="flex flex-wrap items-center gap-3">
+                  <select value={imputeMethod} onChange={e => setImputeMethod(e.target.value as any)}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    <option value="em">Stochastic EM imputation (recommended)</option>
+                    <option value="mean">Mean substitution</option>
+                    <option value="median">Median substitution</option>
+                    <option value="listwise">Listwise deletion</option>
+                  </select>
+                  <button onClick={createCompletedDataset} disabled={missingBusy}
+                    className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white font-medium py-2 px-4 rounded-lg transition flex items-center gap-2">
+                    <Save className="w-4 h-4" /> {missingBusy ? 'Working…' : 'Save Completed Dataset'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  {imputeMethod === 'em' && 'EM draws each missing value from its multivariate-normal conditional distribution (μ and Σ estimated by the EM algorithm), preserving variances and correlations — the closest to FIML for a saved dataset.'}
+                  {imputeMethod === 'mean' && 'Fills gaps with each variable’s mean. Quick, but shrinks variance and biases standard errors — use only for a rough look.'}
+                  {imputeMethod === 'median' && 'Fills gaps with each variable’s median. Robust to outliers but, like mean substitution, understates variability.'}
+                  {imputeMethod === 'listwise' && 'Drops every case with any missing value. Simple and unbiased under MCAR, but discards data and power.'}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         {showQualityReport && qualityReport && (
           <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-6">
