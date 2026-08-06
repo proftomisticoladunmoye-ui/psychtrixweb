@@ -10,8 +10,8 @@
  *
  * Bump CACHE_VERSION to force a full refresh of cached assets.
  */
-const CACHE_VERSION = 'psychtrix-v1';
-const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/favicon.svg', '/pwa-icon.svg'];
+const CACHE_VERSION = 'psychtrix-v2';
+const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/favicon-32.png', '/favicon-48.png', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png'];
 
 self.addEventListener('install', (event) => {
   // Note: no skipWaiting() here — a new version waits until the user accepts the
