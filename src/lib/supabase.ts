@@ -49,6 +49,14 @@ async function api(path: string, options: RequestInit = {}): Promise<{ status: n
   const res = await fetch(`/api${path}`, { ...options, headers });
   let body: any = null;
   try { body = await res.json(); } catch { /* empty body */ }
+  // A 401 on an authenticated request means the stored session token was
+  // rejected (expired or revoked). Sign out cleanly instead of leaving the
+  // cached user "logged in" while every request fails. Auth routes are exempt
+  // (a 401 there is just bad credentials, not an expired session).
+  if (res.status === 401 && token && !path.startsWith('/auth/') && storedToken()) {
+    storeSession(null, null);
+    emit('SIGNED_OUT');
+  }
   return { status: res.status, body };
 }
 
