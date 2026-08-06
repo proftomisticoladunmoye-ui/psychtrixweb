@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { AuthProvider } from './components/AuthProvider';
 import App from './App.tsx';
 import './index.css';
-import { registerServiceWorker } from './registerSW';
+import { registerServiceWorker, initOfflineIndicator } from './registerSW';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -14,3 +14,4 @@ createRoot(document.getElementById('root')!).render(
 );
 
 registerServiceWorker();
+initOfflineIndicator();

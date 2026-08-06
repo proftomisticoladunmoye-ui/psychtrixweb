@@ -3,6 +3,8 @@
 // auth (password sign-in/up, sessions) and the PostgREST-style query builder —
 // so the ~50 existing call sites keep working unchanged.
 
+import { cacheDatasets, readCachedDatasets } from './offlineCache';
+
 type Row = Record<string, unknown>;
 
 export interface AppUser {
@@ -46,7 +48,12 @@ async function api(path: string, options: RequestInit = {}): Promise<{ status: n
   const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(options.headers as any) };
   const token = storedToken();
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`/api${path}`, { ...options, headers });
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, { ...options, headers });
+  } catch {
+    return { status: 0, body: null }; // network failure (offline) — handled by callers
+  }
   let body: any = null;
   try { body = await res.json(); } catch { /* empty body */ }
   // A 401 on an authenticated request means the stored session token was
@@ -206,8 +213,21 @@ class QueryBuilder implements PromiseLike<Result> {
       ({ status, body } = await api(`/db/${this.table}${this.queryString()}`, { method: 'DELETE' }));
     }
 
+    // Offline dataset cache: keep the `datasets` table usable without a network.
+    if (this.action === 'select' && this.table === 'datasets') {
+      if (status === 0) {
+        const cached = await readCachedDatasets(this.filters, this.columns).catch(() => [] as any[]);
+        if (cached.length) { status = 200; body = { data: this.headOnly ? [] : cached, count: cached.length }; }
+      } else if (status >= 200 && status < 300 && Array.isArray(body?.data)) {
+        cacheDatasets(body.data).catch(() => {}); // fire-and-forget
+      }
+    }
+
     if (status < 200 || status >= 300) {
-      return { data: null, error: { message: body?.error ?? `Request failed (${status})` }, count: null };
+      const message = status === 0
+        ? 'You appear to be offline, and this data isn’t available offline yet.'
+        : (body?.error ?? `Request failed (${status})`);
+      return { data: null, error: { message }, count: null };
     }
 
     let data = body?.data ?? null;

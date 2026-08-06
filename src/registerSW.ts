@@ -30,6 +30,31 @@ export function registerServiceWorker(): void {
   });
 }
 
+// A subtle bar that appears while the browser reports no connection, so users
+// know analyses are running against cached data.
+export function initOfflineIndicator(): void {
+  if (typeof window === 'undefined') return;
+  const render = () => {
+    const offline = navigator.onLine === false;
+    let bar = document.getElementById('pwa-offline-bar');
+    if (offline && !bar) {
+      bar = document.createElement('div');
+      bar.id = 'pwa-offline-bar';
+      bar.setAttribute('role', 'status');
+      bar.textContent = 'Offline — working from cached data';
+      bar.style.cssText =
+        'position:fixed;left:0;right:0;top:0;z-index:99998;background:#b45309;color:#fff;' +
+        'text-align:center;padding:5px 8px;font:13px system-ui,Arial,sans-serif;letter-spacing:.2px;';
+      document.body.appendChild(bar);
+    } else if (!offline && bar) {
+      bar.remove();
+    }
+  };
+  window.addEventListener('online', render);
+  window.addEventListener('offline', render);
+  render();
+}
+
 function showUpdateBanner(onReload: () => void): void {
   if (document.getElementById('pwa-update-banner')) return;
   const bar = document.createElement('div');
