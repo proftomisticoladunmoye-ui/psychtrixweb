@@ -1,0 +1,16 @@
+{
+  "name": "Psychtrix Web — Psychometric Analysis",
+  "short_name": "Psychtrix",
+  "description": "Publication-grade psychometric analysis — CTT, IRT, factor analysis, SEM, path & network — that runs in your browser, even offline.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#ffffff",
+  "theme_color": "#0EA5E9",
+  "categories": ["education", "productivity", "utilities"],
+  "icons": [
+    { "src": "/pwa-icon.svg", "sizes": "192x192 512x512 any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/pwa-icon.svg", "sizes": "512x512 any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
