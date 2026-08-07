@@ -18,7 +18,7 @@ import {
   Table2,
   PieChart,
 } from 'lucide-react';
-import { DataGridEditor } from './DataGridEditor';
+import { DataGridEditor, VariableDef } from './DataGridEditor';
 import { analyzeMissingness, littleMCAR, imputeMean, imputeMedian, imputeEM, MissingnessReport, MCARResult } from '../lib/missingData';
 
 interface Dataset {
@@ -114,6 +114,7 @@ export function EnhancedDataImport() {
   // Shared persistence: turns columns + row objects into a saved dataset.
   const persistDataset = async (
     name: string, columns: string[], data: any[], fileName: string, fileSize: number, source: string,
+    variables?: VariableDef[],
   ) => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) throw new Error('Not authenticated');
@@ -129,6 +130,9 @@ export function EnhancedDataImport() {
         uploadedAt: new Date().toISOString(),
         source,
         columnTypes: columns.map((col) => ({ name: col, type: detectColumnType(data, col) })),
+        // SPSS-style variable definitions (measurement level, value labels/coding,
+        // variable labels, missing codes) when entered via the manual editor.
+        ...(variables && variables.length ? { variables } : {}),
       },
     });
     if (insertError) throw insertError;
@@ -192,13 +196,13 @@ export function EnhancedDataImport() {
   };
 
   // Save a dataset entered by hand / pasted into the grid editor.
-  const saveManualDataset = async (name: string, columns: string[], rows: string[][]) => {
+  const saveManualDataset = async (name: string, columns: string[], rows: string[][], variables?: VariableDef[]) => {
     const data = rows.map((r) => {
       const obj: any = {};
       columns.forEach((c, i) => { obj[c] = r[i] ?? ''; });
       return obj;
     });
-    await persistDataset(name, columns, data, `${name}.csv`, JSON.stringify(data).length, 'manual-entry');
+    await persistDataset(name, columns, data, `${name}.csv`, JSON.stringify(data).length, 'manual-entry', variables);
     setSuccess(`Dataset "${name}" saved (${data.length} rows, ${columns.length} variables)`);
     setDataView('list');
     loadDatasets();
