@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { Scale, AlertCircle } from 'lucide-react';
+import { Scale, AlertCircle, WifiOff } from 'lucide-react';
 
 interface LoginFormProps {
   onSuccess: () => void;
@@ -12,10 +12,24 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [offline, setOffline] = useState(typeof navigator !== 'undefined' && navigator.onLine === false);
+
+  useEffect(() => {
+    const update = () => setOffline(navigator.onLine === false);
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => { window.removeEventListener('online', update); window.removeEventListener('offline', update); };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    // Signing in for the first time needs the network; a returning user is
+    // resumed from their cached session and never sees this screen.
+    if (navigator.onLine === false) {
+      setError('You’re offline. A connection is needed to sign in the first time. Once signed in, Psychtrix keeps working offline.');
+      return;
+    }
     setLoading(true);
 
     try {
@@ -52,6 +66,12 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
+          {offline && (
+            <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3">
+              <WifiOff className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+              <p className="text-sm text-amber-800">You’re offline. A connection is needed to sign in the first time — after that, Psychtrix works offline.</p>
+            </div>
+          )}
           {error && (
             <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
               <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />

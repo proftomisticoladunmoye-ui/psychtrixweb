@@ -30,29 +30,64 @@ export function registerServiceWorker(): void {
   });
 }
 
-// A subtle bar that appears while the browser reports no connection, so users
-// know analyses are running against cached data.
-export function initOfflineIndicator(): void {
+// A subtle top bar that reflects connectivity + background-sync state:
+//   • offline  — working from cached data (and how many edits are queued)
+//   • syncing  — replaying queued offline edits after reconnect
+//   • synced   — brief confirmation, then it disappears
+// On reconnect it flushes the write outbox so offline changes reach the server.
+export function initBackgroundSync(
+  flush: () => Promise<{ synced: number; dropped: number; remaining: number }>,
+  pendingCount: () => Promise<number>,
+): void {
   if (typeof window === 'undefined') return;
-  const render = () => {
-    const offline = navigator.onLine === false;
-    let bar = document.getElementById('pwa-offline-bar');
-    if (offline && !bar) {
+  let syncing = false;
+  const plural = (n: number) => `${n} change${n === 1 ? '' : 's'}`;
+  const isOffline = () => navigator.onLine === false; // read fresh (avoids stale narrowing)
+
+  const setBar = (kind: 'offline' | 'syncing' | 'synced' | null, text?: string) => {
+    let bar = document.getElementById('pwa-status-bar');
+    if (!kind) { bar?.remove(); return; }
+    if (!bar) {
       bar = document.createElement('div');
-      bar.id = 'pwa-offline-bar';
+      bar.id = 'pwa-status-bar';
       bar.setAttribute('role', 'status');
-      bar.textContent = 'Offline — working from cached data';
-      bar.style.cssText =
-        'position:fixed;left:0;right:0;top:0;z-index:99998;background:#b45309;color:#fff;' +
-        'text-align:center;padding:5px 8px;font:13px system-ui,Arial,sans-serif;letter-spacing:.2px;';
       document.body.appendChild(bar);
-    } else if (!offline && bar) {
-      bar.remove();
+    }
+    const bg = kind === 'offline' ? '#b45309' : kind === 'syncing' ? '#1d4ed8' : '#15803d';
+    bar.style.cssText =
+      `position:fixed;left:0;right:0;top:0;z-index:99998;background:${bg};color:#fff;` +
+      'text-align:center;padding:5px 8px;font:13px system-ui,Arial,sans-serif;letter-spacing:.2px;';
+    bar.textContent = text ?? '';
+  };
+
+  const showOffline = async () => {
+    const n = await pendingCount().catch(() => 0);
+    setBar('offline', 'Offline — working from cached data' + (n > 0 ? ` · ${plural(n)} will sync when you reconnect` : ''));
+  };
+
+  const doSync = async () => {
+    if (syncing) return;
+    if (isOffline()) { showOffline(); return; }
+    const n = await pendingCount().catch(() => 0);
+    if (n === 0) { setBar(null); return; }
+    syncing = true;
+    setBar('syncing', `Syncing ${plural(n)}…`);
+    let res = { synced: 0, dropped: 0, remaining: n };
+    try { res = await flush(); } catch { /* keep queued */ }
+    syncing = false;
+    if (isOffline()) { showOffline(); return; }
+    if (res.remaining === 0) {
+      setBar('synced', 'All changes synced ✓');
+      setTimeout(() => { if (!syncing && !isOffline()) setBar(null); }, 2500);
+    } else {
+      setBar('syncing', `${plural(res.remaining)} pending…`);
+      setTimeout(doSync, 15000); // transient server issue — retry shortly
     }
   };
-  window.addEventListener('online', render);
-  window.addEventListener('offline', render);
-  render();
+
+  window.addEventListener('offline', () => showOffline());
+  window.addEventListener('online', () => doSync());
+  if (isOffline()) showOffline(); else doSync();
 }
 
 function showUpdateBanner(onReload: () => void): void {

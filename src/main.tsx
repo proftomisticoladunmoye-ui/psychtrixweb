@@ -3,7 +3,8 @@ import { createRoot } from 'react-dom/client';
 import { AuthProvider } from './components/AuthProvider';
 import App from './App.tsx';
 import './index.css';
-import { registerServiceWorker, initOfflineIndicator } from './registerSW';
+import { registerServiceWorker, initBackgroundSync } from './registerSW';
+import { flushOutbox, pendingWriteCount } from './lib/supabase';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -14,4 +15,4 @@ createRoot(document.getElementById('root')!).render(
 );
 
 registerServiceWorker();
-initOfflineIndicator();
+initBackgroundSync(flushOutbox, pendingWriteCount);

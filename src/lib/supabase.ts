@@ -4,6 +4,7 @@
 // so the ~50 existing call sites keep working unchanged.
 
 import { cacheDatasets, readCachedDatasets } from './offlineCache';
+import { enqueueOp, allOps, removeOp, countOps, shouldQueue, replayOutcome } from './outbox';
 
 type Row = Record<string, unknown>;
 
@@ -202,15 +203,19 @@ class QueryBuilder implements PromiseLike<Result> {
   }
 
   private async execute(): Promise<Result> {
-    let status: number; let body: any;
-    if (this.action === 'select') {
-      ({ status, body } = await api(`/db/${this.table}${this.queryString()}`));
-    } else if (this.action === 'insert') {
-      ({ status, body } = await api(`/db/${this.table}${this.queryString()}`, { method: 'POST', body: JSON.stringify(this.payload) }));
-    } else if (this.action === 'update') {
-      ({ status, body } = await api(`/db/${this.table}${this.queryString()}`, { method: 'PATCH', body: JSON.stringify(this.payload) }));
-    } else {
-      ({ status, body } = await api(`/db/${this.table}${this.queryString()}`, { method: 'DELETE' }));
+    const path = `/db/${this.table}${this.queryString()}`;
+    const method = this.action === 'insert' ? 'POST' : this.action === 'update' ? 'PATCH' : this.action === 'delete' ? 'DELETE' : 'GET';
+    const hasBody = this.action === 'insert' || this.action === 'update';
+    let { status, body } = await api(path, this.action === 'select'
+      ? {}
+      : { method, body: hasBody ? JSON.stringify(this.payload) : undefined });
+
+    // Offline write outbox: a mutation that failed because we're offline
+    // (fetch threw → status 0) is queued and replayed on reconnect. We report
+    // optimistic success so the UI isn't blocked; the change syncs later.
+    if (this.action !== 'select' && status === 0 && shouldQueue(method, path)) {
+      await enqueueOp({ method: method as 'POST' | 'PATCH' | 'DELETE', path, body: hasBody ? this.payload : null, table: this.table, action: this.action });
+      return { data: null, error: null, count: null };
     }
 
     // Offline dataset cache: keep the `datasets` table usable without a network.
@@ -260,3 +265,30 @@ export const supabase = {
       : { data: null, error: { message: body?.error ?? 'RPC failed' } };
   },
 };
+
+// ---- background sync --------------------------------------------------------
+// Replay queued offline writes, in order, against the API. Called on reconnect.
+// Stops on the first network failure (still offline) or 5xx so it can retry
+// later; drops client-rejected (4xx) ops so the queue can't wedge forever.
+export async function flushOutbox(): Promise<{ synced: number; dropped: number; remaining: number }> {
+  const ops = await allOps();
+  let synced = 0, dropped = 0;
+  for (const op of ops) {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const token = storedToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    let res: Response;
+    try {
+      res = await fetch(`/api${op.path}`, { method: op.method, headers, body: op.body != null ? JSON.stringify(op.body) : undefined });
+    } catch {
+      break; // still offline — stop and retry on the next reconnect
+    }
+    const outcome = replayOutcome(res.status);
+    if (outcome === 'retry') break;
+    if (op.id != null) await removeOp(op.id);
+    if (outcome === 'done') synced++; else dropped++;
+  }
+  return { synced, dropped, remaining: await countOps() };
+}
+
+export { countOps as pendingWriteCount } from './outbox';
