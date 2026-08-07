@@ -17,8 +17,11 @@ import {
   FileSpreadsheet,
   Table2,
   PieChart,
+  Calculator,
 } from 'lucide-react';
 import { DataGridEditor, VariableDef } from './DataGridEditor';
+import { ComputeVariableModal } from './ComputeVariableModal';
+import { Cell } from '../lib/computeVariable';
 import { analyzeMissingness, littleMCAR, imputeMean, imputeMedian, imputeEM, MissingnessReport, MCARResult } from '../lib/missingData';
 
 interface Dataset {
@@ -71,6 +74,8 @@ export function EnhancedDataImport() {
   const [maxValue, setMaxValue] = useState<number>(5);
   const [cleanedData, setCleanedData] = useState<any[] | null>(null);
   const [dataView, setDataView] = useState<'list' | 'spreadsheet' | 'quality' | 'editor'>('list');
+  const [showCompute, setShowCompute] = useState(false);
+  const [computing, setComputing] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounter = useRef(0);
@@ -485,6 +490,33 @@ export function EnhancedDataImport() {
     }
   };
 
+  // Compute Variable: append a derived column and save the result as a new
+  // dataset, so it can flow into any downstream analysis (path analysis, SEM…).
+  const handleComputeApply = async (varName: string, values: Cell[], methodLabel: string) => {
+    if (!viewingDataset) return;
+    try {
+      setComputing(true);
+      const base = cleanedData || viewingDataset.data;
+      const newData = base.map((row: any, i: number) => ({ ...row, [varName]: values[i] ?? '' }));
+      const newColumns = [...viewingDataset.columns, varName];
+      const newVar: VariableDef = { name: varName, label: `Computed (${methodLabel})`, type: 'numeric', measure: 'scale', values: [], missing: [] };
+      await persistDataset(
+        `${viewingDataset.name} + ${varName}`, newColumns, newData,
+        `${viewingDataset.name}_computed.csv`, JSON.stringify(newData).length, 'compute-variable', [newVar],
+      );
+      setShowCompute(false);
+      setSuccess(`Computed “${varName}” and saved as a new dataset — it's now available in every analysis module.`);
+      setViewingDataset(null);
+      setCleanedData(null);
+      setDataView('list');
+      loadDatasets();
+    } catch (err: any) {
+      setError(err?.message || 'Could not compute the variable.');
+    } finally {
+      setComputing(false);
+    }
+  };
+
   const handleDelete = async (id: string) => {
     if (!confirm('Are you sure you want to delete this dataset?')) return;
 
@@ -587,6 +619,13 @@ export function EnhancedDataImport() {
             <PieChart className="w-5 h-5" />
             {missingBusy ? 'Analysing…' : showMissing ? 'Hide Missing Data' : 'Missing Data'}
           </button>
+          <button
+            onClick={() => setShowCompute(true)}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-4 rounded-lg transition flex items-center gap-2"
+          >
+            <Calculator className="w-5 h-5" />
+            Compute Variable
+          </button>
           {cleanedData && (
             <>
               <button
@@ -606,6 +645,16 @@ export function EnhancedDataImport() {
             </>
           )}
         </div>
+
+        {showCompute && (
+          <ComputeVariableModal
+            columns={viewingDataset.columns}
+            data={cleanedData || viewingDataset.data}
+            saving={computing}
+            onClose={() => setShowCompute(false)}
+            onApply={handleComputeApply}
+          />
+        )}
 
         {showMissing && missingReport && (
           <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-5">

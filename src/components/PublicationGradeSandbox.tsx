@@ -3,10 +3,11 @@ import { supabase } from '../lib/supabase';
 import {
   FlaskConical, Plus, Edit, Trash2, AlertCircle, CheckCircle, Play, Download,
   BarChart3, Share2, Link as LinkIcon, Copy, Users, TrendingUp, Target,
-  MessageCircle, Mail, Info, Eye, Save, Sparkles, ArrowLeft, ExternalLink
+  MessageCircle, Mail, Info, Eye, Save, Sparkles, ArrowLeft, ExternalLink, Database
 } from 'lucide-react';
 import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON } from '../lib/exportUtils';
+import { buildSandboxDataset } from '../lib/sandboxDataset';
 import {
   calculateCronbachAlpha,
   calculateCorrectedItemTotalCorrelation,
@@ -94,6 +95,7 @@ export function EnhancedPsychometricsSandbox() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [copiedLink, setCopiedLink] = useState(false);
+  const [datasetBusy, setDatasetBusy] = useState(false);
 
   const [newProject, setNewProject] = useState({
     name: '',
@@ -446,6 +448,72 @@ export function EnhancedPsychometricsSandbox() {
     window.open(getTwitterShareUrl(text, link), '_blank');
   };
 
+  // Pull every completed respondent's raw answer array for the current project.
+  const fetchRawResponses = async (): Promise<number[][]> => {
+    if (!currentProject) return [];
+    const { data, error } = await supabase
+      .from('scale_responses')
+      .select('responses')
+      .eq('project_id', currentProject.id)
+      .eq('completed', true);
+    if (error) throw error;
+    return (data || []).map((r: any) => (r.responses as number[]) ?? []);
+  };
+
+  // Save the collected responses as a reusable dataset (reverse-scoring applied,
+  // item + subscale/total score columns) so it flows into any analysis module.
+  const saveCollectedAsDataset = async () => {
+    if (!currentProject) return;
+    try {
+      setDatasetBusy(true);
+      setError('');
+      const rows = await fetchRawResponses();
+      if (rows.length === 0) { setError('No collected responses to save yet.'); return; }
+      const built = buildSandboxDataset(currentProject, rows);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not authenticated');
+      const { error: insertError } = await supabase.from('datasets').insert({
+        user_id: user.id,
+        name: `${currentProject.name} (Collected Data)`,
+        file_name: `${currentProject.name}_collected.csv`,
+        file_size: JSON.stringify(built.data).length,
+        columns: built.columns,
+        data: built.data,
+        rows_count: built.data.length,
+        metadata: {
+          source: 'sandbox',
+          sandboxProjectId: currentProject.id,
+          reverseScored: true,
+          variables: built.variables,
+          uploadedAt: new Date().toISOString(),
+        },
+      });
+      if (insertError) throw insertError;
+      setSuccess(`Saved “${currentProject.name} (Collected Data)” — ${built.data.length} cases × ${built.columns.length} variables. It's now in Data Import, ready for path analysis, SEM and more.`);
+    } catch (e: any) {
+      setError(e?.message || 'Could not save the dataset.');
+    } finally {
+      setDatasetBusy(false);
+    }
+  };
+
+  // Download the raw case × item matrix (with scores) as CSV.
+  const downloadRawData = async () => {
+    if (!currentProject) return;
+    try {
+      setDatasetBusy(true);
+      setError('');
+      const rows = await fetchRawResponses();
+      if (rows.length === 0) { setError('No collected responses to download yet.'); return; }
+      const built = buildSandboxDataset(currentProject, rows);
+      exportToCSV(built.data, `${currentProject.name}_RawData`);
+    } catch (e: any) {
+      setError(e?.message || 'Could not export the data.');
+    } finally {
+      setDatasetBusy(false);
+    }
+  };
+
   const handleExport = (format: 'pdf' | 'csv' | 'json') => {
     if (!currentProject || !validationResults) return;
 
@@ -643,6 +711,19 @@ export function EnhancedPsychometricsSandbox() {
           </button>
         </div>
 
+        {error && (
+          <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
+            <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+            <p className="text-sm text-red-800">{error}</p>
+          </div>
+        )}
+        {success && (
+          <div className="p-3 bg-green-50 border border-green-200 rounded-lg flex items-start gap-2">
+            <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+            <p className="text-sm text-green-800">{success}</p>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-6 border border-blue-200">
             <CheckCircle className="w-8 h-8 text-blue-600 mb-2" />
@@ -804,6 +885,36 @@ export function EnhancedPsychometricsSandbox() {
             <Download className="w-4 h-4" />
             Export JSON
           </button>
+        </div>
+
+        {/* Move the collected data into the analysis pipeline. */}
+        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
+          <div className="flex items-start gap-2 mb-3">
+            <Info className="w-5 h-5 text-indigo-600 flex-shrink-0 mt-0.5" />
+            <p className="text-sm text-indigo-900">
+              <strong>Use this data elsewhere.</strong> Reverse-scored items are recoded and subscale/total
+              scores are added, so you can run path analysis, SEM, factor analysis and more — or compute new
+              variables — on the responses you just collected.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={saveCollectedAsDataset}
+              disabled={datasetBusy}
+              className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg transition font-medium"
+            >
+              <Database className="w-4 h-4" />
+              {datasetBusy ? 'Working…' : 'Save as Dataset'}
+            </button>
+            <button
+              onClick={downloadRawData}
+              disabled={datasetBusy}
+              className="flex items-center gap-2 px-4 py-2 bg-white border border-indigo-300 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 rounded-lg transition font-medium"
+            >
+              <Download className="w-4 h-4" />
+              Download Raw Data (CSV)
+            </button>
+          </div>
         </div>
       </div>
     );
