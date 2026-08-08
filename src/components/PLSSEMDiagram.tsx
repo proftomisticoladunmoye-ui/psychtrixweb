@@ -404,7 +404,12 @@ export const PLSSEMDiagram: React.FC<PLSSEMDiagramProps> = ({
     if (!el) return;
     const ro = new ResizeObserver(entries => {
       const w = entries[0]?.contentRect.width;
-      if (w) setContainerW(w);
+      // Guard against a layout feedback loop (container width driven by the
+      // canvas it contains): never let the drawing width exceed the viewport,
+      // and ignore sub-pixel jitter so we don't re-render on every frame.
+      if (!w) return;
+      const capped = Math.min(w, typeof window !== 'undefined' ? window.innerWidth : w);
+      setContainerW(prev => (Math.abs(prev - capped) > 1 ? capped : prev));
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -570,7 +575,7 @@ export const PLSSEMDiagram: React.FC<PLSSEMDiagramProps> = ({
   };
 
   return (
-    <div className="space-y-3" ref={containerRef}>
+    <div className="space-y-3 w-full min-w-0" ref={containerRef}>
       {/* Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-2 bg-white px-3 py-2 rounded-lg border border-gray-200">
         <div className="flex items-center gap-1">
@@ -671,7 +676,7 @@ export const PLSSEMDiagram: React.FC<PLSSEMDiagramProps> = ({
       )}
 
       {/* Canvas — fills container, scrollable only when zoomed */}
-      <div className="bg-white rounded-lg border border-gray-200 overflow-auto">
+      <div className="bg-white rounded-lg border border-gray-200 overflow-auto min-w-0 w-full">
         <canvas
           ref={canvasRef}
           style={{

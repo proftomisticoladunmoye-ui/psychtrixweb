@@ -1637,8 +1637,8 @@ export function PLSSEM() {
           </div>
         </div>
 
-        <div className="grid gap-6">
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <div className="grid grid-cols-1 gap-6 min-w-0">
+          <div className="bg-white rounded-lg border border-gray-200 p-6 min-w-0">
             <div className="flex items-center gap-2 mb-4">
               <Target className="w-5 h-5 text-blue-600" />
               <h3 className="text-lg font-semibold text-gray-900">Measurement Model</h3>
@@ -1654,7 +1654,7 @@ export function PLSSEM() {
             />
           </div>
 
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <div className="bg-white rounded-lg border border-gray-200 p-6 min-w-0">
             <div className="flex items-center gap-2 mb-4">
               <GitBranch className="w-5 h-5 text-blue-600" />
               <h3 className="text-lg font-semibold text-gray-900">Structural Model</h3>
@@ -1670,7 +1670,7 @@ export function PLSSEM() {
             />
           </div>
 
-          <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <div className="bg-white rounded-lg border border-gray-200 p-6 min-w-0">
             <div className="flex items-center gap-2 mb-4">
               <Network className="w-5 h-5 text-blue-600" />
               <h3 className="text-lg font-semibold text-gray-900">Full Model</h3>
