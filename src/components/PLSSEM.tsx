@@ -10,7 +10,8 @@ import {
   runPLSAlgorithm, calculateOuterLoadings, bootstrap, calculatePathCoefficients,
   calculateConfidenceInterval, calculateCronbachAlpha, calculateCronbachAlphaFromData,
   calculateCompositeReliability, calculateRhoA, calculateAVE,
-  calculateVIF, calculateRSquared, blindfolding, plsPredict,
+  calculateVIF, calculateInnerVIF, calculateRSquared, blindfolding, plsPredict,
+  computeMediation,
   imputeMissingData, detectVariableTypes, calculateDescriptiveStats,
   calculateCorrelationMatrix, calculateHTMT, calculateFornellLarcker, calculateFSquared,
   calculateSRMR, calculateGlobalFit, tTestPValue, calculateStandardError
@@ -397,6 +398,17 @@ export function PLSSEM() {
         globalFit: calculateGlobalFit(numericData, model, plsResults.latentScores, currentDataset!.columns)
       };
 
+      // Structural (inner) VIF — collinearity among predictor constructs, keyed
+      // by "Endogenous ← Predictor" for display.
+      const innerVIF = calculateInnerVIF(plsResults.latentScores, model);
+      Object.entries(innerVIF).forEach(([endoId, preds]) => {
+        const endoName = model.constructs.find(c => c.id === endoId)?.name ?? endoId;
+        Object.entries(preds).forEach(([predId, vif]) => {
+          const predName = model.constructs.find(c => c.id === predId)?.name ?? predId;
+          structuralModel.vif[`${predName} → ${endoName}`] = vif;
+        });
+      });
+
       const fSquaredResults = calculateFSquared(plsResults.latentScores, model);
 
       model.constructs.forEach(construct => {
@@ -453,6 +465,13 @@ export function PLSSEM() {
           advanced.plsPredict.qSquaredPredict[constructName] = predictResults.qSquaredPredict[key];
         }
       });
+
+      // Mediation / indirect effects (bootstrap product-of-coefficients).
+      const originalPathMap: { [key: string]: number } = {};
+      originalPaths.forEach(p => { originalPathMap[`${p.from}->${p.to}`] = p.coefficient ?? 0; });
+      advanced.mediation = computeMediation(
+        model, originalPathMap, bootstrapResults.pathCoefficients, settings.confidenceLevel,
+      );
 
       setMeasurementResults(measurementModel);
       setStructuralResults(structuralModel);
@@ -1366,6 +1385,39 @@ export function PLSSEM() {
           </p>
         </div>
 
+        {structuralResults.vif && Object.keys(structuralResults.vif).length > 0 && (
+          <div className="bg-white rounded-xl border border-gray-200 p-6">
+            <h3 className="text-xl font-bold text-gray-900 mb-4">Structural Collinearity (Inner VIF)</h3>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b">
+                  <th className="text-left py-2">Predictor → Endogenous</th>
+                  <th className="text-right py-2">VIF</th>
+                  <th className="text-center py-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(structuralResults.vif).map(([pair, vif]: [string, any]) => (
+                  <tr key={pair} className="border-b hover:bg-gray-50">
+                    <td className="py-2 font-medium">{pair}</td>
+                    <td className={`text-right font-bold ${vif >= 5 ? 'text-red-600' : vif >= 3 ? 'text-yellow-600' : 'text-green-600'}`}>
+                      {vif.toFixed(3)}
+                    </td>
+                    <td className="text-center">
+                      <span className={`px-2 py-1 rounded text-xs font-medium ${vif >= 5 ? 'bg-red-100 text-red-700' : vif >= 3 ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>
+                        {vif >= 5 ? 'Critical' : vif >= 3 ? 'Caution' : 'OK'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-sm text-gray-600 mt-4">
+              <strong>Guidelines:</strong> VIF &lt; 3 ideal, &lt; 5 acceptable. ≥ 5 signals collinearity among predictors — consider removing or merging a construct.
+            </p>
+          </div>
+        )}
+
         <div className="bg-white rounded-xl border border-gray-200 p-6">
           <h3 className="text-xl font-bold text-gray-900 mb-4">Global Fit Indices</h3>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -1437,6 +1489,79 @@ export function PLSSEM() {
             <strong> Q²_predict &gt; 0</strong> indicates predictive relevance.
           </p>
         </div>
+
+        {advancedResults.mediation && advancedResults.mediation.specific.length > 0 && (
+          <div className="bg-white rounded-xl border border-gray-200 p-6">
+            <h3 className="text-xl font-bold text-gray-900 mb-1">Mediation — Indirect Effects</h3>
+            <p className="text-sm text-gray-600 mb-4">Bootstrap product-of-coefficients with {(settings.confidenceLevel * 100).toFixed(0)}% percentile CIs. An indirect effect is significant when its CI excludes 0.</p>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left py-2">Indirect path</th>
+                    <th className="text-right py-2">Effect</th>
+                    <th className="text-right py-2">t</th>
+                    <th className="text-right py-2">p</th>
+                    <th className="text-right py-2">CI (lower, upper)</th>
+                    <th className="text-center py-2">Sig.</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {advancedResults.mediation.specific.map((m: any, i: number) => {
+                    const sig = m.ci && (m.ci[0] > 0 || m.ci[1] < 0);
+                    return (
+                      <tr key={i} className="border-b hover:bg-gray-50">
+                        <td className="py-2 font-medium">{m.via}</td>
+                        <td className="text-right font-semibold">{m.estimate.toFixed(3)}</td>
+                        <td className="text-right">{m.tValue.toFixed(2)}</td>
+                        <td className="text-right">{m.pValue.toFixed(3)}</td>
+                        <td className="text-right text-gray-600">[{m.ci[0].toFixed(3)}, {m.ci[1].toFixed(3)}]</td>
+                        <td className="text-center">
+                          <span className={`px-2 py-0.5 rounded text-xs font-medium ${sig ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>{sig ? 'Yes' : 'No'}</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {advancedResults.mediation.totalEffects.length > 0 && (
+              <>
+                <h4 className="font-semibold text-gray-800 mt-6 mb-2">Total effects (direct + indirect)</h4>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left py-2">From → To</th>
+                        <th className="text-right py-2">Direct</th>
+                        <th className="text-right py-2">Indirect</th>
+                        <th className="text-right py-2">Total</th>
+                        <th className="text-center py-2">Mediation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {advancedResults.mediation.totalEffects.map((t: any, i: number) => {
+                        const fromN = model.constructs.find(c => c.id === t.from)?.name ?? t.from;
+                        const toN = model.constructs.find(c => c.id === t.to)?.name ?? t.to;
+                        const type = Math.abs(t.direct) < 0.05 ? 'Full (indirect-only)' : Math.abs(t.indirect) > 0.02 ? 'Partial' : 'Direct-dominant';
+                        return (
+                          <tr key={i} className="border-b hover:bg-gray-50">
+                            <td className="py-2 font-medium">{fromN} → {toN}</td>
+                            <td className="text-right">{t.direct.toFixed(3)}</td>
+                            <td className="text-right">{t.indirect.toFixed(3)}</td>
+                            <td className="text-right font-semibold">{t.total.toFixed(3)}</td>
+                            <td className="text-center text-xs text-gray-600">{type}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl p-6 border border-blue-200">
           <h3 className="font-bold text-gray-900 mb-2 flex items-center gap-2">

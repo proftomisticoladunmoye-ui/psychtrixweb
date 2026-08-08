@@ -556,8 +556,13 @@ export function calculateAVE(loadings: number[]): number {
   return (sumSq + sumErr) > 0 ? sumSq / (sumSq + sumErr) : 0;
 }
 
-export function calculateVIF(data: number[][]): number[] {
-  if (!data || data.length === 0 || !data[0]) return [];
+export function calculateVIF(rawData: number[][]): number[] {
+  if (!rawData || rawData.length === 0 || !rawData[0]) return [];
+  // VIF is computed from a no-intercept OLS (multipleRegression adds no
+  // constant), which is only valid on centered data. Standardize the columns
+  // first so mean-centering is guaranteed regardless of the caller — otherwise
+  // raw (non-zero-mean) indicators give distorted R² and biased VIFs.
+  const data = standardize(rawData);
   const n = data.length;
   const m = data[0].length;
   const vifs: number[] = [];
@@ -588,6 +593,34 @@ export function calculateVIF(data: number[][]): number[] {
   }
 
   return vifs;
+}
+
+/**
+ * Structural (inner) VIF — collinearity among the predictor constructs of each
+ * endogenous construct (Hair et al.: values < 5, ideally < 3). Computed on the
+ * standardized latent scores, per endogenous construct's regression.
+ * Returns { endogenousId: { predictorId: vif } }.
+ */
+export function calculateInnerVIF(
+  latentScores: { [construct: string]: number[] },
+  model: PLSSEMModel,
+): { [endoId: string]: { [predId: string]: number } } {
+  const out: { [endoId: string]: { [predId: string]: number } } = {};
+  const endoIds = [...new Set(model.paths.map(p => p.to))];
+
+  endoIds.forEach(endoId => {
+    const preds = model.paths.filter(p => p.to === endoId).map(p => p.from);
+    out[endoId] = {};
+    if (preds.length < 2) { preds.forEach(p => { out[endoId][p] = 1; }); return; }
+    const n = latentScores[preds[0]]?.length || 0;
+    if (n === 0) { preds.forEach(p => { out[endoId][p] = 1; }); return; }
+    const X: number[][] = new Array(n);
+    for (let i = 0; i < n; i++) X[i] = preds.map(p => latentScores[p]?.[i] ?? 0);
+    const vifs = calculateVIF(X); // standardized internally
+    preds.forEach((p, k) => { out[endoId][p] = vifs[k] ?? 1; });
+  });
+
+  return out;
 }
 
 function calculateRSquaredForRegression(y: number[], X: number[][]): number {
@@ -731,6 +764,15 @@ export async function bootstrap(
       .filter(idx => idx !== -1);
   });
 
+  // Reference (full-sample) outer weights, used for construct-level sign
+  // correction: a PLS solution is only identified up to the sign of each
+  // construct, so a resample can come back mirror-flipped. Without correction
+  // the bootstrap distribution of a coefficient becomes bimodal (±), inflating
+  // its SE and deflating the t-value. We flip a resampled construct whenever its
+  // weight vector points opposite the reference (Tenenhaus et al. 2005).
+  const reference = runPLSAlgorithm(data, model, settings, columns);
+  const refWeights = reference.outerWeights;
+
   for (let i = 0; i < numSamples; i++) {
     const sampleIndices = Array.from(
       { length: data.length },
@@ -742,6 +784,19 @@ export async function bootstrap(
       const plsResults = runPLSAlgorithm(sample, model, settings, columns);
 
       if (!plsResults.converged) continue;
+
+      // Construct-level sign correction against the reference orientation.
+      model.constructs.forEach(c => {
+        const wref = refWeights[c.id] || [];
+        const ws = plsResults.outerWeights[c.id] || [];
+        let dot = 0;
+        for (let k = 0; k < Math.min(wref.length, ws.length); k++) dot += wref[k] * ws[k];
+        if (dot < 0) {
+          plsResults.outerWeights[c.id] = ws.map(w => -w);
+          const ls = plsResults.latentScores[c.id];
+          if (ls) plsResults.latentScores[c.id] = ls.map(s => -s);
+        }
+      });
 
       // Joint OLS per endogenous construct (matches calculatePathCoefficients)
       const endogenousIds = [...new Set(model.paths.map(p => p.to))];
@@ -1001,6 +1056,130 @@ export function calculateFSquared(
   });
 
   return fSquared;
+}
+
+// ---- mediation / indirect effects ------------------------------------------
+
+export interface SpecificIndirect {
+  from: string;
+  to: string;
+  via: string;           // "X → M → Y" (names)
+  estimate: number;
+  se: number;
+  tValue: number;
+  pValue: number;
+  ci: [number, number];
+}
+export interface TotalEffectRow {
+  from: string;
+  to: string;
+  direct: number;
+  indirect: number;
+  total: number;
+}
+export interface MediationResults {
+  specific: SpecificIndirect[];
+  totalIndirect: SpecificIndirect[];   // one per (from,to) with ≥1 indirect route
+  totalEffects: TotalEffectRow[];
+}
+
+/** All simple directed paths with ≥ 2 edges (indirect routes) as id sequences. */
+export function enumerateIndirectPaths(model: PLSSEMModel): string[][] {
+  const adj: { [id: string]: string[] } = {};
+  model.constructs.forEach(c => { adj[c.id] = []; });
+  model.paths.forEach(p => { (adj[p.from] ||= []).push(p.to); });
+
+  const routes: string[][] = [];
+  const dfs = (path: string[], visited: Set<string>) => {
+    const last = path[path.length - 1];
+    for (const nxt of adj[last] || []) {
+      if (visited.has(nxt)) continue;                 // no cycles
+      const ext = [...path, nxt];
+      if (ext.length >= 3) routes.push(ext);           // ≥2 edges = indirect
+      if (ext.length < 8) {                            // sane depth cap
+        visited.add(nxt); dfs(ext, visited); visited.delete(nxt);
+      }
+    }
+  };
+  model.constructs.forEach(c => dfs([c.id], new Set([c.id])));
+  return routes;
+}
+
+/**
+ * Mediation analysis. Point estimates are products of the original path
+ * coefficients along each route; inference uses the bootstrap distribution of
+ * those products (percentile CI + SE-based t/p), the standard PLS-SEM approach.
+ * `bootDist[key]` are per-resample coefficients, aligned by index across keys.
+ */
+export function computeMediation(
+  model: PLSSEMModel,
+  originalPaths: { [key: string]: number },
+  bootDist: { [key: string]: number[] },
+  confidenceLevel: number,
+): MediationResults {
+  const nameOf = (id: string) => model.constructs.find(c => c.id === id)?.name ?? id;
+  const routes = enumerateIndirectPaths(model);
+
+  const edgesOf = (seq: string[]) => seq.slice(0, -1).map((_, i) => `${seq[i]}->${seq[i + 1]}`);
+  const bootLen = Math.min(...Object.values(bootDist).map(a => a.length), Infinity);
+  const nBoot = Number.isFinite(bootLen) ? bootLen : 0;
+
+  const inference = (point: number, samples: number[]): Omit<SpecificIndirect, 'from' | 'to' | 'via'> => {
+    if (samples.length < 10) return { estimate: point, se: 0, tValue: 0, pValue: 1, ci: [point, point] };
+    const se = calculateStandardError(samples);
+    const t = se > 0 ? Math.abs(point / se) : 0;
+    const p = Math.max(0.0001, Math.min(1, tTestPValue(t, samples.length - 1)));
+    return { estimate: point, se, tValue: t, pValue: p, ci: calculateConfidenceInterval(samples, confidenceLevel) };
+  };
+
+  // Specific indirect effects (one per route)
+  const specific: SpecificIndirect[] = routes.map(seq => {
+    const edges = edgesOf(seq);
+    const point = edges.reduce((prod, e) => prod * (originalPaths[e] ?? 0), 1);
+    const samples: number[] = [];
+    for (let i = 0; i < nBoot; i++) {
+      let prod = 1; let ok = true;
+      for (const e of edges) { const v = bootDist[e]?.[i]; if (v === undefined) { ok = false; break; } prod *= v; }
+      if (ok) samples.push(prod);
+    }
+    return { from: seq[0], to: seq[seq.length - 1], via: seq.map(nameOf).join(' → '), ...inference(point, samples) };
+  });
+
+  // Total indirect effect per (from,to): sum of that pair's specific routes
+  const byPair = new Map<string, string[][]>();
+  routes.forEach(seq => {
+    const key = `${seq[0]}->${seq[seq.length - 1]}`;
+    (byPair.get(key) ?? byPair.set(key, []).get(key)!).push(seq);
+  });
+
+  const totalIndirect: SpecificIndirect[] = [];
+  byPair.forEach((seqs, key) => {
+    const [from, to] = key.split('->');
+    const point = seqs.reduce((sum, seq) => sum + edgesOf(seq).reduce((pr, e) => pr * (originalPaths[e] ?? 0), 1), 0);
+    const samples: number[] = [];
+    for (let i = 0; i < nBoot; i++) {
+      let total = 0; let ok = true;
+      for (const seq of seqs) {
+        let prod = 1;
+        for (const e of edgesOf(seq)) { const v = bootDist[e]?.[i]; if (v === undefined) { ok = false; break; } prod *= v; }
+        if (!ok) break;
+        total += prod;
+      }
+      if (ok) samples.push(total);
+    }
+    totalIndirect.push({ from, to, via: `${nameOf(from)} ⇒ ${nameOf(to)} (all routes)`, ...inference(point, samples) });
+  });
+
+  // Total effect = direct + total indirect (for every pair that has either)
+  const pairs = new Set<string>([...byPair.keys(), ...model.paths.map(p => `${p.from}->${p.to}`)]);
+  const totalEffects: TotalEffectRow[] = [...pairs].map(key => {
+    const [from, to] = key.split('->');
+    const direct = originalPaths[key] ?? 0;
+    const indirect = totalIndirect.find(t => t.from === from && t.to === to)?.estimate ?? 0;
+    return { from, to, direct, indirect, total: direct + indirect };
+  }).filter(r => Math.abs(r.indirect) > 1e-9); // only pairs that actually have mediation
+
+  return { specific, totalIndirect, totalEffects };
 }
 
 export function blindfolding(
