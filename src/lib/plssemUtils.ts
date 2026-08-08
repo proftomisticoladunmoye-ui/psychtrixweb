@@ -1182,290 +1182,155 @@ export function computeMediation(
   return { specific, totalIndirect, totalEffects };
 }
 
+// ---- predictive assessment (indicator-level) --------------------------------
+
+// Deterministic shuffle so k-fold assignment is reproducible across runs.
+function seededShuffle<T>(arr: T[], seed: number): T[] {
+  const a = arr.slice();
+  let s = seed >>> 0;
+  const rnd = () => { s = (s + 0x6d2b79f5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+function columnStats(data: number[][]): { mean: number[]; sd: number[] } {
+  const m = data[0]?.length || 0;
+  const mean: number[] = new Array(m).fill(0), sd: number[] = new Array(m).fill(1);
+  for (let j = 0; j < m; j++) {
+    let s = 0, c = 0;
+    for (let i = 0; i < data.length; i++) { const v = data[i][j]; if (isFinite(v)) { s += v; c++; } }
+    const mu = c ? s / c : 0; mean[j] = mu;
+    let ss = 0; for (let i = 0; i < data.length; i++) { const v = data[i][j]; if (isFinite(v)) ss += (v - mu) ** 2; }
+    sd[j] = Math.sqrt(ss / Math.max(1, c - 1)) || 1;
+  }
+  return { mean, sd };
+}
+
+const blockIndices = (c: PLSSEMConstruct, columns?: string[]): number[] =>
+  c.indicators.map(ind => (columns ? columns.indexOf(ind) : -1)).filter(i => i >= 0);
+
+/**
+ * Blindfolding Q² — cross-validated redundancy at the INDICATOR level
+ * (Stone–Geisser / SmartPLS). For each endogenous construct we omit every
+ * d-th value of its indicator block, re-estimate with the omitted values
+ * mean-replaced, predict them via the structural model (loading × predicted
+ * LV), and accumulate Q² = 1 − ΣSSE/ΣSSO over all omission groups.
+ */
 export function blindfolding(
-  data: number[][],
-  model: PLSSEMModel,
-  settings: any,
-  omissionDistance: number,
-  columns?: string[]
+  data: number[][], model: PLSSEMModel, settings: any, omissionDistance: number, columns?: string[],
 ): { [construct: string]: number } {
-  const qSquared: { [construct: string]: number } = {};
-  const n = data.length;
+  const d = Math.max(2, Math.floor(omissionDistance) || 7);
+  const std = standardize(data);
+  const n = std.length;
+  const endo = model.constructs.filter(c => model.paths.some(p => p.to === c.id));
+  const q: { [id: string]: number } = {};
 
-  const endogenousConstructs = model.constructs.filter(c =>
-    model.paths.some(p => p.to === c.id)
-  );
+  endo.forEach(c => {
+    const block = blockIndices(c, columns);
+    const preds = model.paths.filter(p => p.to === c.id).map(p => p.from);
+    if (!block.length || !preds.length) { q[c.id] = 0; return; }
+    let SSE = 0, SSO = 0;
 
-  endogenousConstructs.forEach(construct => {
-    // Collect all actual indicator means and predictions across folds
-    const allActuals: number[] = [];
-    const allPredicted: number[] = [];
+    for (let g = 0; g < d; g++) {
+      const work = std.map(r => r.slice());
+      const omitted: Array<[number, number]> = []; // [caseIndex, localIndicator]
+      let t = 0;
+      for (let i = 0; i < n; i++) for (let j = 0; j < block.length; j++) { if (t % d === g) { omitted.push([i, j]); work[i][block[j]] = 0; } t++; }
+      if (!omitted.length) continue;
 
-    for (let fold = 0; fold < omissionDistance; fold++) {
-      const omittedIndices: number[] = [];
-      for (let i = fold; i < n; i += omissionDistance) {
-        omittedIndices.push(i);
-      }
+      let res: ReturnType<typeof runPLSAlgorithm> | null = null;
+      try { res = runPLSAlgorithm(work, model, settings, columns); } catch { continue; }
+      if (!res || !res.converged) continue;
+      const rr = res;
+      const y = rr.latentScores[c.id]; if (!y) continue;
 
-      const trainingData = data.filter((_, i) => !omittedIndices.includes(i));
+      const X = y.map((_, i) => preds.map(p => rr.latentScores[p]?.[i] ?? 0));
+      let beta: number[]; try { beta = multipleRegression(y, X); } catch { beta = preds.map(p => pearsonCorrelation(rr.latentScores[p] || [], y)); }
+      const load = block.map(col => pearsonCorrelation(std.map(r => r[col]), y));
+      const lvPred = y.map((_, i) => preds.reduce((s, p, k) => s + beta[k] * (rr.latentScores[p]?.[i] ?? 0), 0));
 
-      if (trainingData.length < 10) continue;
-
-      try {
-        const plsResults = runPLSAlgorithm(trainingData, model, settings, columns);
-
-        if (!plsResults.converged) continue;
-
-        // Compute path coefficients on training data
-        const predictors = model.paths
-          .filter(p => p.to === construct.id)
-          .map(p => p.from);
-
-        if (predictors.length === 0) continue;
-
-        // Estimate path coefficients from training latent scores
-        const trainingEndogenous = plsResults.latentScores[construct.id];
-        if (!trainingEndogenous) continue;
-
-        // Joint OLS on training latent scores (matches the structural estimator)
-        let pathCoeffs: number[];
-        try {
-          const Xp: number[][] = trainingEndogenous.map((_, i) =>
-            predictors.map(pid => plsResults.latentScores[pid]?.[i] ?? 0));
-          pathCoeffs = multipleRegression(trainingEndogenous, Xp);
-        } catch {
-          pathCoeffs = predictors.map(predId => {
-            const predScores = plsResults.latentScores[predId];
-            return predScores ? pearsonCorrelation(predScores, trainingEndogenous) : 0;
-          });
-        }
-
-        // Get standardization parameters from training data
-        const colMeans: number[] = [];
-        const colSds: number[] = [];
-        const totalCols = trainingData[0]?.length || 0;
-        for (let ci = 0; ci < totalCols; ci++) {
-          const col = trainingData.map(r => r[ci]).filter(v => isFinite(v));
-          const m = col.reduce((a, b) => a + b, 0) / Math.max(1, col.length);
-          const s = Math.sqrt(col.reduce((a, b) => a + (b - m) ** 2, 0) / Math.max(1, col.length - 1));
-          colMeans[ci] = m;
-          colSds[ci] = s || 1;
-        }
-
-        // Helper: standardize a single observation using training statistics
-        const stdObs = (obs: number[], idx: number) => colSds[idx] > 0 ? (obs[idx] - colMeans[idx]) / colSds[idx] : 0;
-
-        // For each omitted observation: use outer weights to compute latent score proxy
-        omittedIndices.forEach(omittedIdx => {
-          const obs = data[omittedIdx];
-
-          // Actual latent score: outer weight projection of construct indicators
-          const indIndices = construct.indicators
-            .map(ind => columns ? columns.indexOf(ind) : -1)
-            .filter(idx => idx !== -1);
-          if (indIndices.length === 0) return;
-
-          // Scores are plain X_std · w — the training weights are already scaled
-          // so the training scores have unit variance, so no extra normalisation
-          const weights = plsResults.outerWeights[construct.id] || [];
-          let actualScore = 0;
-          indIndices.forEach((idx, k) => {
-            actualScore += (weights[k] ?? (1 / indIndices.length)) * stdObs(obs, idx);
-          });
-
-          // Predicted: path coefficient × predictor outer weight projection
-          let predictedScore = 0;
-          predictors.forEach((predId, pIdx) => {
-            const predConstruct = model.constructs.find(c => c.id === predId);
-            if (!predConstruct) return;
-            const predIndices = predConstruct.indicators
-              .map(ind => columns ? columns.indexOf(ind) : -1)
-              .filter(idx => idx !== -1);
-            if (predIndices.length === 0) return;
-            const predWeights = plsResults.outerWeights[predId] || [];
-            let predScore = 0;
-            predIndices.forEach((idx, k) => {
-              predScore += (predWeights[k] ?? (1 / predIndices.length)) * stdObs(obs, idx);
-            });
-            predictedScore += pathCoeffs[pIdx] * predScore;
-          });
-
-          allActuals.push(actualScore);
-          allPredicted.push(predictedScore);
-        });
-      } catch (e) {
-        continue;
-      }
+      omitted.forEach(([i, j]) => {
+        const actual = std[i][block[j]];        // true standardized value (mean 0)
+        const predicted = load[j] * lvPred[i];
+        SSE += (actual - predicted) ** 2;
+        SSO += actual * actual;
+      });
     }
-
-    if (allActuals.length === 0) {
-      qSquared[construct.id] = 0;
-      return;
-    }
-
-    // Q² = 1 - SSE / SSO where SSO = Σ(actual - mean(actual))²
-    const meanActual = allActuals.reduce((a, b) => a + b, 0) / allActuals.length;
-    const sso = allActuals.reduce((sum, a) => sum + Math.pow(a - meanActual, 2), 0);
-    const sse = allActuals.reduce((sum, a, i) => sum + Math.pow(a - allPredicted[i], 2), 0);
-
-    qSquared[construct.id] = sso > 0 ? 1 - (sse / sso) : 0;
+    q[c.id] = SSO > 0 ? Math.min(1, 1 - SSE / SSO) : 0;
   });
-
-  return qSquared;
+  return q;
 }
 
+/**
+ * PLSpredict — out-of-sample prediction of the endogenous MANIFEST indicators
+ * via random k-fold cross-validation (Shmueli et al. 2016). For each holdout
+ * case we build predictor LV scores from the training weights, predict the
+ * endogenous LV (structural β), map to each indicator (loading), de-standardize
+ * to the manifest scale, and score RMSE/MAE plus Q²_predict against the
+ * training-mean benchmark.
+ */
 export function plsPredict(
-  data: number[][],
-  model: PLSSEMModel,
-  settings: any,
-  trainRatio: number = 0.8,
-  columns?: string[]
-): {
-  rmse: { [construct: string]: number };
-  mae: { [construct: string]: number };
-  qSquaredPredict: { [construct: string]: number };
-} {
+  data: number[][], model: PLSSEMModel, settings: any, _trainRatio: number = 0.8, columns?: string[],
+): { rmse: { [c: string]: number }; mae: { [c: string]: number }; qSquaredPredict: { [c: string]: number } } {
+  const K = 10;
   const n = data.length;
-  const splitIndex = Math.floor(n * trainRatio);
+  const endo = model.constructs.filter(c => model.paths.some(p => p.to === c.id));
+  const out = { rmse: {} as { [c: string]: number }, mae: {} as { [c: string]: number }, qSquaredPredict: {} as { [c: string]: number } };
+  if (n < 2 * K) { endo.forEach(c => { out.rmse[c.id] = 0; out.mae[c.id] = 0; out.qSquaredPredict[c.id] = 0; }); return out; }
 
-  const trainData = data.slice(0, splitIndex);
-  const testData = data.slice(splitIndex);
+  const order = seededShuffle([...Array(n).keys()], 20260808);
+  const acc: { [id: string]: { se: number; ae: number; sse: number; sso: number; nn: number } } = {};
+  endo.forEach(c => { acc[c.id] = { se: 0, ae: 0, sse: 0, sso: 0, nn: 0 }; });
 
-  const results = {
-    rmse: {} as { [construct: string]: number },
-    mae: {} as { [construct: string]: number },
-    qSquaredPredict: {} as { [construct: string]: number }
-  };
+  for (let f = 0; f < K; f++) {
+    const testSet = new Set(order.filter((_, i) => i % K === f));
+    const trainData = data.filter((_, i) => !testSet.has(i));
+    const testRows = [...testSet].map(i => data[i]);
+    if (trainData.length < 10 || !testRows.length) continue;
 
-  if (testData.length === 0) {
-    model.constructs.forEach(construct => {
-      if (model.paths.some(p => p.to === construct.id)) {
-        results.rmse[construct.id] = 0;
-        results.mae[construct.id] = 0;
-        results.qSquaredPredict[construct.id] = 0;
-      }
-    });
-    return results;
-  }
+    let res: ReturnType<typeof runPLSAlgorithm> | null = null;
+    try { res = runPLSAlgorithm(trainData, model, settings, columns); } catch { continue; }
+    if (!res || !res.converged) continue;
+    const rr = res;
+    const stats = columnStats(trainData);
+    const sv = (row: number[], col: number) => (stats.sd[col] > 0 ? (row[col] - stats.mean[col]) / stats.sd[col] : 0);
 
-  try {
-    const plsResults = runPLSAlgorithm(trainData, model, settings, columns);
+    endo.forEach(c => {
+      const block = blockIndices(c, columns);
+      const preds = model.paths.filter(p => p.to === c.id).map(p => p.from);
+      if (!block.length || !preds.length) return;
+      const y = rr.latentScores[c.id]; if (!y) return;
+      const X = y.map((_, i) => preds.map(p => rr.latentScores[p]?.[i] ?? 0));
+      let beta: number[]; try { beta = multipleRegression(y, X); } catch { beta = preds.map(p => pearsonCorrelation(rr.latentScores[p] || [], y)); }
+      const load = block.map(col => pearsonCorrelation(trainData.map(r => sv(r, col)), y));
 
-    if (!plsResults.converged) {
-      model.constructs.forEach(construct => {
-        if (model.paths.some(p => p.to === construct.id)) {
-          results.rmse[construct.id] = 999;
-          results.mae[construct.id] = 999;
-          results.qSquaredPredict[construct.id] = -999;
-        }
+      testRows.forEach(row => {
+        let endoLV = 0;
+        preds.forEach((p, k) => {
+          const pc = model.constructs.find(x => x.id === p); if (!pc) return;
+          const pb = blockIndices(pc, columns); const w = rr.outerWeights[p] || [];
+          let s = 0; pb.forEach((col, kk) => { s += (w[kk] ?? 1 / pb.length) * sv(row, col); });
+          endoLV += beta[k] * s;
+        });
+        block.forEach((col, j) => {
+          const predManifest = (load[j] * endoLV) * stats.sd[col] + stats.mean[col];
+          const err = row[col] - predManifest;
+          const naive = row[col] - stats.mean[col];
+          const a = acc[c.id];
+          a.se += err * err; a.ae += Math.abs(err); a.sse += err * err; a.sso += naive * naive; a.nn++;
+        });
       });
-      return results;
-    }
-
-    model.constructs.forEach(construct => {
-      const isEndogenous = model.paths.some(p => p.to === construct.id);
-      if (!isEndogenous) return;
-
-      const predictors = model.paths
-        .filter(p => p.to === construct.id)
-        .map(p => p.from);
-
-      // Estimate path coefficients from training latent scores via joint OLS
-      const trainingEndogenous = plsResults.latentScores[construct.id];
-      let pathCoeffs: number[];
-      try {
-        if (!trainingEndogenous) throw new Error('no scores');
-        const Xp: number[][] = trainingEndogenous.map((_, i) =>
-          predictors.map(pid => plsResults.latentScores[pid]?.[i] ?? 0));
-        pathCoeffs = multipleRegression(trainingEndogenous, Xp);
-      } catch {
-        pathCoeffs = predictors.map(predId => {
-          const predScores = plsResults.latentScores[predId];
-          if (!predScores || !trainingEndogenous) return 0;
-          return pearsonCorrelation(predScores, trainingEndogenous);
-        });
-      }
-
-      // Compute standardization parameters from training data
-      const totalCols = trainData[0]?.length || 0;
-      const colMeans: number[] = [];
-      const colSds: number[] = [];
-      for (let ci = 0; ci < totalCols; ci++) {
-        const col = trainData.map(r => r[ci]).filter(v => isFinite(v));
-        const m = col.reduce((a, b) => a + b, 0) / Math.max(1, col.length);
-        const s = Math.sqrt(col.reduce((a, b) => a + (b - m) ** 2, 0) / Math.max(1, col.length - 1));
-        colMeans[ci] = m;
-        colSds[ci] = s || 1;
-      }
-      const stdObs = (obs: number[], idx: number) => colSds[idx] > 0 ? (obs[idx] - colMeans[idx]) / colSds[idx] : 0;
-
-      const errors: number[] = [];
-      const actuals: number[] = [];
-
-      testData.forEach((testRow) => {
-        // Actual: outer weight projection of construct indicators
-        const indIndices = construct.indicators
-          .map(ind => columns ? columns.indexOf(ind) : -1)
-          .filter(idx => idx !== -1);
-        if (indIndices.length === 0) return;
-
-        // Scores are plain X_std · w (training weights already give unit-variance
-        // training scores, so no extra normalisation)
-        const weights = plsResults.outerWeights[construct.id] || [];
-        let actualScore = 0;
-        indIndices.forEach((idx, k) => {
-          actualScore += (weights[k] ?? (1 / indIndices.length)) * stdObs(testRow, idx);
-        });
-
-        // Predicted: path coefficients × predictor outer weight projections
-        let predictedScore = 0;
-        predictors.forEach((predId, pIdx) => {
-          const predConstruct = model.constructs.find(c => c.id === predId);
-          if (!predConstruct) return;
-          const predIndices = predConstruct.indicators
-            .map(ind => columns ? columns.indexOf(ind) : -1)
-            .filter(idx => idx !== -1);
-          if (predIndices.length === 0) return;
-          const predWeights = plsResults.outerWeights[predId] || [];
-          let predScore = 0;
-          predIndices.forEach((idx, k) => {
-            predScore += (predWeights[k] ?? (1 / predIndices.length)) * stdObs(testRow, idx);
-          });
-          predictedScore += pathCoeffs[pIdx] * predScore;
-        });
-
-        errors.push(actualScore - predictedScore);
-        actuals.push(actualScore);
-      });
-
-      const rmse = Math.sqrt(
-        errors.reduce((sum, e) => sum + e * e, 0) / errors.length
-      );
-      const mae = errors.reduce((sum, e) => sum + Math.abs(e), 0) / errors.length;
-
-      const meanActual = actuals.reduce((a, b) => a + b, 0) / actuals.length;
-      const sso = actuals.reduce((sum, a) => sum + Math.pow(a - meanActual, 2), 0);
-      const sse = errors.reduce((sum, e) => sum + e * e, 0);
-
-      const qSquaredPred = sso > 0 ? 1 - (sse / sso) : 0;
-
-      results.rmse[construct.id] = rmse;
-      results.mae[construct.id] = mae;
-      results.qSquaredPredict[construct.id] = qSquaredPred;
-    });
-  } catch (e) {
-    model.constructs.forEach(construct => {
-      if (model.paths.some(p => p.to === construct.id)) {
-        results.rmse[construct.id] = 999;
-        results.mae[construct.id] = 999;
-        results.qSquaredPredict[construct.id] = -999;
-      }
     });
   }
 
-  return results;
+  endo.forEach(c => {
+    const a = acc[c.id];
+    out.rmse[c.id] = a.nn ? Math.sqrt(a.se / a.nn) : 0;
+    out.mae[c.id] = a.nn ? a.ae / a.nn : 0;
+    out.qSquaredPredict[c.id] = a.sso > 0 ? 1 - a.sse / a.sso : 0;
+  });
+  return out;
 }
-
 export function calculateSRMR(
   observedCorr: number[][],
   impliedCorr: number[][]

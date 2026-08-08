@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mulberry32, randn } from './_helpers';
-import { calculateVIF, calculateInnerVIF, calculateAVE, enumerateIndirectPaths, computeMediation, PLSSEMModel } from '../src/lib/plssemUtils';
+import { calculateVIF, calculateInnerVIF, calculateAVE, enumerateIndirectPaths, computeMediation, blindfolding, plsPredict, PLSSEMModel } from '../src/lib/plssemUtils';
 
 // Build two columns with a target correlation r, plus a large mean offset so we
 // also verify VIF is computed on centered data (the raw-data bug would distort
@@ -102,4 +102,46 @@ test('mediation: indirect effect is the product of the path coefficients', () =>
   assert.ok(Math.abs(te.direct - 0.2) < 1e-9);
   assert.ok(Math.abs(te.indirect - 0.2) < 1e-9);
   assert.ok(Math.abs(te.total - 0.4) < 1e-9);
+});
+
+// Generate a 2-construct PLS dataset: X → Y with a strong structural path.
+function plsData(n = 300, seed = 42, beta = 0.7, lambda = 0.8) {
+  const rng = mulberry32(seed);
+  const cols = ['x1', 'x2', 'x3', 'y1', 'y2', 'y3'];
+  const data: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    const X = randn(rng);
+    const Y = beta * X + Math.sqrt(1 - beta * beta) * randn(rng);
+    const ind = (L: number) => lambda * L + Math.sqrt(1 - lambda * lambda) * randn(rng);
+    data.push([ind(X), ind(X), ind(X), ind(Y), ind(Y), ind(Y)]);
+  }
+  const model: PLSSEMModel = {
+    constructs: [
+      { id: 'X', name: 'X', type: 'reflective', order: 1, indicators: ['x1', 'x2', 'x3'] },
+      { id: 'Y', name: 'Y', type: 'reflective', order: 1, indicators: ['y1', 'y2', 'y3'] },
+    ],
+    paths: [{ from: 'X', to: 'Y' }],
+  };
+  const settings = { weightingScheme: 'path', maxIterations: 300, convergenceCriterion: 1e-6 };
+  return { data, cols, model, settings };
+}
+
+test('blindfolding Q² is positive when the predictor explains the endogenous block', () => {
+  const { data, cols, model, settings } = plsData();
+  const q = blindfolding(data, model, settings, 7, cols);
+  assert.ok(q['Y'] > 0.05, `Q²(Y)=${q['Y']} should be clearly positive`);
+  assert.ok(q['Y'] <= 1, `Q²(Y)=${q['Y']} must be ≤ 1`);
+});
+
+test('PLSpredict Q²_predict is positive out-of-sample for a real relationship', () => {
+  const { data, cols, model, settings } = plsData();
+  const p = plsPredict(data, model, settings, 0.8, cols);
+  assert.ok(p.qSquaredPredict['Y'] > 0, `Q²_predict(Y)=${p.qSquaredPredict['Y']} should beat the mean benchmark`);
+  assert.ok(p.rmse['Y'] > 0 && Number.isFinite(p.rmse['Y']), `RMSE(Y)=${p.rmse['Y']}`);
+});
+
+test('predictive metrics are ~null when predictor is unrelated to the outcome', () => {
+  const { data, cols, model, settings } = plsData(300, 7, 0.02); // near-zero path
+  const q = blindfolding(data, model, settings, 7, cols);
+  assert.ok(q['Y'] < 0.05, `Q²(Y)=${q['Y']} should be ~0 with no real relationship`);
 });
