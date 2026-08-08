@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Download, ZoomIn, ZoomOut, RefreshCw, Move } from 'lucide-react';
+import { Download, ZoomIn, ZoomOut, RefreshCw, Move, MousePointerClick, Trash2, Play, X } from 'lucide-react';
 import { PLSSEMModel, PLSSEMPath } from '../lib/plssemUtils';
 
 interface PLSSEMDiagramProps {
@@ -7,9 +7,22 @@ interface PLSSEMDiagramProps {
   measurementResults?: any;
   structuralResults?: any;
   diagramType: 'measurement' | 'structural' | 'full';
+  // Interactive editing (optional). When provided, an "Edit" mode lets the user
+  // click a path / indicator / construct and remove it, then re-run.
+  onRemovePath?: (from: string, to: string) => void;
+  onRemoveConstruct?: (id: string) => void;
+  onRemoveIndicator?: (constructId: string, indicator: string) => void;
+  onRerun?: () => void;
+  rerunning?: boolean;
+  edited?: boolean; // model changed since last run → prompt a re-run
 }
 
 interface NodePos { x: number; y: number; }
+
+type HitRegion =
+  | { kind: 'construct'; id: string; cx: number; cy: number }
+  | { kind: 'indicator'; constructId: string; name: string; x: number; y: number }
+  | { kind: 'path'; from: string; to: string; samples: Array<[number, number]> };
 
 // Logical canvas dimensions — positions computed in this coordinate space
 const CW = 1400;
@@ -155,6 +168,7 @@ function drawFrame(
   structuralResults: any,
   diagramType: string,
   draggingId: string | null,
+  regions?: HitRegion[],
 ) {
   ctx.clearRect(0, 0, CW, CH);
   // White background — publication/SmartPLS convention (also what exports show)
@@ -181,6 +195,7 @@ function drawFrame(
 
       construct.indicators.forEach((indName, k) => {
         const iy = startY + k * indGap;
+        regions?.push({ kind: 'indicator', constructId: construct.id, name: indName, x: indX, y: iy });
         const loadingObj = reflData?.indicators?.find((i: any) => i.name === indName);
         const weightObj = formData?.indicators?.find((i: any) => i.name === indName);
         const value = loadingObj?.loading ?? weightObj?.weight;
@@ -259,6 +274,14 @@ function drawFrame(
       const bend = Math.min(dist * 0.25, 70);
       const cpx = (sx + ex) / 2 + Math.cos(perp) * bend;
       const cpy = (sy + ey) / 2 + Math.sin(perp) * bend;
+      if (regions) {
+        const samples: Array<[number, number]> = [];
+        for (let t = 0; t <= 1.0001; t += 0.1) {
+          samples.push([(1 - t) ** 2 * sx + 2 * (1 - t) * t * cpx + t * t * ex,
+                        (1 - t) ** 2 * sy + 2 * (1 - t) * t * cpy + t * t * ey]);
+        }
+        regions.push({ kind: 'path', from: path.from, to: path.to, samples });
+      }
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.quadraticCurveTo(cpx, cpy, ex, ey); ctx.stroke();
       const t = 0.97;
       const arx = (1-t)**2*sx + 2*(1-t)*t*cpx + t*t*ex;
@@ -271,6 +294,11 @@ function drawFrame(
           pVal !== undefined && pVal < 0.05 ? '#059669' : '#475569');
       }
     } else {
+      if (regions) {
+        const samples: Array<[number, number]> = [];
+        for (let t = 0; t <= 1.0001; t += 0.1) samples.push([sx + (ex - sx) * t, sy + (ey - sy) * t]);
+        regions.push({ kind: 'path', from: path.from, to: path.to, samples });
+      }
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
       drawArrowhead(ctx, ex, ey, angle, color);
       if (coef !== undefined) {
@@ -286,6 +314,7 @@ function drawFrame(
   model.constructs.forEach(construct => {
     const pos = positions.get(construct.id);
     if (!pos) return;
+    regions?.push({ kind: 'construct', id: construct.id, cx: pos.x, cy: pos.y });
     const isReflective = construct.type === 'reflective';
     const isEndo = model.paths.some(p => p.to === construct.id);
     const rSq = structuralResults?.rSquared?.[construct.name];
@@ -350,14 +379,24 @@ export const PLSSEMDiagram: React.FC<PLSSEMDiagramProps> = ({
   measurementResults,
   structuralResults,
   diagramType,
+  onRemovePath,
+  onRemoveConstruct,
+  onRemoveIndicator,
+  onRerun,
+  rerunning,
+  edited,
 }) => {
+  const editable = !!(onRemovePath || onRemoveConstruct || onRemoveIndicator);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [zoom, setZoom] = useState(1);
   const [positions, setPositions] = useState<Map<string, NodePos>>(new Map());
   const [dragMode, setDragMode] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [selected, setSelected] = useState<HitRegion | null>(null);
   const [containerW, setContainerW] = useState(900);
   const dragRef = useRef<{ id: string; offsetX: number; offsetY: number } | null>(null);
+  const regionsRef = useRef<HitRegion[]>([]);
 
   // Track container width for responsive scaling
   useEffect(() => {
@@ -397,8 +436,10 @@ export const PLSSEMDiagram: React.FC<PLSSEMDiagramProps> = ({
     canvas.height = physH;
     ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
 
+    const regions: HitRegion[] = [];
     drawFrame(ctx, model, positions, measurementResults, structuralResults, diagramType,
-      dragRef.current?.id ?? null);
+      dragRef.current?.id ?? null, regions);
+    regionsRef.current = regions;
   }, [model, measurementResults, structuralResults, positions, zoom, diagramType, physW, physH, scale, dpr]);
 
   // Hit-test in logical space
@@ -448,6 +489,71 @@ export const PLSSEMDiagram: React.FC<PLSSEMDiagramProps> = ({
 
   const onMouseUp = useCallback(() => { dragRef.current = null; }, []);
 
+  // Click-to-select (Edit mode): indicator rect → path proximity → construct ellipse.
+  const onCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!editMode) return;
+    const { x, y } = toLogical(e.clientX, e.clientY);
+    const regions = regionsRef.current;
+    for (const r of regions) {
+      if (r.kind === 'indicator' && Math.abs(x - r.x) <= IND_W / 2 && Math.abs(y - r.y) <= IND_H / 2) { setSelected(r); return; }
+    }
+    let best: HitRegion | null = null, bestD = 12;
+    for (const r of regions) {
+      if (r.kind !== 'path') continue;
+      for (const [px, py] of r.samples) { const d = Math.hypot(x - px, y - py); if (d < bestD) { bestD = d; best = r; } }
+    }
+    if (best) { setSelected(best); return; }
+    for (const r of regions) {
+      if (r.kind === 'construct') { const dx = (x - r.cx) / CONSTRUCT_RX, dy = (y - r.cy) / CONSTRUCT_RY; if (dx * dx + dy * dy <= 1) { setSelected(r); return; } }
+    }
+    setSelected(null);
+  }, [editMode, toLogical]);
+
+  // Clear selection whenever the model changes (e.g. after a removal).
+  useEffect(() => { setSelected(null); }, [model]);
+
+  const nameOf = (id: string) => model.constructs.find(c => c.id === id)?.name ?? id;
+
+  // Look up the stats shown in the selection panel.
+  const selectedInfo = (): { title: string; detail: string; onRemove?: () => void; removeLabel: string } | null => {
+    if (!selected) return null;
+    if (selected.kind === 'path') {
+      const pd = structuralResults?.paths?.find((p: PLSSEMPath) => p.from === selected.from && p.to === selected.to);
+      const b = pd?.coefficient, p = pd?.pValue;
+      const sig = p !== undefined ? (p < 0.05 ? `significant (p=${p.toFixed(3)})` : `not significant (p=${p.toFixed(3)})`) : 'run analysis for p-value';
+      return {
+        title: `Path: ${nameOf(selected.from)} → ${nameOf(selected.to)}`,
+        detail: b !== undefined ? `β = ${b.toFixed(3)} · ${sig}` : 'No estimate yet — run the analysis.',
+        onRemove: onRemovePath ? () => { onRemovePath(selected.from, selected.to); setSelected(null); } : undefined,
+        removeLabel: 'Remove path',
+      };
+    }
+    if (selected.kind === 'indicator') {
+      const c = model.constructs.find(cc => cc.id === selected.constructId);
+      const refl = measurementResults?.reflective?.[c?.name ?? '']?.indicators?.find((i: any) => i.name === selected.name);
+      const form = measurementResults?.formative?.[c?.name ?? '']?.indicators?.find((i: any) => i.name === selected.name);
+      const val = refl ? `loading = ${refl.loading?.toFixed(3)} (p=${refl.pValue?.toFixed(3)})`
+        : form ? `weight = ${form.weight?.toFixed(3)} (p=${form.pValue?.toFixed(3)}), VIF=${form.vif?.toFixed(2)}`
+        : 'No estimate yet — run the analysis.';
+      const isLast = (c?.indicators.length ?? 0) <= 1;
+      return {
+        title: `Indicator: ${selected.name}`,
+        detail: `${c?.name ?? ''} · ${val}${isLast ? ' · (last indicator — remove the construct instead)' : ''}`,
+        onRemove: onRemoveIndicator && !isLast ? () => { onRemoveIndicator(selected.constructId, selected.name); setSelected(null); } : undefined,
+        removeLabel: 'Remove indicator',
+      };
+    }
+    // construct
+    const c = model.constructs.find(cc => cc.id === selected.id);
+    const rSq = structuralResults?.rSquared?.[c?.name ?? ''];
+    return {
+      title: `Construct: ${c?.name ?? selected.id}`,
+      detail: `${c?.type ?? ''}${rSq !== undefined ? ` · R² = ${rSq.toFixed(3)}` : ''} · removes its indicators and connected paths`,
+      onRemove: onRemoveConstruct ? () => { onRemoveConstruct(selected.id); setSelected(null); } : undefined,
+      removeLabel: 'Remove construct',
+    };
+  };
+
   const exportDiagram = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -483,7 +589,7 @@ export const PLSSEMDiagram: React.FC<PLSSEMDiagramProps> = ({
           </button>
           <div className="w-px h-5 bg-gray-200 mx-1" />
           <button
-            onClick={() => { setDragMode(d => !d); dragRef.current = null; }}
+            onClick={() => { setDragMode(d => !d); if (!dragMode) setEditMode(false); dragRef.current = null; }}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition-colors ${
               dragMode ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'
             }`}
@@ -492,13 +598,71 @@ export const PLSSEMDiagram: React.FC<PLSSEMDiagramProps> = ({
             <Move className="w-4 h-4" />
             <span className="hidden sm:inline">{dragMode ? 'Drag On' : 'Drag'}</span>
           </button>
+          {editable && (
+            <button
+              onClick={() => { setEditMode(m => !m); if (!editMode) setDragMode(false); setSelected(null); }}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                editMode ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'
+              }`}
+              title="Edit model — click a path, indicator or construct to remove it"
+            >
+              <MousePointerClick className="w-4 h-4" />
+              <span className="hidden sm:inline">{editMode ? 'Editing' : 'Edit'}</span>
+            </button>
+          )}
         </div>
-        <button onClick={exportDiagram}
-          className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors">
-          <Download className="w-4 h-4" />
-          Export PNG
-        </button>
+        <div className="flex items-center gap-2">
+          {editable && onRerun && (
+            <button onClick={onRerun} disabled={rerunning}
+              className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 ${
+                edited ? 'bg-green-600 text-white hover:bg-green-700' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }`}
+              title="Re-estimate the model with the current constructs and paths">
+              <Play className="w-4 h-4" />
+              {rerunning ? 'Running…' : 'Re-run'}
+            </button>
+          )}
+          <button onClick={exportDiagram}
+            className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors">
+            <Download className="w-4 h-4" />
+            <span className="hidden sm:inline">Export PNG</span>
+          </button>
+        </div>
       </div>
+
+      {editMode && (
+        <p className="text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
+          Edit mode — click a <b>path</b>, <b>indicator</b>, or <b>construct</b> to select it, then remove non-significant pieces and press <b>Re-run</b>. No need to start over.
+        </p>
+      )}
+
+      {editMode && edited && (
+        <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          Model edited — estimates below are stale. Press <b>Re-run</b> to update.
+        </p>
+      )}
+
+      {selected && (() => {
+        const info = selectedInfo();
+        if (!info) return null;
+        return (
+          <div className="flex items-start justify-between gap-3 bg-white border border-indigo-200 rounded-lg px-4 py-3 shadow-sm">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-gray-900">{info.title}</p>
+              <p className="text-xs text-gray-600 mt-0.5 break-words">{info.detail}</p>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {info.onRemove && (
+                <button onClick={info.onRemove}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg">
+                  <Trash2 className="w-4 h-4" />{info.removeLabel}
+                </button>
+              )}
+              <button onClick={() => setSelected(null)} className="p-1.5 text-gray-400 hover:text-gray-700"><X className="w-4 h-4" /></button>
+            </div>
+          </div>
+        );
+      })()}
 
       {dragMode && (
         <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
@@ -514,12 +678,13 @@ export const PLSSEMDiagram: React.FC<PLSSEMDiagramProps> = ({
             display: 'block',
             width: `${displayW * zoom}px`,
             height: `${displayH * zoom}px`,
-            cursor: dragMode ? 'default' : 'default',
+            cursor: editMode ? 'pointer' : 'default',
           }}
           onMouseDown={onMouseDown}
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
           onMouseLeave={onMouseUp}
+          onClick={onCanvasClick}
         />
       </div>
     </div>

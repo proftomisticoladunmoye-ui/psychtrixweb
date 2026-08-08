@@ -65,6 +65,7 @@ export function PLSSEM() {
     indicators: [] as string[]
   });
 
+  const [modelEdited, setModelEdited] = useState(false);
   const [descriptiveStats, setDescriptiveStats] = useState<any>(null);
   const [correlationMatrix, setCorrelationMatrix] = useState<number[][]>([]);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
@@ -218,6 +219,7 @@ export function PLSSEM() {
       constructs: model.constructs.filter(c => c.id !== id),
       paths: model.paths.filter(p => p.from !== id && p.to !== id)
     });
+    setModelEdited(true);
   };
 
   const addPath = (from: string, to: string) => {
@@ -230,6 +232,7 @@ export function PLSSEM() {
       ...model,
       paths: [...model.paths, { from, to }]
     });
+    setModelEdited(true);
   };
 
   const removePath = (from: string, to: string) => {
@@ -237,6 +240,20 @@ export function PLSSEM() {
       ...model,
       paths: model.paths.filter(p => !(p.from === from && p.to === to))
     });
+    setModelEdited(true);
+  };
+
+  // Remove one indicator from a construct (the last indicator is kept — remove
+  // the whole construct instead).
+  const removeIndicator = (constructId: string, indicator: string) => {
+    setModel(m => ({
+      ...m,
+      constructs: m.constructs.map(c =>
+        c.id === constructId && c.indicators.length > 1
+          ? { ...c, indicators: c.indicators.filter(i => i !== indicator) }
+          : c),
+    }));
+    setModelEdited(true);
   };
 
   const runAnalysis = async () => {
@@ -476,6 +493,7 @@ export function PLSSEM() {
       setMeasurementResults(measurementModel);
       setStructuralResults(structuralModel);
       setAdvancedResults(advanced);
+      setModelEdited(false);
       setActiveTab('measurement');
       setSuccess('Analysis completed successfully!');
       setTimeout(() => setSuccess(''), 5000);
@@ -1658,13 +1676,20 @@ export function PLSSEM() {
               <h3 className="text-lg font-semibold text-gray-900">Full Model</h3>
             </div>
             <p className="text-sm text-gray-600 mb-4">
-              Complete PLS-SEM model with measurement and structural components
+              Complete PLS-SEM model with measurement and structural components.
+              Use <b>Edit</b> to click and remove a non-significant path, indicator or construct, then <b>Re-run</b>.
             </p>
             <PLSSEMDiagram
               model={model}
               measurementResults={measurementResults}
               structuralResults={structuralResults}
               diagramType="full"
+              onRemovePath={removePath}
+              onRemoveConstruct={removeConstruct}
+              onRemoveIndicator={removeIndicator}
+              onRerun={runAnalysis}
+              rerunning={loading}
+              edited={modelEdited}
             />
           </div>
         </div>
