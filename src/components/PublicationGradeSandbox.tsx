@@ -1113,6 +1113,10 @@ export function EnhancedPsychometricsSandbox() {
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-white border border-indigo-300 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 rounded-lg font-medium">
                 <ExternalLink className="w-3.5 h-3.5" /> CFA
               </button>
+              <button onClick={() => sendToAnalysis('dif')} disabled={datasetBusy}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-white border border-indigo-300 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 rounded-lg font-medium">
+                <ExternalLink className="w-3.5 h-3.5" /> DIF
+              </button>
             </div>
           </div>
         </div>

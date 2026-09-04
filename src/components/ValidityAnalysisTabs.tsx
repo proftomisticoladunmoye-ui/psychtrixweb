@@ -3,7 +3,7 @@ import { peekHandoff } from '../lib/analysisHandoff';
 import { supabase } from '../lib/supabase';
 import {
   Target, Users, TrendingUp, CheckCircle, Network, GitBranch,
-  Globe, AlertCircle, Download, Play, Settings, FileImage
+  Globe, AlertCircle, Download, Play, Settings, FileImage, ScanSearch
 } from 'lucide-react';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, ArcElement } from 'chart.js';
 import { Bar, Scatter } from 'react-chartjs-2';
@@ -18,6 +18,7 @@ import { EnhancedCFA } from './EnhancedCFA';
 import { EnhancedSEM } from './EnhancedSEM';
 import { EnhancedInvariance } from './EnhancedInvariance';
 import { EnhancedMultiGroupSEM } from './EnhancedMultiGroupSEM';
+import { EnhancedDIF } from './EnhancedDIF';
 import { EnhancedContentValidity } from './EnhancedContentValidity';
 import { EnhancedConstructValidity } from './EnhancedConstructValidity';
 
@@ -30,7 +31,7 @@ interface Dataset {
   data: any[];
 }
 
-type TabType = 'content' | 'construct' | 'cfa' | 'sem' | 'invariance' | 'multigroup';
+type TabType = 'content' | 'construct' | 'cfa' | 'sem' | 'invariance' | 'multigroup' | 'dif';
 
 export default function ValidityAnalysisTabs() {
   const [activeTab, setActiveTab] = useState<TabType>('construct');
@@ -106,6 +107,7 @@ export default function ValidityAnalysisTabs() {
     { id: 'sem', label: 'SEM', icon: GitBranch },
     { id: 'invariance', label: 'Measurement Invariance', icon: Globe },
     { id: 'multigroup', label: 'Multi-group SEM', icon: Users },
+    { id: 'dif', label: 'DIF', icon: ScanSearch },
   ];
 
   useEffect(() => {
@@ -130,7 +132,8 @@ export default function ValidityAnalysisTabs() {
       const ho = peekHandoff();
       if (ho && (data || []).some((d: Dataset) => d.id === ho.datasetId)) {
         setSelectedDataset(ho.datasetId);
-        setActiveTab(ho.target === 'multigroup' ? 'multigroup' : ho.target === 'cfa' ? 'cfa' : 'invariance');
+        const tab: TabType = ho.target === 'multigroup' ? 'multigroup' : ho.target === 'cfa' ? 'cfa' : ho.target === 'dif' ? 'dif' : 'invariance';
+        setActiveTab(tab);
       }
     } catch (err: any) {
       setError(err.message);
@@ -1148,6 +1151,15 @@ export default function ValidityAnalysisTabs() {
           {/* Multi-group SEM Tab - Enhanced Professional Version */}
           {activeTab === 'multigroup' && (
             <EnhancedMultiGroupSEM
+              datasets={datasets}
+              selectedDataset={selectedDataset}
+              onDatasetChange={setSelectedDataset}
+            />
+          )}
+
+          {/* DIF Tab */}
+          {activeTab === 'dif' && (
+            <EnhancedDIF
               datasets={datasets}
               selectedDataset={selectedDataset}
               onDatasetChange={setSelectedDataset}

@@ -4,7 +4,7 @@
 // target module, which reads and clears the hand-off on arrival — so the
 // researcher doesn't re-specify a model they've already built.
 
-export type HandoffTarget = 'invariance' | 'multigroup' | 'cfa';
+export type HandoffTarget = 'invariance' | 'multigroup' | 'cfa' | 'dif';
 
 export interface AnalysisHandoff {
   target: HandoffTarget;
