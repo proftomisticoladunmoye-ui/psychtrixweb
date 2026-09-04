@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON } from '../lib/exportUtils';
-import { buildSandboxDataset } from '../lib/sandboxDataset';
+import { buildSandboxDataset, DemographicVariable, DemographicType, DemographicRole } from '../lib/sandboxDataset';
 import {
   calculateCronbachAlpha,
   calculateCorrectedItemTotalCorrelation,
@@ -42,6 +42,7 @@ interface Project {
   status: 'draft' | 'collecting' | 'analyzed';
   items: ScaleItem[];
   subscales: string[];
+  demographics?: DemographicVariable[];
   response_scale: {
     type: 'likert' | 'binary';
     min: number;
@@ -111,6 +112,10 @@ export function EnhancedPsychometricsSandbox() {
     reversed: false,
     subscale: '',
   });
+
+  const [newDemographic, setNewDemographic] = useState<{
+    name: string; type: DemographicType; role: DemographicRole; optionsText: string;
+  }>({ name: '', type: 'categorical', role: 'grouping', optionsText: '' });
 
   useEffect(() => {
     loadProjects();
@@ -235,6 +240,33 @@ export function EnhancedPsychometricsSandbox() {
     });
   };
 
+  // ---- demographic / grouping variables --------------------------------------
+  const addDemographic = () => {
+    if (!currentProject || !newDemographic.name.trim()) { setError('Demographic variable needs a name'); return; }
+    const options = newDemographic.type === 'continuous'
+      ? undefined
+      : newDemographic.optionsText.split(',').map(o => o.trim()).filter(Boolean);
+    if (newDemographic.type !== 'continuous' && (!options || options.length < 2)) {
+      setError('Categorical / ordinal variables need at least two comma-separated options');
+      return;
+    }
+    const demo: DemographicVariable = {
+      id: Date.now().toString() + Math.random().toString(36).slice(2, 8),
+      name: newDemographic.name.trim(),
+      type: newDemographic.type,
+      role: newDemographic.role,
+      options,
+    };
+    setCurrentProject({ ...currentProject, demographics: [...(currentProject.demographics ?? []), demo] });
+    setNewDemographic({ name: '', type: 'categorical', role: 'grouping', optionsText: '' });
+    setSuccess('Grouping variable added'); setTimeout(() => setSuccess(''), 2000);
+  };
+
+  const removeDemographic = (id: string) => {
+    if (!currentProject) return;
+    setCurrentProject({ ...currentProject, demographics: (currentProject.demographics ?? []).filter(d => d.id !== id) });
+  };
+
   const saveProject = async () => {
     if (!currentProject) return;
 
@@ -246,6 +278,7 @@ export function EnhancedPsychometricsSandbox() {
           description: currentProject.description,
           items: currentProject.items,
           subscales: currentProject.subscales,
+          demographics: currentProject.demographics ?? [],
           response_scale: currentProject.response_scale,
           status: currentProject.status,
           reliability: currentProject.reliability,
@@ -448,16 +481,20 @@ export function EnhancedPsychometricsSandbox() {
     window.open(getTwitterShareUrl(text, link), '_blank');
   };
 
-  // Pull every completed respondent's raw answer array for the current project.
-  const fetchRawResponses = async (): Promise<number[][]> => {
-    if (!currentProject) return [];
+  // Pull every completed respondent's raw answers + demographic answers.
+  const fetchRawResponses = async (): Promise<{ responses: number[][]; demographics: Array<Record<string, unknown>> }> => {
+    if (!currentProject) return { responses: [], demographics: [] };
     const { data, error } = await supabase
       .from('scale_responses')
-      .select('responses')
+      .select('responses, demographic_data')
       .eq('project_id', currentProject.id)
       .eq('completed', true);
     if (error) throw error;
-    return (data || []).map((r: any) => (r.responses as number[]) ?? []);
+    const rows = data || [];
+    return {
+      responses: rows.map((r: any) => (r.responses as number[]) ?? []),
+      demographics: rows.map((r: any) => (r.demographic_data as Record<string, unknown>) ?? {}),
+    };
   };
 
   // Save the collected responses as a reusable dataset (reverse-scoring applied,
@@ -468,8 +505,8 @@ export function EnhancedPsychometricsSandbox() {
       setDatasetBusy(true);
       setError('');
       const rows = await fetchRawResponses();
-      if (rows.length === 0) { setError('No collected responses to save yet.'); return; }
-      const built = buildSandboxDataset(currentProject, rows);
+      if (rows.responses.length === 0) { setError('No collected responses to save yet.'); return; }
+      const built = buildSandboxDataset(currentProject, rows.responses, rows.demographics);
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
       const { error: insertError } = await supabase.from('datasets').insert({
@@ -504,8 +541,8 @@ export function EnhancedPsychometricsSandbox() {
       setDatasetBusy(true);
       setError('');
       const rows = await fetchRawResponses();
-      if (rows.length === 0) { setError('No collected responses to download yet.'); return; }
-      const built = buildSandboxDataset(currentProject, rows);
+      if (rows.responses.length === 0) { setError('No collected responses to download yet.'); return; }
+      const built = buildSandboxDataset(currentProject, rows.responses, rows.demographics);
       exportToCSV(built.data, `${currentProject.name}_RawData`);
     } catch (e: any) {
       setError(e?.message || 'Could not export the data.');
@@ -1042,6 +1079,81 @@ export function EnhancedPsychometricsSandbox() {
                 >
                   <Plus className="w-5 h-5" />
                   Add Item
+                </button>
+              </div>
+            </div>
+
+            {/* Demographic & grouping variables — kept separate from the items */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h4 className="text-lg font-bold text-gray-900 mb-1 flex items-center gap-2">
+                <Users className="w-5 h-5 text-indigo-600" />
+                Demographic & Grouping Variables ({(currentProject.demographics ?? []).length})
+              </h4>
+              <p className="text-sm text-gray-600 mb-4">
+                Kept separate from the scale items. Collected from respondents and flow into the dataset as their own columns —
+                ready to use as the grouping/criterion variable for DIF, measurement invariance, multi-group CFA and group comparisons.
+              </p>
+
+              {(currentProject.demographics ?? []).length > 0 && (
+                <div className="space-y-2 mb-4">
+                  {(currentProject.demographics ?? []).map((d) => (
+                    <div key={d.id} className="flex items-start justify-between gap-2 p-2.5 bg-indigo-50 border border-indigo-100 rounded-lg">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-gray-900">{d.name}</p>
+                        <p className="text-xs text-gray-600">
+                          {d.type} · {d.role}{d.options?.length ? ` · ${d.options.join(', ')}` : ''}
+                        </p>
+                      </div>
+                      <button onClick={() => removeDemographic(d.id)} title="Remove" className="text-gray-300 hover:text-red-600 flex-shrink-0">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <input
+                    type="text" value={newDemographic.name}
+                    onChange={(e) => setNewDemographic({ ...newDemographic, name: e.target.value })}
+                    placeholder="e.g., Gender" className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <select
+                    value={newDemographic.type}
+                    onChange={(e) => setNewDemographic({ ...newDemographic, type: e.target.value as DemographicType })}
+                    className="px-3 py-2 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="categorical">Categorical</option>
+                    <option value="ordinal">Ordinal</option>
+                    <option value="continuous">Continuous</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <select
+                    value={newDemographic.role}
+                    onChange={(e) => setNewDemographic({ ...newDemographic, role: e.target.value as DemographicRole })}
+                    className="px-3 py-2 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500"
+                    title="How the variable is used downstream"
+                  >
+                    <option value="grouping">Grouping (DIF / invariance)</option>
+                    <option value="criterion">Criterion (regression / validity)</option>
+                    <option value="descriptive">Descriptive</option>
+                  </select>
+                  {newDemographic.type !== 'continuous' && (
+                    <input
+                      type="text" value={newDemographic.optionsText}
+                      onChange={(e) => setNewDemographic({ ...newDemographic, optionsText: e.target.value })}
+                      placeholder="Options: Male, Female" className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                    />
+                  )}
+                </div>
+                <button
+                  onClick={addDemographic}
+                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2.5 rounded-lg transition flex items-center justify-center gap-2"
+                >
+                  <Plus className="w-5 h-5" />
+                  Add Grouping Variable
                 </button>
               </div>
             </div>

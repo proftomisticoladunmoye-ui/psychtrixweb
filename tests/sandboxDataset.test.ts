@@ -61,3 +61,44 @@ test('item variable metadata carries measure + value labels', () => {
   const total = variables.find((v) => v.name === 'Total_Score')!;
   assert.equal(total.measure, 'scale');
 });
+
+const demoProject: SandboxProjectLite = {
+  name: 'Wellbeing',
+  response_scale: { type: 'likert', min: 1, max: 5, labels: ['SD', 'D', 'N', 'A', 'SA'] },
+  subscales: ['Anxiety'],
+  demographics: [
+    { id: 'g', name: 'Gender', type: 'categorical', role: 'grouping', options: ['Male', 'Female'] },
+    { id: 'age', name: 'Age', type: 'continuous', role: 'criterion' },
+  ],
+  items: [
+    { id: 'a', content: 'I feel tense', reversed: false, subscale: 'Anxiety' },
+    { id: 'b', content: 'I feel calm', reversed: true, subscale: 'Anxiety' },
+  ],
+};
+
+test('demographic columns lead the dataset and carry role/measure metadata', () => {
+  const built = buildSandboxDataset(
+    demoProject,
+    [[3, 2], [4, 1]],
+    [{ g: 'Male', age: 21 }, { g: 'Female', age: 34 }],
+  );
+  // demographics come first, then items, then scores
+  assert.equal(built.columns[0], 'Gender');
+  assert.equal(built.columns[1], 'Age');
+  assert.equal(built.data[0].Gender, 'Male');
+  assert.equal(built.data[1].Gender, 'Female');
+  assert.equal(built.data[0].Age, 21);            // continuous -> numeric
+  const gvar = built.variables.find(v => v.name === 'Gender');
+  assert.equal(gvar.measure, 'nominal');
+  assert.equal(gvar.type, 'string');
+  assert.deepEqual(gvar.values.map(x => x.value), ['Male', 'Female']);
+  assert.match(gvar.label, /grouping/);
+  const agevar = built.variables.find(v => v.name === 'Age');
+  assert.equal(agevar.measure, 'scale');
+});
+
+test('missing demographic answers become blank cells', () => {
+  const built = buildSandboxDataset(demoProject, [[3, 2]], [{}]);
+  assert.equal(built.data[0].Gender, '');
+  assert.equal(built.data[0].Age, '');
+});

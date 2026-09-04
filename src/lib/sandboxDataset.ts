@@ -7,16 +7,34 @@
 import type { VariableDef, Measure } from '../components/DataGridEditor';
 
 export interface SandboxItem { id: string; content: string; reversed: boolean; subscale?: string }
+
+// A demographic / grouping variable defined on the instrument. These are kept
+// structurally separate from the psychometric items and flow into the dataset
+// as their own columns, so modules like Measurement Invariance, Multi-Group CFA
+// and DIF can pick them as the grouping / criterion variable.
+export type DemographicType = 'categorical' | 'ordinal' | 'continuous';
+export type DemographicRole = 'grouping' | 'criterion' | 'descriptive';
+export interface DemographicVariable {
+  id: string;
+  name: string;
+  type: DemographicType;
+  role: DemographicRole;
+  options?: string[];   // choices for categorical / ordinal
+  required?: boolean;
+}
+
 export interface SandboxProjectLite {
   name: string;
   items: SandboxItem[];
   subscales?: string[];
+  demographics?: DemographicVariable[];
   response_scale: { type: 'likert' | 'binary'; min: number; max: number; labels?: string[] };
 }
 
+export type DatasetCell = number | string | '';
 export interface BuiltDataset {
   columns: string[];
-  data: Array<Record<string, number | ''>>;
+  data: Array<Record<string, DatasetCell>>;
   variables: VariableDef[];
 }
 
@@ -28,7 +46,11 @@ function slug(s: string): string {
   return /^[A-Za-z]/.test(base) ? base : `S_${base}`;
 }
 
-export function buildSandboxDataset(project: SandboxProjectLite, responseRows: number[][]): BuiltDataset {
+export function buildSandboxDataset(
+  project: SandboxProjectLite,
+  responseRows: number[][],
+  demographicRows?: Array<Record<string, unknown>>, // aligned with responseRows, keyed by demographic id
+): BuiltDataset {
   const items = project.items ?? [];
   const min = project.response_scale?.min ?? 1;
   const max = project.response_scale?.max ?? 5;
@@ -93,9 +115,32 @@ export function buildSandboxDataset(project: SandboxProjectLite, responseRows: n
     name: sc.name, label: sc.label, type: 'numeric', measure: 'scale', values: [], missing: [],
   }));
 
+  // Demographic / grouping columns — these LEAD the dataset and are kept
+  // structurally separate from the psychometric items, so downstream modules
+  // (invariance, multi-group CFA, DIF, regression) can pick them as the group /
+  // criterion variable.
+  const demos = project.demographics ?? [];
+  const demoCols = demos.map((d) => {
+    let name = slug(d.name);
+    while (usedNames.has(name)) name += '_';
+    usedNames.add(name);
+    const measure: Measure = d.type === 'continuous' ? 'scale' : d.type === 'ordinal' ? 'ordinal' : 'nominal';
+    const values = d.type !== 'continuous' && d.options?.length ? d.options.map((o) => ({ value: o, label: o })) : [];
+    return { def: d, name, colType: (d.type === 'continuous' ? 'numeric' : 'string') as 'numeric' | 'string', measure, values };
+  });
+  const demoVars: VariableDef[] = demoCols.map((d) => ({
+    name: d.name, label: `${d.def.name} (${d.def.role})`, type: d.colType, measure: d.measure, values: d.values, missing: [],
+  }));
+
   // Assemble rows.
-  const data = responseRows.map((raw) => {
-    const row: Record<string, number | ''> = {};
+  const data = responseRows.map((raw, ri) => {
+    const row: Record<string, DatasetCell> = {};
+    demoCols.forEach((d) => {
+      const val = demographicRows?.[ri]?.[d.def.id];
+      if (val === undefined || val === null || val === '') row[d.name] = '';
+      else if (d.colType === 'numeric') { const nnum = Number(val); row[d.name] = Number.isFinite(nnum) ? nnum : ''; }
+      else row[d.name] = String(val);
+    });
     const revVals: Array<number | null> = items.map((it, i) => {
       const v = raw?.[i];
       return isNum(v) ? rev(v, it.reversed) : null;
@@ -111,8 +156,8 @@ export function buildSandboxDataset(project: SandboxProjectLite, responseRows: n
   });
 
   return {
-    columns: [...itemCols, ...scoreCols.map((s) => s.name)],
+    columns: [...demoCols.map((d) => d.name), ...itemCols, ...scoreCols.map((s) => s.name)],
     data,
-    variables: [...itemVars, ...scoreVars],
+    variables: [...demoVars, ...itemVars, ...scoreVars],
   };
 }

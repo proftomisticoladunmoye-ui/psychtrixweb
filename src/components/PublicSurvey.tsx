@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { CheckCircle, AlertCircle, ChevronRight, BarChart3, Clock } from 'lucide-react';
+import type { DemographicVariable } from '../lib/sandboxDataset';
 
 interface ScaleItem {
   id: string;
@@ -21,6 +22,7 @@ interface SurveyProject {
   name: string;
   description: string;
   items: ScaleItem[];
+  demographics?: DemographicVariable[];
   response_scale: ResponseScale;
 }
 
@@ -28,7 +30,7 @@ interface PublicSurveyProps {
   token: string;
 }
 
-type SurveyState = 'loading' | 'not_found' | 'intro' | 'responding' | 'submitting' | 'done' | 'error';
+type SurveyState = 'loading' | 'not_found' | 'intro' | 'demographics' | 'responding' | 'submitting' | 'done' | 'error';
 
 // On narrow screens (< ~480px) a 5-point scale needs a stacked layout.
 // Threshold: if each option would be narrower than 56px, switch to vertical.
@@ -52,6 +54,7 @@ export function PublicSurvey({ token }: PublicSurveyProps) {
   const [state, setState] = useState<SurveyState>('loading');
   const [project, setProject] = useState<SurveyProject | null>(null);
   const [answers, setAnswers] = useState<{ [itemId: string]: number }>({});
+  const [demoAnswers, setDemoAnswers] = useState<{ [demoId: string]: string | number }>({});
   const [currentItem, setCurrentItem] = useState(0);
   const [errorMsg, setErrorMsg] = useState('');
   const submittedRef = React.useRef(false);
@@ -69,7 +72,7 @@ export function PublicSurvey({ token }: PublicSurveyProps) {
     try {
       const { data, error } = await supabase
         .from('sandbox_scale_projects')
-        .select('id, name, description, items, response_scale')
+        .select('id, name, description, items, demographics, response_scale')
         .eq('shareable_link', token)
         .maybeSingle();
 
@@ -114,6 +117,7 @@ export function PublicSurvey({ token }: PublicSurveyProps) {
         respondent_id: respondentId,
         responses: responseArray,
         total_score: totalScore,
+        demographic_data: demoAnswers,
         completed: true,
       });
 
@@ -219,10 +223,65 @@ export function PublicSurvey({ token }: PublicSurveyProps) {
               <p>Please answer honestly — there are no right or wrong answers.</p>
             </div>
             <button
-              onClick={() => setState('responding')}
+              onClick={() => setState((project.demographics?.length ?? 0) > 0 ? 'demographics' : 'responding')}
               className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 rounded-xl transition flex items-center justify-center gap-2 text-lg"
             >
               Start Survey <ChevronRight className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Demographics ────────────────────────────────────────────────────────
+  if (state === 'demographics') {
+    const demos = project.demographics ?? [];
+    const allAnswered = demos.every((d) => {
+      const v = demoAnswers[d.id];
+      return v !== undefined && v !== '' && !(typeof v === 'number' && Number.isNaN(v));
+    });
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full overflow-hidden">
+          <div className="bg-gradient-to-r from-indigo-600 to-blue-700 px-8 py-8 text-white">
+            <h1 className="text-2xl font-bold mb-1">A little about you</h1>
+            <p className="text-blue-100 text-sm">These background questions help the researcher analyse the results. Your answers stay anonymous.</p>
+          </div>
+          <div className="px-8 py-6 space-y-5">
+            {demos.map((d) => (
+              <div key={d.id}>
+                <label className="block text-sm font-medium text-gray-800 mb-2">{d.name}</label>
+                {d.type === 'continuous' ? (
+                  <input
+                    type="number"
+                    value={demoAnswers[d.id] ?? ''}
+                    onChange={(e) => setDemoAnswers({ ...demoAnswers, [d.id]: e.target.value === '' ? '' : Number(e.target.value) })}
+                    className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                    placeholder="Enter a number"
+                  />
+                ) : (
+                  <select
+                    value={(demoAnswers[d.id] as string) ?? ''}
+                    onChange={(e) => setDemoAnswers({ ...demoAnswers, [d.id]: e.target.value })}
+                    className="w-full px-4 py-2.5 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">Select…</option>
+                    {(d.options ?? []).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                  </select>
+                )}
+              </div>
+            ))}
+            {errorMsg && <p className="text-sm text-red-600">{errorMsg}</p>}
+            <button
+              onClick={() => {
+                if (!allAnswered) { setErrorMsg('Please answer all background questions.'); return; }
+                setErrorMsg('');
+                setState('responding');
+              }}
+              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-4 rounded-xl transition flex items-center justify-center gap-2 text-lg"
+            >
+              Continue <ChevronRight className="w-5 h-5" />
             </button>
           </div>
         </div>
