@@ -1,4 +1,4 @@
-import test from 'node:test';
+﻿import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildSandboxDataset, SandboxProjectLite } from '../src/lib/sandboxDataset';
 
@@ -23,7 +23,7 @@ test('builds item + subscale + total columns with stable names', () => {
   ]);
 });
 
-test('applies reverse-scoring (min+max−v) to flagged items', () => {
+test('applies reverse-scoring (min+maxâˆ’v) to flagged items', () => {
   const { data } = buildSandboxDataset(project, [[3, 2, 4]]);
   // item b reversed: 1+5-2 = 4
   assert.equal(data[0].Anxiety_1, 3);
@@ -102,3 +102,36 @@ test('missing demographic answers become blank cells', () => {
   assert.equal(built.data[0].Gender, '');
   assert.equal(built.data[0].Age, '');
 });
+
+const hierProject: SandboxProjectLite = {
+  name: 'Academic Wellbeing',
+  response_scale: { type: 'likert', min: 1, max: 5, labels: [] },
+  constructs: [
+    { id: 'c1', name: 'Academic Stress', subconstructs: [
+      { id: 's1', name: 'Workload' }, { id: 's2', name: 'Exams' },
+    ] },
+  ],
+  items: [
+    { id: 'i1', content: 'Too much work', reversed: false, constructId: 'c1', subconstructId: 's1' },
+    { id: 'i2', content: 'Deadlines pile up', reversed: false, constructId: 'c1', subconstructId: 's1' },
+    { id: 'i3', content: 'Exams stress me', reversed: false, constructId: 'c1', subconstructId: 's2' },
+  ],
+};
+
+test('hierarchy: emits subconstruct + construct + grand scores with nested names', () => {
+  const built = buildSandboxDataset(hierProject, [[4, 2, 5]]);
+  assert.deepEqual(built.columns, [
+    'Academic_Stress_Workload_1', 'Academic_Stress_Workload_2', 'Academic_Stress_Exams_1',
+    'Academic_Stress_Workload_Total', 'Academic_Stress_Workload_Mean',
+    'Academic_Stress_Exams_Total', 'Academic_Stress_Exams_Mean',
+    'Academic_Stress_Total', 'Academic_Stress_Mean',
+    'Total_Score', 'Total_Mean',
+  ]);
+  const r = built.data[0];
+  assert.equal(r.Academic_Stress_Workload_Total, 6);   // 4 + 2
+  assert.equal(r.Academic_Stress_Workload_Mean, 3);
+  assert.equal(r.Academic_Stress_Exams_Total, 5);
+  assert.equal(r.Academic_Stress_Total, 11);           // 4 + 2 + 5
+  assert.equal(r.Total_Score, 11);
+});
+

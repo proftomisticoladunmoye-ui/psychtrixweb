@@ -3,11 +3,11 @@ import { supabase } from '../lib/supabase';
 import {
   FlaskConical, Plus, Edit, Trash2, AlertCircle, CheckCircle, Play, Download,
   BarChart3, Share2, Link as LinkIcon, Copy, Users, TrendingUp, Target,
-  MessageCircle, Mail, Info, Eye, Save, Sparkles, ArrowLeft, ExternalLink, Database
+  MessageCircle, Mail, Info, Eye, Save, Sparkles, ArrowLeft, ExternalLink, Database, X, Layers
 } from 'lucide-react';
 import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON } from '../lib/exportUtils';
-import { buildSandboxDataset, DemographicVariable, DemographicType, DemographicRole } from '../lib/sandboxDataset';
+import { buildSandboxDataset, resolveHierarchy, DemographicVariable, DemographicType, DemographicRole, SandboxConstruct } from '../lib/sandboxDataset';
 import {
   calculateCronbachAlpha,
   calculateCorrectedItemTotalCorrelation,
@@ -32,7 +32,9 @@ interface ScaleItem {
   id: string;
   content: string;
   reversed: boolean;
-  subscale?: string;
+  subscale?: string;        // legacy flat grouping
+  constructId?: string;
+  subconstructId?: string;
 }
 
 interface Project {
@@ -42,6 +44,7 @@ interface Project {
   status: 'draft' | 'collecting' | 'analyzed';
   items: ScaleItem[];
   subscales: string[];
+  constructs?: SandboxConstruct[];
   demographics?: DemographicVariable[];
   response_scale: {
     type: 'likert' | 'binary';
@@ -116,6 +119,11 @@ export function EnhancedPsychometricsSandbox() {
   const [newDemographic, setNewDemographic] = useState<{
     name: string; type: DemographicType; role: DemographicRole; optionsText: string;
   }>({ name: '', type: 'categorical', role: 'grouping', optionsText: '' });
+
+  // Construct hierarchy editor drafts (keyed by construct id).
+  const [newConstructName, setNewConstructName] = useState('');
+  const [subInput, setSubInput] = useState<Record<string, string>>({});
+  const [itemDraft, setItemDraft] = useState<Record<string, { content: string; subId: string; reversed: boolean }>>({});
 
   useEffect(() => {
     loadProjects();
@@ -267,6 +275,72 @@ export function EnhancedPsychometricsSandbox() {
     setCurrentProject({ ...currentProject, demographics: (currentProject.demographics ?? []).filter(d => d.id !== id) });
   };
 
+  // ---- construct / subconstruct hierarchy ------------------------------------
+  const uid = (p: string) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+  // Populate the construct tree when an instrument is opened for editing —
+  // deriving it from the legacy flat subscales the first time, so old projects
+  // migrate seamlessly and keep working.
+  const withConstructs = (p: Project): Project => {
+    if (p.constructs && p.constructs.length) return p;
+    const names = [...new Set(p.items.map(i => i.subscale).filter(Boolean))] as string[];
+    const constructs: SandboxConstruct[] = names.map(n => ({ id: uid('c_'), name: n, subconstructs: [] }));
+    const nameToId = new Map(constructs.map(c => [c.name, c.id]));
+    const items = p.items.map(i => (i.subscale ? { ...i, constructId: nameToId.get(i.subscale) } : i));
+    return { ...p, constructs, items };
+  };
+
+  const openForEdit = (project: Project) => { setCurrentProject(withConstructs(project)); setView('edit'); };
+
+  const addConstruct = () => {
+    if (!currentProject || !newConstructName.trim()) { setError('Construct needs a name'); return; }
+    const c: SandboxConstruct = { id: uid('c_'), name: newConstructName.trim(), subconstructs: [] };
+    setCurrentProject({ ...currentProject, constructs: [...(currentProject.constructs ?? []), c] });
+    setNewConstructName('');
+  };
+  const renameConstruct = (cId: string, name: string) => {
+    if (!currentProject) return;
+    setCurrentProject({ ...currentProject, constructs: (currentProject.constructs ?? []).map(c => c.id === cId ? { ...c, name } : c) });
+  };
+  const removeConstruct = (cId: string) => {
+    if (!currentProject) return;
+    setCurrentProject({
+      ...currentProject,
+      constructs: (currentProject.constructs ?? []).filter(c => c.id !== cId),
+      items: currentProject.items.filter(i => i.constructId !== cId),
+    });
+  };
+  const addSubconstruct = (cId: string) => {
+    if (!currentProject) return;
+    const name = (subInput[cId] ?? '').trim();
+    if (!name) return;
+    setCurrentProject({
+      ...currentProject,
+      constructs: (currentProject.constructs ?? []).map(c => c.id === cId ? { ...c, subconstructs: [...c.subconstructs, { id: uid('s_'), name }] } : c),
+    });
+    setSubInput({ ...subInput, [cId]: '' });
+  };
+  const removeSubconstruct = (cId: string, sId: string) => {
+    if (!currentProject) return;
+    setCurrentProject({
+      ...currentProject,
+      constructs: (currentProject.constructs ?? []).map(c => c.id === cId ? { ...c, subconstructs: c.subconstructs.filter(s => s.id !== sId) } : c),
+      items: currentProject.items.map(i => i.subconstructId === sId ? { ...i, subconstructId: undefined } : i),
+    });
+  };
+  const addHierItem = (cId: string) => {
+    if (!currentProject) return;
+    const draft = itemDraft[cId] ?? { content: '', subId: '', reversed: false };
+    if (!draft.content.trim()) { setError('Item content is required'); return; }
+    const item: ScaleItem = { id: uid('i_'), content: draft.content.trim(), reversed: draft.reversed, constructId: cId, subconstructId: draft.subId || undefined };
+    setCurrentProject({ ...currentProject, items: [...currentProject.items, item] });
+    setItemDraft({ ...itemDraft, [cId]: { content: '', subId: '', reversed: false } });
+  };
+  const toggleReverse = (itemId: string) => {
+    if (!currentProject) return;
+    setCurrentProject({ ...currentProject, items: currentProject.items.map(i => i.id === itemId ? { ...i, reversed: !i.reversed } : i) });
+  };
+
   const saveProject = async () => {
     if (!currentProject) return;
 
@@ -278,6 +352,7 @@ export function EnhancedPsychometricsSandbox() {
           description: currentProject.description,
           items: currentProject.items,
           subscales: currentProject.subscales,
+          constructs: currentProject.constructs ?? [],
           demographics: currentProject.demographics ?? [],
           response_scale: currentProject.response_scale,
           status: currentProject.status,
@@ -351,17 +426,19 @@ export function EnhancedPsychometricsSandbox() {
       const ciResult = bootstrapConfidenceInterval(responseMatrix, 1000, 0.05);
       const alphaCI: [number, number] = [ciResult.lower, ciResult.upper];
 
-      // Per-subscale alpha (subscales with at least 2 items)
-      const subscaleReliability = (currentProject.subscales ?? [])
-        .map(sub => {
-          const idxs = currentProject.items
-            .map((item, i) => (item.subscale === sub ? i : -1))
-            .filter(i => i >= 0);
-          if (idxs.length < 2) return null;
-          const subMatrix = responseMatrix.map(r => idxs.map(i => r[i]));
-          return { subscale: sub, nItems: idxs.length, alpha: calculateCronbachAlpha(subMatrix) };
-        })
-        .filter((s): s is { subscale: string; nItems: number; alpha: number } => s !== null);
+      // Per-construct and per-subconstruct alpha (groups with ≥ 2 items), using
+      // the Construct › Subconstruct hierarchy (falls back to legacy subscales).
+      const { constructs: hierC, placement } = resolveHierarchy(currentProject as any);
+      const relFor = (idxs: number[]) => calculateCronbachAlpha(responseMatrix.map(r => idxs.map(i => r[i])));
+      const subscaleReliability: Array<{ subscale: string; nItems: number; alpha: number }> = [];
+      for (const c of hierC) {
+        for (const sc of c.subconstructs) {
+          const idxs = currentProject.items.map((_, i) => (placement[i].scId === sc.id ? i : -1)).filter(i => i >= 0);
+          if (idxs.length >= 2) subscaleReliability.push({ subscale: `${c.name} / ${sc.name}`, nItems: idxs.length, alpha: relFor(idxs) });
+        }
+        const cIdxs = currentProject.items.map((_, i) => (placement[i].cId === c.id ? i : -1)).filter(i => i >= 0);
+        if (cIdxs.length >= 2) subscaleReliability.push({ subscale: c.name, nItems: cIdxs.length, alpha: relFor(cIdxs) });
+      }
 
       const numItems = currentProject.items.length;
       const totalScores = responseMatrix.map(r => r.reduce((sum, s) => sum + s, 0));
@@ -999,88 +1076,120 @@ export function EnhancedPsychometricsSandbox() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
             <div className="bg-white rounded-xl border border-gray-200 p-6">
-              <h4 className="text-lg font-bold text-gray-900 mb-4">Scale Items ({currentProject.items.length})</h4>
+              <h4 className="text-lg font-bold text-gray-900 mb-1 flex items-center gap-2">
+                <Layers className="w-5 h-5 text-blue-600" />
+                Constructs, Dimensions &amp; Items ({currentProject.items.length} items)
+              </h4>
+              <p className="text-sm text-gray-600 mb-4">
+                Build the instrument hierarchy — <b>Construct → Subconstruct/Dimension → Item</b>. A questionnaire can hold several constructs, each with several dimensions.
+              </p>
 
-              {currentProject.items.length === 0 ? (
-                <div className="p-12 border-2 border-dashed border-gray-300 rounded-lg text-center">
-                  <BarChart3 className="w-16 h-16 text-gray-400 mx-auto mb-3" />
-                  <p className="text-gray-600 font-medium mb-2">No items yet</p>
-                  <p className="text-sm text-gray-500">Add your first scale item below</p>
-                </div>
-              ) : (
-                <div className="space-y-2 max-h-96 overflow-y-auto">
-                  {currentProject.items.map((item, idx) => (
-                    <div key={item.id} className="flex items-start gap-3 p-3 bg-gray-50 rounded hover:bg-gray-100 transition">
-                      <span className="text-sm font-medium text-gray-600 mt-1">{idx + 1}.</span>
-                      <div className="flex-1">
-                        <p className="text-sm text-gray-900">{item.content}</p>
-                        <div className="flex gap-2 mt-1">
-                          {item.reversed && (
-                            <span className="text-xs px-2 py-0.5 bg-orange-100 text-orange-800 rounded">Reversed</span>
-                          )}
-                          {item.subscale && (
-                            <span className="text-xs px-2 py-0.5 bg-blue-100 text-blue-800 rounded">{item.subscale}</span>
-                          )}
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => removeItem(item.id)}
-                        className="text-red-600 hover:text-red-700"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="bg-white rounded-xl border border-gray-200 p-6">
-              <h4 className="text-lg font-bold text-gray-900 mb-4">Add New Item</h4>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Item Content</label>
-                  <textarea
-                    value={newItem.content}
-                    onChange={(e) => setNewItem({ ...newItem, content: e.target.value })}
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                    rows={3}
-                    placeholder="e.g., I feel confident in my abilities"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Subscale</label>
-                    <input
-                      type="text"
-                      value={newItem.subscale}
-                      onChange={(e) => setNewItem({ ...newItem, subscale: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                      placeholder="Optional"
-                    />
-                  </div>
-                  <div className="flex items-end">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={newItem.reversed}
-                        onChange={(e) => setNewItem({ ...newItem, reversed: e.target.checked })}
-                        className="rounded"
-                      />
-                      <span className="text-sm text-gray-700">Reversed item</span>
-                    </label>
-                  </div>
-                </div>
-
-                <button
-                  onClick={addItemToProject}
-                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition flex items-center justify-center gap-2"
-                >
-                  <Plus className="w-5 h-5" />
-                  Add Item
+              <div className="flex gap-2 mb-4">
+                <input
+                  type="text" value={newConstructName}
+                  onChange={(e) => setNewConstructName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') addConstruct(); }}
+                  placeholder="New construct, e.g., Academic Stress"
+                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                />
+                <button onClick={addConstruct} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg flex items-center gap-2">
+                  <Plus className="w-4 h-4" /> Construct
                 </button>
               </div>
+
+              {(currentProject.constructs ?? []).length === 0 ? (
+                <div className="p-10 border-2 border-dashed border-gray-300 rounded-lg text-center">
+                  <Layers className="w-14 h-14 text-gray-400 mx-auto mb-3" />
+                  <p className="text-gray-600 font-medium mb-1">No constructs yet</p>
+                  <p className="text-sm text-gray-500">Add a construct above, then add its dimensions and items.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {(currentProject.constructs ?? []).map((c) => {
+                    const cItems = currentProject.items.filter((i) => i.constructId === c.id);
+                    const draft = itemDraft[c.id] ?? { content: '', subId: '', reversed: false };
+                    return (
+                      <div key={c.id} className="border border-gray-200 rounded-xl p-4 bg-gray-50/60">
+                        <div className="flex items-center gap-2 mb-3">
+                          <input
+                            value={c.name}
+                            onChange={(e) => renameConstruct(c.id, e.target.value)}
+                            className="flex-1 px-3 py-1.5 text-base font-semibold text-gray-900 bg-white border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500"
+                          />
+                          <span className="text-xs text-gray-500 whitespace-nowrap">{cItems.length} item{cItems.length !== 1 ? 's' : ''}</span>
+                          <button onClick={() => removeConstruct(c.id)} title="Remove construct" className="text-gray-300 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5 mb-3">
+                          <span className="text-xs font-medium text-gray-500">Dimensions:</span>
+                          {c.subconstructs.length === 0 && <span className="text-xs text-gray-400">none</span>}
+                          {c.subconstructs.map((s) => (
+                            <span key={s.id} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-indigo-100 text-indigo-800 rounded-full">
+                              {s.name}
+                              <button onClick={() => removeSubconstruct(c.id, s.id)} className="hover:text-red-600"><X className="w-3 h-3" /></button>
+                            </span>
+                          ))}
+                          <input
+                            value={subInput[c.id] ?? ''}
+                            onChange={(e) => setSubInput({ ...subInput, [c.id]: e.target.value })}
+                            onKeyDown={(e) => { if (e.key === 'Enter') addSubconstruct(c.id); }}
+                            placeholder="+ dimension"
+                            className="px-2 py-0.5 text-xs border border-gray-300 rounded-full w-28 focus:ring-1 focus:ring-indigo-400"
+                          />
+                        </div>
+
+                        {cItems.length > 0 && (
+                          <div className="space-y-1.5 mb-3">
+                            {cItems.map((item) => {
+                              const sub = c.subconstructs.find((s) => s.id === item.subconstructId);
+                              return (
+                                <div key={item.id} className="flex items-start gap-2 p-2 bg-white border border-gray-200 rounded-lg">
+                                  <p className="flex-1 text-sm text-gray-800">{item.content}</p>
+                                  {sub && <span className="text-xs px-2 py-0.5 bg-indigo-50 text-indigo-700 rounded self-center">{sub.name}</span>}
+                                  <button onClick={() => toggleReverse(item.id)} title="Toggle reverse scoring"
+                                    className={`text-xs px-2 py-0.5 rounded self-center ${item.reversed ? 'bg-orange-100 text-orange-800' : 'bg-gray-100 text-gray-500'}`}>
+                                    {item.reversed ? 'Reversed' : 'Reverse?'}
+                                  </button>
+                                  <button onClick={() => removeItem(item.id)} className="text-gray-300 hover:text-red-600 self-center"><Trash2 className="w-4 h-4" /></button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        <div className="space-y-2">
+                          <textarea
+                            value={draft.content}
+                            onChange={(e) => setItemDraft({ ...itemDraft, [c.id]: { ...draft, content: e.target.value } })}
+                            rows={2} placeholder="New item text…"
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                          />
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {c.subconstructs.length > 0 && (
+                              <select
+                                value={draft.subId}
+                                onChange={(e) => setItemDraft({ ...itemDraft, [c.id]: { ...draft, subId: e.target.value } })}
+                                className="px-2 py-1.5 text-sm border border-gray-300 rounded-lg bg-white"
+                              >
+                                <option value="">(no dimension)</option>
+                                {c.subconstructs.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                              </select>
+                            )}
+                            <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
+                              <input type="checkbox" checked={draft.reversed}
+                                onChange={(e) => setItemDraft({ ...itemDraft, [c.id]: { ...draft, reversed: e.target.checked } })} className="rounded" />
+                              Reversed
+                            </label>
+                            <button onClick={() => addHierItem(c.id)} className="ml-auto px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg flex items-center gap-1.5">
+                              <Plus className="w-4 h-4" /> Add item
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Demographic & grouping variables — kept separate from the items */}
@@ -1455,10 +1564,7 @@ export function EnhancedPsychometricsSandbox() {
 
               <div className="flex gap-2">
                 <button
-                  onClick={() => {
-                    setCurrentProject(project);
-                    setView('edit');
-                  }}
+                  onClick={() => openForEdit(project)}
                   className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-lg transition flex items-center justify-center gap-2 text-sm"
                 >
                   <Edit className="w-4 h-4" />

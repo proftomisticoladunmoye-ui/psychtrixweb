@@ -6,7 +6,20 @@
 
 import type { VariableDef, Measure } from '../components/DataGridEditor';
 
-export interface SandboxItem { id: string; content: string; reversed: boolean; subscale?: string }
+export interface SandboxItem {
+  id: string;
+  content: string;
+  reversed: boolean;
+  subscale?: string;        // legacy flat grouping (retained for backward-compat)
+  constructId?: string;     // hierarchy: which construct this item belongs to
+  subconstructId?: string;  // hierarchy: which subconstruct/dimension within it
+}
+
+// Construct > Subconstruct > Item hierarchy. An instrument holds several
+// constructs, each with optional subconstructs/dimensions; items are assigned
+// to a construct and (optionally) a subconstruct within it.
+export interface SandboxSubconstruct { id: string; name: string }
+export interface SandboxConstruct { id: string; name: string; subconstructs: SandboxSubconstruct[] }
 
 // A demographic / grouping variable defined on the instrument. These are kept
 // structurally separate from the psychometric items and flow into the dataset
@@ -27,8 +40,32 @@ export interface SandboxProjectLite {
   name: string;
   items: SandboxItem[];
   subscales?: string[];
+  constructs?: SandboxConstruct[];
   demographics?: DemographicVariable[];
   response_scale: { type: 'likert' | 'binary'; min: number; max: number; labels?: string[] };
+}
+
+interface ItemPlacement { cId?: string; cName?: string; scId?: string; scName?: string }
+
+// Resolve the effective hierarchy for the dataset builder + analysis. Uses the
+// explicit constructs tree when present; otherwise derives one from the legacy
+// flat `subscale` (each distinct subscale becomes a construct) so old
+// instruments produce exactly the same columns as before.
+export function resolveHierarchy(project: SandboxProjectLite): { constructs: SandboxConstruct[]; placement: ItemPlacement[] } {
+  const items = project.items ?? [];
+  if (project.constructs && project.constructs.length) {
+    const byId = new Map(project.constructs.map((c) => [c.id, c]));
+    const placement = items.map((it) => {
+      const c = it.constructId ? byId.get(it.constructId) : undefined;
+      const sc = c && it.subconstructId ? c.subconstructs.find((s) => s.id === it.subconstructId) : undefined;
+      return { cId: c?.id, cName: c?.name, scId: sc?.id, scName: sc?.name };
+    });
+    return { constructs: project.constructs, placement };
+  }
+  const names = [...new Set(items.map((it) => it.subscale).filter(Boolean))] as string[];
+  const constructs: SandboxConstruct[] = names.map((n) => ({ id: n, name: n, subconstructs: [] }));
+  const placement: ItemPlacement[] = items.map((it) => (it.subscale ? { cId: it.subscale, cName: it.subscale } : {}));
+  return { constructs, placement };
 }
 
 export type DatasetCell = number | string | '';
@@ -67,12 +104,16 @@ export function buildSandboxDataset(
     return out;
   };
 
-  // Unique item column names.
+  // Resolve the Construct › Subconstruct hierarchy (or derive it from legacy
+  // subscales) and name item columns from it.
+  const { constructs, placement } = resolveHierarchy(project);
   const usedNames = new Set<string>();
-  const subCounters: Record<string, number> = {};
-  const itemCols = items.map((it, i) => {
+  const groupCounters: Record<string, number> = {};
+  const itemCols = items.map((_item, i) => {
+    const p = placement[i];
     let name: string;
-    if (it.subscale) { const s = slug(it.subscale); subCounters[s] = (subCounters[s] ?? 0) + 1; name = `${s}_${subCounters[s]}`; }
+    if (p.scId && p.cName && p.scName) { const key = `${p.cId}|${p.scId}`; groupCounters[key] = (groupCounters[key] ?? 0) + 1; name = `${slug(p.cName)}_${slug(p.scName)}_${groupCounters[key]}`; }
+    else if (p.cId && p.cName) { const key = p.cId; groupCounters[key] = (groupCounters[key] ?? 0) + 1; name = `${slug(p.cName)}_${groupCounters[key]}`; }
     else name = `Item${i + 1}`;
     while (usedNames.has(name)) name += '_';
     usedNames.add(name);
@@ -91,18 +132,23 @@ export function buildSandboxDataset(
     missing: [],
   }));
 
-  // Which item indices belong to each subscale (that actually has items present).
-  const subscaleNames = (project.subscales ?? []).filter((s) =>
-    items.some((it) => it.subscale === s));
-  const subscaleIdx: Record<string, number[]> = {};
-  for (const s of subscaleNames) subscaleIdx[s] = items.map((it, i) => (it.subscale === s ? i : -1)).filter((i) => i >= 0);
-
-  // Build score-column definitions (subscale totals/means, then grand total/mean).
+  // Score columns: subconstruct scores, then construct scores, then grand total.
   const scoreCols: { name: string; label: string; idxs: number[]; kind: 'sum' | 'mean' }[] = [];
-  for (const s of subscaleNames) {
-    const sName = slug(s);
-    scoreCols.push({ name: `${sName}_Total`, label: `${s} — total score`, idxs: subscaleIdx[s], kind: 'sum' });
-    scoreCols.push({ name: `${sName}_Mean`, label: `${s} — mean score`, idxs: subscaleIdx[s], kind: 'mean' });
+  for (const c of constructs) {
+    for (const sc of c.subconstructs) {
+      const idxs = items.map((_, i) => (placement[i].scId === sc.id ? i : -1)).filter((i) => i >= 0);
+      if (!idxs.length) continue;
+      const base = `${slug(c.name)}_${slug(sc.name)}`;
+      scoreCols.push({ name: `${base}_Total`, label: `${c.name} / ${sc.name} — total`, idxs, kind: 'sum' });
+      scoreCols.push({ name: `${base}_Mean`, label: `${c.name} / ${sc.name} — mean`, idxs, kind: 'mean' });
+    }
+  }
+  for (const c of constructs) {
+    const idxs = items.map((_, i) => (placement[i].cId === c.id ? i : -1)).filter((i) => i >= 0);
+    if (!idxs.length) continue;
+    const base = slug(c.name);
+    scoreCols.push({ name: `${base}_Total`, label: `${c.name} — total score`, idxs, kind: 'sum' });
+    scoreCols.push({ name: `${base}_Mean`, label: `${c.name} — mean score`, idxs, kind: 'mean' });
   }
   const allIdx = items.map((_, i) => i);
   scoreCols.push({ name: 'Total_Score', label: 'Total score (all items)', idxs: allIdx, kind: 'sum' });
