@@ -7,7 +7,8 @@ import {
 } from 'lucide-react';
 import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON } from '../lib/exportUtils';
-import { buildSandboxDataset, resolveHierarchy, parseQuestionnaireImport, validateInstrument, DemographicVariable, DemographicType, DemographicRole, SandboxConstruct, ValidationIssue } from '../lib/sandboxDataset';
+import { buildSandboxDataset, resolveHierarchy, parseQuestionnaireImport, validateInstrument, buildFactorStructure, slug as columnSlug, DemographicVariable, DemographicType, DemographicRole, SandboxConstruct, ValidationIssue } from '../lib/sandboxDataset';
+import { setHandoff, HandoffTarget } from '../lib/analysisHandoff';
 import {
   calculateCronbachAlpha,
   calculateCorrectedItemTotalCorrelation,
@@ -603,38 +604,74 @@ export function EnhancedPsychometricsSandbox() {
     };
   };
 
-  // Save the collected responses as a reusable dataset (reverse-scoring applied,
-  // item + subscale/total score columns) so it flows into any analysis module.
+  // Persist the collected responses as a reusable dataset (reverse-scoring
+  // applied; demographic + item + subconstruct/construct/total columns).
+  // Returns the new dataset's id so the analysis hand-off can target it.
+  const persistCollectedDataset = async (): Promise<{ id: string; columns: string[]; rows: number } | null> => {
+    if (!currentProject) return null;
+    const rows = await fetchRawResponses();
+    if (rows.responses.length === 0) { setError('No collected responses yet.'); return null; }
+    const built = buildSandboxDataset(currentProject, rows.responses, rows.demographics);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error('Not authenticated');
+    const { data, error: insertError } = await supabase.from('datasets').insert({
+      user_id: user.id,
+      name: `${currentProject.name} (Collected Data)`,
+      file_name: `${currentProject.name}_collected.csv`,
+      file_size: JSON.stringify(built.data).length,
+      columns: built.columns,
+      data: built.data,
+      rows_count: built.data.length,
+      metadata: {
+        source: 'sandbox',
+        sandboxProjectId: currentProject.id,
+        reverseScored: true,
+        variables: built.variables,
+        uploadedAt: new Date().toISOString(),
+      },
+    });
+    if (insertError) throw insertError;
+    const id = Array.isArray(data) ? (data[0] as any)?.id : (data as any)?.id;
+    return { id, columns: built.columns, rows: built.data.length };
+  };
+
   const saveCollectedAsDataset = async () => {
     if (!currentProject) return;
     try {
-      setDatasetBusy(true);
-      setError('');
-      const rows = await fetchRawResponses();
-      if (rows.responses.length === 0) { setError('No collected responses to save yet.'); return; }
-      const built = buildSandboxDataset(currentProject, rows.responses, rows.demographics);
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
-      const { error: insertError } = await supabase.from('datasets').insert({
-        user_id: user.id,
-        name: `${currentProject.name} (Collected Data)`,
-        file_name: `${currentProject.name}_collected.csv`,
-        file_size: JSON.stringify(built.data).length,
-        columns: built.columns,
-        data: built.data,
-        rows_count: built.data.length,
-        metadata: {
-          source: 'sandbox',
-          sandboxProjectId: currentProject.id,
-          reverseScored: true,
-          variables: built.variables,
-          uploadedAt: new Date().toISOString(),
-        },
-      });
-      if (insertError) throw insertError;
-      setSuccess(`Saved “${currentProject.name} (Collected Data)” — ${built.data.length} cases × ${built.columns.length} variables. It's now in Data Import, ready for path analysis, SEM and more.`);
+      setDatasetBusy(true); setError('');
+      const res = await persistCollectedDataset();
+      if (res) setSuccess(`Saved “${currentProject.name} (Collected Data)” — ${res.rows} cases × ${res.columns.length} variables. It's now in Data Import, ready for path analysis, SEM and more.`);
     } catch (e: any) {
       setError(e?.message || 'Could not save the dataset.');
+    } finally {
+      setDatasetBusy(false);
+    }
+  };
+
+  // Save the data and hand it to a group-based analysis module with the
+  // grouping variable + factor structure (constructs → items) pre-filled.
+  const sendToAnalysis = async (target: HandoffTarget) => {
+    if (!currentProject) return;
+    try {
+      setDatasetBusy(true); setError('');
+      const factorStructure = buildFactorStructure(currentProject as any);
+      if (Object.keys(factorStructure).length === 0) { setError('Define at least one construct with items first.'); return; }
+      if (target !== 'cfa' && !(currentProject.demographics ?? []).some(d => d.role === 'grouping')) {
+        setError('Add a grouping demographic variable (e.g., Gender) for group-based analysis.'); return;
+      }
+      const res = await persistCollectedDataset();
+      if (!res || !res.id) { setError('Could not prepare the dataset.'); return; }
+      const grouping = (currentProject.demographics ?? []).find(d => d.role === 'grouping');
+      setHandoff({
+        target,
+        datasetId: res.id,
+        datasetName: `${currentProject.name} (Collected Data)`,
+        groupVariable: grouping ? columnSlug(grouping.name) : undefined,
+        factorStructure,
+      });
+      window.dispatchEvent(new CustomEvent('navigate', { detail: 'validity-analysis' }));
+    } catch (e: any) {
+      setError(e?.message || 'Could not send to analysis.');
     } finally {
       setDatasetBusy(false);
     }
@@ -1057,6 +1094,26 @@ export function EnhancedPsychometricsSandbox() {
               <Download className="w-4 h-4" />
               Download Raw Data (CSV)
             </button>
+          </div>
+
+          <div className="mt-4 pt-4 border-t border-indigo-200">
+            <p className="text-xs font-semibold text-indigo-900 mb-2">
+              Send straight to a group-based analysis — the dataset, grouping variable and factor structure (your constructs → items) are pre-filled:
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => sendToAnalysis('invariance')} disabled={datasetBusy}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-white border border-indigo-300 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 rounded-lg font-medium">
+                <ExternalLink className="w-3.5 h-3.5" /> Measurement Invariance
+              </button>
+              <button onClick={() => sendToAnalysis('multigroup')} disabled={datasetBusy}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-white border border-indigo-300 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 rounded-lg font-medium">
+                <ExternalLink className="w-3.5 h-3.5" /> Multi-Group CFA
+              </button>
+              <button onClick={() => sendToAnalysis('cfa')} disabled={datasetBusy}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-white border border-indigo-300 hover:bg-indigo-100 disabled:opacity-50 text-indigo-700 rounded-lg font-medium">
+                <ExternalLink className="w-3.5 h-3.5" /> CFA
+              </button>
+            </div>
           </div>
         </div>
       </div>

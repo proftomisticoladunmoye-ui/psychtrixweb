@@ -1,6 +1,6 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSandboxDataset, parseQuestionnaireImport, validateInstrument, SandboxProjectLite } from '../src/lib/sandboxDataset';
+import { buildSandboxDataset, parseQuestionnaireImport, validateInstrument, buildFactorStructure, SandboxProjectLite } from '../src/lib/sandboxDataset';
 
 const project: SandboxProjectLite = {
   name: 'Wellbeing',
@@ -196,5 +196,22 @@ test('validateInstrument is clean for a well-formed instrument', () => {
     ],
   };
   assert.equal(validateInstrument(p).length, 0);
+});
+
+
+test('buildFactorStructure maps subconstruct/construct factors to item columns', () => {
+  const p: SandboxProjectLite = {
+    name: 'AW',
+    response_scale: { type: 'likert', min: 1, max: 5 },
+    constructs: [{ id: 'c1', name: 'Academic Stress', subconstructs: [{ id: 's1', name: 'Workload' }, { id: 's2', name: 'Exams' }] }],
+    items: [
+      { id: 'i1', content: 'a', reversed: false, constructId: 'c1', subconstructId: 's1' },
+      { id: 'i2', content: 'b', reversed: false, constructId: 'c1', subconstructId: 's1' },
+      { id: 'i3', content: 'c', reversed: false, constructId: 'c1', subconstructId: 's2' },
+    ],
+  };
+  const fs = buildFactorStructure(p);
+  assert.deepEqual(fs['Academic Stress / Workload'], ['Academic_Stress_Workload_1', 'Academic_Stress_Workload_2']);
+  assert.deepEqual(fs['Academic Stress / Exams'], ['Academic_Stress_Exams_1']);
 });
 

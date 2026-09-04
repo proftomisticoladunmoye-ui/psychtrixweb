@@ -162,6 +162,42 @@ export function resolveHierarchy(project: SandboxProjectLite): { constructs: San
   return { constructs, placement };
 }
 
+// Deterministic, unique item column names from the hierarchy (shared by the
+// dataset builder and the factor-structure builder so the names always match).
+function nameItemColumns(items: SandboxItem[], placement: ItemPlacement[], usedNames: Set<string>): string[] {
+  const groupCounters: Record<string, number> = {};
+  return items.map((_item, i) => {
+    const p = placement[i];
+    let name: string;
+    if (p.scId && p.cName && p.scName) { const key = `${p.cId}|${p.scId}`; groupCounters[key] = (groupCounters[key] ?? 0) + 1; name = `${slug(p.cName)}_${slug(p.scName)}_${groupCounters[key]}`; }
+    else if (p.cId && p.cName) { const key = p.cId; groupCounters[key] = (groupCounters[key] ?? 0) + 1; name = `${slug(p.cName)}_${groupCounters[key]}`; }
+    else name = `Item${i + 1}`;
+    while (usedNames.has(name)) name += '_';
+    usedNames.add(name);
+    return name;
+  });
+}
+
+/**
+ * Factor structure for CFA / measurement invariance / multi-group models:
+ * one first-order factor per subconstruct (or per construct when it has no
+ * subconstructs), mapping to the dataset's item column names. Lets the Sandbox
+ * hand a fully-specified model straight to those analysis modules.
+ */
+export function buildFactorStructure(project: SandboxProjectLite): { [factor: string]: string[] } {
+  const items = project.items ?? [];
+  const { placement } = resolveHierarchy(project);
+  const itemCols = nameItemColumns(items, placement, new Set<string>());
+  const out: { [factor: string]: string[] } = {};
+  items.forEach((_it, i) => {
+    const p = placement[i];
+    if (!p.cName) return;
+    const factor = p.scName ? `${p.cName} / ${p.scName}` : p.cName;
+    (out[factor] = out[factor] ?? []).push(itemCols[i]);
+  });
+  return out;
+}
+
 export type DatasetCell = number | string | '';
 export interface BuiltDataset {
   columns: string[];
@@ -172,7 +208,7 @@ export interface BuiltDataset {
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 // Make a safe, unique column token from a subscale/label.
-function slug(s: string): string {
+export function slug(s: string): string {
   const base = s.trim().replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Sub';
   return /^[A-Za-z]/.test(base) ? base : `S_${base}`;
 }
@@ -202,17 +238,7 @@ export function buildSandboxDataset(
   // subscales) and name item columns from it.
   const { constructs, placement } = resolveHierarchy(project);
   const usedNames = new Set<string>();
-  const groupCounters: Record<string, number> = {};
-  const itemCols = items.map((_item, i) => {
-    const p = placement[i];
-    let name: string;
-    if (p.scId && p.cName && p.scName) { const key = `${p.cId}|${p.scId}`; groupCounters[key] = (groupCounters[key] ?? 0) + 1; name = `${slug(p.cName)}_${slug(p.scName)}_${groupCounters[key]}`; }
-    else if (p.cId && p.cName) { const key = p.cId; groupCounters[key] = (groupCounters[key] ?? 0) + 1; name = `${slug(p.cName)}_${groupCounters[key]}`; }
-    else name = `Item${i + 1}`;
-    while (usedNames.has(name)) name += '_';
-    usedNames.add(name);
-    return name;
-  });
+  const itemCols = nameItemColumns(items, placement, usedNames);
 
   const rev = (raw: number, reversed: boolean) => (reversed ? min + max - raw : raw);
 

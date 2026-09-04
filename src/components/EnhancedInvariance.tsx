@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
+import { peekHandoff, clearHandoff } from '../lib/analysisHandoff';
 import {
   Users,
   Play,
@@ -244,6 +245,17 @@ export function EnhancedInvariance({ datasets, selectedDataset, onDatasetChange 
   const [diagramTheme, setDiagramTheme] = useState<'amos' | 'smartpls' | 'journal'>('amos');
   const chartRef = useRef<any>(null);
   const currentDataset = datasets.find(d => d.id === selectedDataset);
+
+  // Pre-fill the grouping variable + factor structure when arriving from the
+  // Scale Sandbox hand-off (dataset already selected by the parent tab).
+  useEffect(() => {
+    const ho = peekHandoff();
+    if (ho && ho.target === 'invariance' && ho.datasetId === selectedDataset) {
+      if (ho.groupVariable) setGroupVariable(ho.groupVariable);
+      if (ho.factorStructure && Object.keys(ho.factorStructure).length) setFactorStructure(ho.factorStructure);
+      clearHandoff();
+    }
+  }, [selectedDataset]);
 
   const addFactor = () => {
     const factorNum = Object.keys(factorStructure).length + 1;

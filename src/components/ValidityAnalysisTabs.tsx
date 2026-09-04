@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { peekHandoff } from '../lib/analysisHandoff';
 import { supabase } from '../lib/supabase';
 import {
   Target, Users, TrendingUp, CheckCircle, Network, GitBranch,
@@ -123,6 +124,14 @@ export default function ValidityAnalysisTabs() {
 
       if (error) throw error;
       setDatasets(data || []);
+
+      // Hand-off from the Scale Sandbox: jump to the requested tab and select
+      // the dataset it just created. The analysis component pre-fills the rest.
+      const ho = peekHandoff();
+      if (ho && (data || []).some((d: Dataset) => d.id === ho.datasetId)) {
+        setSelectedDataset(ho.datasetId);
+        setActiveTab(ho.target === 'multigroup' ? 'multigroup' : ho.target === 'cfa' ? 'cfa' : 'invariance');
+      }
     } catch (err: any) {
       setError(err.message);
     }
