@@ -45,6 +45,100 @@ export interface SandboxProjectLite {
   response_scale: { type: 'likert' | 'binary'; min: number; max: number; labels?: string[] };
 }
 
+// ---- questionnaire import ---------------------------------------------------
+// Parse a pasted table into the construct hierarchy. Columns are detected by a
+// header row (item / construct / subconstruct|dimension / reverse) or, without
+// one, assumed in the order: item, construct, subconstruct, reversed. Tab- or
+// comma-separated. Lets a researcher bring a whole instrument in at once.
+export interface ParsedImport { constructs: SandboxConstruct[]; items: SandboxItem[]; warnings: string[] }
+
+const REV_RE = /^(y|yes|true|1|r|rev|reverse|reversed)$/i;
+
+export function parseQuestionnaireImport(text: string): ParsedImport | { error: string } {
+  const raw = (text || '').replace(/\r/g, '').trim();
+  if (!raw) return { error: 'Nothing to import — paste a table first.' };
+  const lines = raw.split('\n').map((l) => l).filter((l) => l.trim() !== '');
+  const delim = lines[0].includes('\t') ? '\t' : lines[0].includes(',') ? ',' : '\t';
+  const rows = lines.map((l) => l.split(delim).map((c) => c.trim()));
+
+  // Header detection + column mapping.
+  const head = rows[0].map((c) => c.toLowerCase());
+  const find = (...keys: string[]) => head.findIndex((h) => keys.some((k) => h === k || h.includes(k)));
+  let itemCol = find('item', 'content', 'question', 'statement');
+  let constructCol = find('construct', 'scale', 'factor');
+  let subCol = find('subconstruct', 'dimension', 'subscale', 'facet');
+  let revCol = find('reverse', 'reversed', 'recode');
+  const hasHeader = itemCol !== -1 || constructCol !== -1;
+  if (!hasHeader) { itemCol = 0; constructCol = 1; subCol = 2; revCol = 3; }
+  if (itemCol === -1) itemCol = 0;
+
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const constructs: SandboxConstruct[] = [];
+  const cByName = new Map<string, SandboxConstruct>();
+  const items: SandboxItem[] = [];
+  const warnings: string[] = [];
+  let ci = 0;
+
+  dataRows.forEach((r, ri) => {
+    const content = (r[itemCol] ?? '').trim();
+    if (!content) return;
+    const cName = (constructCol !== -1 ? (r[constructCol] ?? '').trim() : '') || 'General';
+    const sName = subCol !== -1 ? (r[subCol] ?? '').trim() : '';
+    const reversed = revCol !== -1 ? REV_RE.test((r[revCol] ?? '').trim()) : false;
+
+    let c = cByName.get(cName);
+    if (!c) { c = { id: `c_${ci++}`, name: cName, subconstructs: [] }; cByName.set(cName, c); constructs.push(c); }
+    let scId: string | undefined;
+    if (sName) {
+      let sc = c.subconstructs.find((s) => s.name === sName);
+      if (!sc) { sc = { id: `${c.id}_s${c.subconstructs.length}`, name: sName }; c.subconstructs.push(sc); }
+      scId = sc.id;
+    }
+    items.push({ id: `i_${ri}_${Math.random().toString(36).slice(2, 6)}`, content, reversed, constructId: c.id, subconstructId: scId });
+  });
+
+  if (!items.length) return { error: 'No item rows found. Expected columns: item, construct, [dimension], [reverse].' };
+  if (constructs.length === 1 && constructs[0].name === 'General') warnings.push('No construct column detected — all items were placed under a single "General" construct.');
+  return { constructs, items, warnings };
+}
+
+// ---- structure validation ---------------------------------------------------
+export interface ValidationIssue { level: 'error' | 'warning'; message: string }
+
+export function validateInstrument(project: SandboxProjectLite): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const { constructs, placement } = resolveHierarchy(project);
+  const items = project.items ?? [];
+
+  if (constructs.length === 0) issues.push({ level: 'error', message: 'No constructs defined — add at least one construct.' });
+  if (items.length === 0) issues.push({ level: 'error', message: 'No items defined.' });
+
+  const orphan = items.filter((_, i) => !placement[i].cId).length;
+  if (orphan > 0) issues.push({ level: 'error', message: `${orphan} item${orphan > 1 ? 's are' : ' is'} not assigned to any construct.` });
+
+  items.forEach((it, i) => { if (!it.content || !it.content.trim()) issues.push({ level: 'error', message: `Item ${i + 1} has no text.` }); });
+
+  for (const c of constructs) {
+    const n = items.filter((_, i) => placement[i].cId === c.id).length;
+    if (n === 0) issues.push({ level: 'warning', message: `Construct "${c.name}" has no items.` });
+    else if (n < 2) issues.push({ level: 'warning', message: `Construct "${c.name}" has only ${n} item — reliability needs ≥ 2.` });
+    for (const sc of c.subconstructs) {
+      const sn = items.filter((_, i) => placement[i].scId === sc.id).length;
+      if (sn === 1) issues.push({ level: 'warning', message: `Dimension "${c.name} / ${sc.name}" has only 1 item.` });
+    }
+  }
+
+  const demos = project.demographics ?? [];
+  const dnames = demos.map((d) => d.name.trim().toLowerCase());
+  if (new Set(dnames).size !== dnames.length) issues.push({ level: 'error', message: 'Two demographic variables share the same name.' });
+  demos.forEach((d) => {
+    if (d.type !== 'continuous' && (!d.options || d.options.length < 2))
+      issues.push({ level: 'error', message: `Grouping variable "${d.name}" needs at least two options.` });
+  });
+
+  return issues;
+}
+
 interface ItemPlacement { cId?: string; cName?: string; scId?: string; scName?: string }
 
 // Resolve the effective hierarchy for the dataset builder + analysis. Uses the

@@ -1,6 +1,6 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSandboxDataset, SandboxProjectLite } from '../src/lib/sandboxDataset';
+import { buildSandboxDataset, parseQuestionnaireImport, validateInstrument, SandboxProjectLite } from '../src/lib/sandboxDataset';
 
 const project: SandboxProjectLite = {
   name: 'Wellbeing',
@@ -133,5 +133,68 @@ test('hierarchy: emits subconstruct + construct + grand scores with nested names
   assert.equal(r.Academic_Stress_Exams_Total, 5);
   assert.equal(r.Academic_Stress_Total, 11);           // 4 + 2 + 5
   assert.equal(r.Total_Score, 11);
+});
+
+
+test('parseQuestionnaireImport: header-mapped table -> hierarchy', () => {
+  const text = [
+    'item\tconstruct\tdimension\treverse',
+    'I feel tense\tAcademic Stress\tWorkload\tno',
+    'I feel calm\tAcademic Stress\tWorkload\tyes',
+    'Exams stress me\tAcademic Stress\tExams\t',
+    'I feel happy\tWellbeing\tMood\t',
+  ].join('\n');
+  const r = parseQuestionnaireImport(text);
+  assert.ok(!('error' in r));
+  const res = r as any;
+  assert.equal(res.constructs.length, 2);
+  assert.equal(res.constructs[0].name, 'Academic Stress');
+  assert.deepEqual(res.constructs[0].subconstructs.map(s => s.name), ['Workload', 'Exams']);
+  assert.equal(res.items.length, 4);
+  assert.equal(res.items[1].reversed, true);            // "yes"
+  assert.equal(res.items[0].constructId, res.constructs[0].id);
+  assert.equal(res.items[2].subconstructId, res.constructs[0].subconstructs[1].id); // Exams
+});
+
+test('parseQuestionnaireImport: no header falls back to column order', () => {
+  const r = parseQuestionnaireImport('Q1,Anxiety,,\nQ2,Anxiety,,r') as any;
+  assert.ok(!('error' in r));
+  assert.equal(r.constructs.length, 1);
+  assert.equal(r.constructs[0].name, 'Anxiety');
+  assert.equal(r.items[1].reversed, true);
+});
+
+test('parseQuestionnaireImport: empty input errors', () => {
+  assert.ok('error' in parseQuestionnaireImport('   '));
+});
+
+test('validateInstrument flags orphans, thin constructs and bad demographics', () => {
+  const p: SandboxProjectLite = {
+    name: 'X',
+    response_scale: { type: 'likert', min: 1, max: 5 },
+    constructs: [{ id: 'c1', name: 'Solo', subconstructs: [] }],
+    demographics: [{ id: 'g', name: 'Gender', type: 'categorical', role: 'grouping', options: ['Male'] }],
+    items: [
+      { id: 'i1', content: 'only item', reversed: false, constructId: 'c1' },
+      { id: 'i2', content: 'orphan', reversed: false },
+    ],
+  };
+  const issues = validateInstrument(p);
+  assert.ok(issues.some(x => x.level === 'error' && /not assigned/.test(x.message)));   // orphan item
+  assert.ok(issues.some(x => x.level === 'warning' && /only 1 item/.test(x.message)));  // thin construct
+  assert.ok(issues.some(x => x.level === 'error' && /at least two options/.test(x.message))); // 1-option group
+});
+
+test('validateInstrument is clean for a well-formed instrument', () => {
+  const p: SandboxProjectLite = {
+    name: 'Y',
+    response_scale: { type: 'likert', min: 1, max: 5 },
+    constructs: [{ id: 'c1', name: 'A', subconstructs: [] }],
+    items: [
+      { id: 'i1', content: 'a', reversed: false, constructId: 'c1' },
+      { id: 'i2', content: 'b', reversed: false, constructId: 'c1' },
+    ],
+  };
+  assert.equal(validateInstrument(p).length, 0);
 });
 

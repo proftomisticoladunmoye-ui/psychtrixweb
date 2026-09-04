@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON } from '../lib/exportUtils';
-import { buildSandboxDataset, resolveHierarchy, DemographicVariable, DemographicType, DemographicRole, SandboxConstruct } from '../lib/sandboxDataset';
+import { buildSandboxDataset, resolveHierarchy, parseQuestionnaireImport, validateInstrument, DemographicVariable, DemographicType, DemographicRole, SandboxConstruct, ValidationIssue } from '../lib/sandboxDataset';
 import {
   calculateCronbachAlpha,
   calculateCorrectedItemTotalCorrelation,
@@ -124,6 +124,13 @@ export function EnhancedPsychometricsSandbox() {
   const [newConstructName, setNewConstructName] = useState('');
   const [subInput, setSubInput] = useState<Record<string, string>>({});
   const [itemDraft, setItemDraft] = useState<Record<string, { content: string; subId: string; reversed: boolean }>>({});
+
+  // Phase 3: questionnaire import / preview / validate.
+  const [showImport, setShowImport] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [importMode, setImportMode] = useState<'replace' | 'append'>('replace');
+  const [showPreview, setShowPreview] = useState(false);
+  const [showValidate, setShowValidate] = useState(false);
 
   useEffect(() => {
     loadProjects();
@@ -340,6 +347,28 @@ export function EnhancedPsychometricsSandbox() {
     if (!currentProject) return;
     setCurrentProject({ ...currentProject, items: currentProject.items.map(i => i.id === itemId ? { ...i, reversed: !i.reversed } : i) });
   };
+
+  // Import a pasted questionnaire structure into the hierarchy.
+  const applyImport = () => {
+    if (!currentProject) return;
+    const parsed = parseQuestionnaireImport(importText);
+    if ('error' in parsed) { setError(parsed.error); return; }
+    if (importMode === 'replace') {
+      setCurrentProject({ ...currentProject, constructs: parsed.constructs, items: parsed.items });
+    } else {
+      setCurrentProject({
+        ...currentProject,
+        constructs: [...(currentProject.constructs ?? []), ...parsed.constructs],
+        items: [...currentProject.items, ...parsed.items],
+      });
+    }
+    setShowImport(false);
+    setImportText('');
+    setSuccess(`Imported ${parsed.items.length} items across ${parsed.constructs.length} construct(s).${parsed.warnings.length ? ' ' + parsed.warnings.join(' ') : ''}`);
+    setTimeout(() => setSuccess(''), 5000);
+  };
+
+  const validationIssues: ValidationIssue[] = currentProject ? validateInstrument(currentProject as any) : [];
 
   const saveProject = async () => {
     if (!currentProject) return;
@@ -1042,7 +1071,32 @@ export function EnhancedPsychometricsSandbox() {
             <h3 className="text-2xl font-bold text-gray-900">Edit: {currentProject.name}</h3>
             <p className="text-gray-600 mt-1">Build and refine your scale</p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={() => setShowImport(true)}
+              className="flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-lg transition text-sm"
+              title="Import a questionnaire structure from a pasted table"
+            >
+              <Download className="w-4 h-4 rotate-180" />
+              Import
+            </button>
+            <button
+              onClick={() => setShowPreview(true)}
+              className="flex items-center gap-2 px-3 py-2 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded-lg transition text-sm"
+            >
+              <Eye className="w-4 h-4" />
+              Preview
+            </button>
+            <button
+              onClick={() => setShowValidate(true)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg transition text-sm border ${
+                validationIssues.some(i => i.level === 'error') ? 'bg-red-50 border-red-300 text-red-700'
+                : validationIssues.length ? 'bg-amber-50 border-amber-300 text-amber-800'
+                : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+            >
+              <CheckCircle className="w-4 h-4" />
+              Validate{validationIssues.length ? ` (${validationIssues.length})` : ''}
+            </button>
             <button
               onClick={saveProject}
               className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition"
@@ -1058,6 +1112,114 @@ export function EnhancedPsychometricsSandbox() {
             </button>
           </div>
         </div>
+
+        {/* ── Import modal ─────────────────────────────────────────────── */}
+        {showImport && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowImport(false)}>
+            <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6 space-y-4 max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2"><Download className="w-5 h-5 text-blue-600 rotate-180" />Import Questionnaire Structure</h3>
+              <p className="text-sm text-gray-600">
+                Paste a table (from Excel/Sheets) with one row per item. Columns: <b>item</b>, <b>construct</b>, <b>dimension</b> (optional), <b>reverse</b> (optional; yes/no).
+                A header row is auto-detected; otherwise columns are read in that order.
+              </p>
+              <textarea
+                value={importText} onChange={(e) => setImportText(e.target.value)} rows={9} autoFocus
+                placeholder={'item\tconstruct\tdimension\treverse\nI feel tense\tAcademic Stress\tWorkload\tno\nI feel calm\tAcademic Stress\tWorkload\tyes'}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-blue-500"
+              />
+              <div className="flex flex-wrap items-center gap-4 text-sm">
+                <label className="flex items-center gap-2 cursor-pointer"><input type="radio" checked={importMode === 'replace'} onChange={() => setImportMode('replace')} />Replace current structure</label>
+                <label className="flex items-center gap-2 cursor-pointer"><input type="radio" checked={importMode === 'append'} onChange={() => setImportMode('append')} />Append</label>
+              </div>
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setShowImport(false)} className="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg text-gray-800">Cancel</button>
+                <button onClick={applyImport} disabled={!importText.trim()} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg">Import</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Preview modal ────────────────────────────────────────────── */}
+        {showPreview && (() => {
+          const { constructs, placement } = resolveHierarchy(currentProject as any);
+          const items = currentProject.items;
+          const scale = currentProject.response_scale;
+          return (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowPreview(false)}>
+              <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6 space-y-4 max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2"><Layers className="w-5 h-5 text-blue-600" />Questionnaire Preview</h3>
+                  <button onClick={() => setShowPreview(false)}><X className="w-5 h-5 text-gray-500" /></button>
+                </div>
+                <div className="flex flex-wrap gap-3 text-sm">
+                  <span className="px-2 py-1 bg-gray-100 rounded">{constructs.length} constructs</span>
+                  <span className="px-2 py-1 bg-gray-100 rounded">{constructs.reduce((s, c) => s + c.subconstructs.length, 0)} dimensions</span>
+                  <span className="px-2 py-1 bg-gray-100 rounded">{items.length} items</span>
+                  <span className="px-2 py-1 bg-gray-100 rounded">{(currentProject.demographics ?? []).length} grouping vars</span>
+                  <span className="px-2 py-1 bg-gray-100 rounded">Scale: {scale.type} {scale.min}–{scale.max}</span>
+                </div>
+                {(currentProject.demographics ?? []).length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase mb-1">Demographics & Grouping</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(currentProject.demographics ?? []).map((d) => (
+                        <span key={d.id} className="text-xs px-2 py-0.5 bg-indigo-50 text-indigo-700 rounded">{d.name} · {d.type} · {d.role}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="space-y-3">
+                  {constructs.map((c) => (
+                    <div key={c.id} className="border border-gray-200 rounded-lg p-3">
+                      <p className="font-semibold text-gray-900">{c.name} <span className="text-xs font-normal text-gray-500">({items.filter((_, i) => placement[i].cId === c.id).length} items)</span></p>
+                      {/* items grouped by dimension */}
+                      {[{ id: undefined as string | undefined, name: '(no dimension)' }, ...c.subconstructs].map((sc) => {
+                        const grp = items.filter((_, i) => placement[i].cId === c.id && placement[i].scId === sc.id);
+                        if (!grp.length) return null;
+                        return (
+                          <div key={sc.id ?? 'none'} className="mt-2 ml-2">
+                            {c.subconstructs.length > 0 && <p className="text-xs font-medium text-indigo-700">{sc.name}</p>}
+                            <ol className="list-decimal list-inside text-sm text-gray-700 ml-1">
+                              {grp.map((it) => <li key={it.id}>{it.content}{it.reversed && <span className="ml-1 text-xs text-orange-700">(R)</span>}</li>)}
+                            </ol>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                  {constructs.length === 0 && <p className="text-sm text-gray-500">No constructs defined yet.</p>}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ── Validate modal ───────────────────────────────────────────── */}
+        {showValidate && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowValidate(false)}>
+            <div className="bg-white rounded-xl shadow-xl max-w-lg w-full p-6 space-y-4 max-h-[90vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2"><CheckCircle className="w-5 h-5 text-blue-600" />Structure Validation</h3>
+                <button onClick={() => setShowValidate(false)}><X className="w-5 h-5 text-gray-500" /></button>
+              </div>
+              {validationIssues.length === 0 ? (
+                <div className="p-4 bg-green-50 border border-green-200 rounded-lg flex items-start gap-2">
+                  <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                  <p className="text-sm text-green-800">The instrument structure looks good — ready for analysis.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {validationIssues.map((iss, i) => (
+                    <div key={i} className={`p-3 rounded-lg flex items-start gap-2 border ${iss.level === 'error' ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
+                      <AlertCircle className={`w-4 h-4 flex-shrink-0 mt-0.5 ${iss.level === 'error' ? 'text-red-600' : 'text-amber-600'}`} />
+                      <p className={`text-sm ${iss.level === 'error' ? 'text-red-800' : 'text-amber-800'}`}>{iss.message}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
