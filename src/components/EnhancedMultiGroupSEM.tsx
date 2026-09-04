@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
+import { peekHandoff, clearHandoff } from '../lib/analysisHandoff';
 import {
   Users,
   Play,
@@ -151,6 +152,17 @@ export function EnhancedMultiGroupSEM({ datasets, selectedDataset, onDatasetChan
 
   const chartRef = useRef<any>(null);
   const currentDataset = datasets.find(d => d.id === selectedDataset);
+
+  // Pre-fill from the Scale Sandbox hand-off (grouping variable + measurement
+  // model = constructs → items). Structural paths still need to be drawn.
+  useEffect(() => {
+    const ho = peekHandoff();
+    if (ho && ho.target === 'multigroup' && ho.datasetId === selectedDataset) {
+      if (ho.groupVariable) setGroupVariable(ho.groupVariable);
+      if (ho.factorStructure && Object.keys(ho.factorStructure).length) setMeasurementModel(ho.factorStructure);
+      clearHandoff();
+    }
+  }, [selectedDataset]);
 
   const addLatentVariable = () => {
     const factorNum = Object.keys(measurementModel).length + 1;

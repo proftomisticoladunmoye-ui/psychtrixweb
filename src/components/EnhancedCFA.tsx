@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
+import { peekHandoff, clearHandoff } from '../lib/analysisHandoff';
 import {
   Network,
   Play,
@@ -131,6 +132,16 @@ export function EnhancedCFA({ datasets, selectedDataset, onDatasetChange }: Enha
   const pathDiagramRef = useRef<HTMLDivElement>(null);
 
   const currentDataset = datasets.find(d => d.id === selectedDataset);
+
+  // Pre-fill the factor structure (constructs → items) from the Scale Sandbox
+  // hand-off when arriving with a "cfa" target.
+  useEffect(() => {
+    const ho = peekHandoff();
+    if (ho && ho.target === 'cfa' && ho.datasetId === selectedDataset) {
+      if (ho.factorStructure && Object.keys(ho.factorStructure).length) setFactorStructure(ho.factorStructure);
+      clearHandoff();
+    }
+  }, [selectedDataset]);
 
   const addFactor = () => {
     const factorNum = Object.keys(factorStructure).length + 1;
