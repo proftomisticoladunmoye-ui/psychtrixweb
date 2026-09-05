@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Plus, Upload, FileText, Eye, Trash2, ArrowLeft, Save, Send, Undo2, ExternalLink,
   CheckCircle2, Circle, AlertTriangle, Loader2, X, Search, BookOpen, CreditCard, Archive,
+  MessageSquare, Reply, Check, Ban,
 } from 'lucide-react';
 import { RichEditor } from './RichEditor';
 
@@ -15,6 +16,15 @@ async function rn(path: string, opts: RequestInit = {}) {
       ...(token() ? { Authorization: `Bearer ${token()}` } : {}),
       ...(opts.headers as any),
     },
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error || `Request failed (${res.status})`);
+  return body;
+}
+async function rnc(path: string, opts: RequestInit = {}) {
+  const res = await fetch('/api/rn-comments' + path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', ...(token() ? { Authorization: `Bearer ${token()}` } : {}), ...(opts.headers as any) },
   });
   const body = await res.json().catch(() => null);
   if (!res.ok) throw new Error(body?.error || `Request failed (${res.status})`);
@@ -45,7 +55,8 @@ const STATUS_LABEL: Record<string, string> = {
 const pad3 = (n: number | null | undefined) => (n == null ? '—' : String(n).padStart(3, '0'));
 
 export function ResearchNotesAdmin() {
-  const [mode, setMode] = useState<'list' | 'edit'>('list');
+  const [mode, setMode] = useState<'list' | 'edit' | 'comments'>('list');
+  const [pendingComments, setPendingComments] = useState(0);
   const [notes, setNotes] = useState<Note[]>([]);
   const [meta, setMeta] = useState<{ note_types: string[]; licenses: Record<string, any>; statuses: string[]; storage?: string } | null>(null);
   const [editing, setEditing] = useState<Note | null>(null);
@@ -65,6 +76,7 @@ export function ResearchNotesAdmin() {
       setMeta(m);
     } catch (e: any) { setError(e.message); }
     finally { setLoading(false); }
+    try { const { counts } = await rnc('/?status=pending'); setPendingComments(counts?.pending || 0); } catch { /* ignore */ }
   };
   useEffect(() => { load(); }, []);
 
@@ -111,6 +123,10 @@ export function ResearchNotesAdmin() {
 
   const filtered = notes.filter((n) => statusFilter === 'all' || n.status === statusFilter);
 
+  if (mode === 'comments') {
+    return <CommentsModeration onBack={() => { setMode('list'); load(); }} />;
+  }
+
   if (mode === 'edit' && editing) {
     return (
       <NoteEditor
@@ -139,6 +155,11 @@ export function ResearchNotesAdmin() {
             className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700">
             <ExternalLink className="w-4 h-4" /> Public hub
           </a>
+          <button onClick={() => setMode('comments')}
+            className="relative flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700">
+            <MessageSquare className="w-4 h-4" /> Moderation
+            {pendingComments > 0 && <span className="absolute -top-2 -right-2 bg-red-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">{pendingComments}</span>}
+          </button>
           <button onClick={() => fileRef.current?.click()} disabled={busy}
             className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-300 text-blue-700 rounded-lg hover:bg-blue-50 font-medium disabled:opacity-50">
             {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />} Upload Word (.docx)
@@ -577,6 +598,115 @@ function InternalCitationsEditor({ selfId, value, onChange }: { selfId: string; 
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ============================================================================
+//  Comment moderation inbox
+// ============================================================================
+interface Comment {
+  id: string; note_id: string; parent_id: string | null; note_number: number | null; slug: string;
+  note_title: string; author_name: string; author_email?: string; author_affiliation?: string;
+  author_orcid?: string; body: string; status: string; is_editor_reply: boolean; created_at: string;
+}
+const CMT_STATUS_STYLE: Record<string, string> = {
+  pending: 'bg-amber-100 text-amber-800', approved: 'bg-green-100 text-green-800',
+  rejected: 'bg-gray-200 text-gray-600', spam: 'bg-red-100 text-red-700',
+};
+
+function CommentsModeration({ onBack }: { onBack: () => void }) {
+  const [status, setStatus] = useState('pending');
+  const [items, setItems] = useState<Comment[]>([]);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [replyTo, setReplyTo] = useState<Comment | null>(null);
+  const [replyText, setReplyText] = useState('');
+
+  const load = async (s = status) => {
+    setLoading(true);
+    try { const { data, counts } = await rnc('/?status=' + s); setItems(data || []); setCounts(counts || {}); }
+    catch (e: any) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(status); /* eslint-disable-next-line */ }, [status]);
+
+  const act = async (id: string, s: string) => {
+    try { await rnc(`/${id}/status`, { method: 'POST', body: JSON.stringify({ status: s }) }); load(); }
+    catch (e: any) { setError(e.message); }
+  };
+  const del = async (id: string) => {
+    if (!confirm('Delete this comment permanently?')) return;
+    try { await rnc('/' + id, { method: 'DELETE' }); setItems((x) => x.filter((c) => c.id !== id)); }
+    catch (e: any) { setError(e.message); }
+  };
+  const sendReply = async () => {
+    if (!replyTo || !replyText.trim()) return;
+    try {
+      await rnc('/reply', { method: 'POST', body: JSON.stringify({ note_id: replyTo.note_id, parent_id: replyTo.id, body: replyText.trim() }) });
+      setReplyTo(null); setReplyText(''); load();
+    } catch (e: any) { setError(e.message); }
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center gap-3">
+        <button onClick={onBack} className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700"><ArrowLeft className="w-4 h-4" /> Back</button>
+        <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2"><MessageSquare className="w-6 h-6 text-blue-600" /> Discussion moderation</h1>
+      </div>
+      {error && <Banner tone="error" onClose={() => setError('')}>{error}</Banner>}
+
+      <div className="flex flex-wrap gap-2">
+        {['pending', 'approved', 'spam', 'rejected', 'all'].map((s) => (
+          <button key={s} onClick={() => setStatus(s)}
+            className={`px-3 py-1.5 rounded-full text-sm border capitalize ${status === s ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>
+            {s} {s !== 'all' && <span className="opacity-70">{counts[s] ?? 0}</span>}
+          </button>
+        ))}
+      </div>
+
+      {loading ? (
+        <div className="flex justify-center py-16"><Loader2 className="w-8 h-8 text-blue-600 animate-spin" /></div>
+      ) : items.length === 0 ? (
+        <div className="text-center py-16 bg-white border border-gray-200 rounded-xl text-gray-500">No {status === 'all' ? '' : status} comments.</div>
+      ) : (
+        <div className="space-y-3">
+          {items.map((c) => (
+            <div key={c.id} className="bg-white border border-gray-200 rounded-xl p-4">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <span className="font-semibold text-gray-900">{c.author_name}</span>
+                  {c.is_editor_reply && <span className="ml-2 text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded">Editor reply</span>}
+                  <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${CMT_STATUS_STYLE[c.status]}`}>{c.status}</span>
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    {[c.author_email, c.author_affiliation, c.author_orcid ? `ORCID ${c.author_orcid}` : null].filter(Boolean).join(' · ')}
+                  </div>
+                </div>
+                <a href={`/research-notes/${pad3(c.note_number)}-${c.slug}#discussion`} target="_blank" rel="noopener"
+                  className="text-xs text-blue-600 hover:underline">on RN {pad3(c.note_number)} · {c.note_title.slice(0, 40)}</a>
+              </div>
+              <p className="text-sm text-gray-800 mt-2 whitespace-pre-wrap">{c.body}</p>
+              <div className="flex items-center gap-2 mt-3 flex-wrap">
+                {c.status !== 'approved' && <button onClick={() => act(c.id, 'approved')} className="flex items-center gap-1 px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700"><Check className="w-4 h-4" /> Approve</button>}
+                {c.status !== 'rejected' && <button onClick={() => act(c.id, 'rejected')} className="flex items-center gap-1 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700"><Ban className="w-4 h-4" /> Reject</button>}
+                {c.status !== 'spam' && <button onClick={() => act(c.id, 'spam')} className="flex items-center gap-1 px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded-lg hover:bg-red-50">Spam</button>}
+                {!c.is_editor_reply && <button onClick={() => { setReplyTo(c); setReplyText(''); }} className="flex items-center gap-1 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700"><Reply className="w-4 h-4" /> Reply</button>}
+                <button onClick={() => del(c.id)} className="flex items-center gap-1 px-3 py-1.5 text-sm text-red-500 hover:bg-red-50 rounded-lg ml-auto"><Trash2 className="w-4 h-4" /></button>
+              </div>
+              {replyTo?.id === c.id && (
+                <div className="mt-3 border-t border-gray-100 pt-3">
+                  <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} rows={3} placeholder="Write an editor reply (posts publicly, approved)…" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                  <div className="flex gap-2 mt-2">
+                    <button onClick={sendReply} className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">Post reply</button>
+                    <button onClick={() => setReplyTo(null)} className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-600">Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

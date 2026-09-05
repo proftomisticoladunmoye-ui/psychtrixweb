@@ -10,6 +10,7 @@ import {
 import { bibtex, ris, suggestedCitation } from './rn-citations.js';
 import { importDocx } from './rn-docx.js';
 import { putImage, getMediaForServe, listMedia, externalizeDataUriImages, isAllowedImage, storageMode } from './rn-storage.js';
+import * as comments from './rn-comments.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -21,6 +22,20 @@ const RN_CSP = [
   "frame-src https://www.youtube-nocookie.com https://www.youtube.com https://player.vimeo.com",
   "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'", "object-src 'none'",
 ].join('; ');
+
+// Small in-memory limiter for public comment submissions (per IP).
+function makeLimiter({ windowMs, max }) {
+  const hits = new Map();
+  return (req, res, next) => {
+    const ip = req.ip || 'unknown';
+    const now = Date.now();
+    let e = hits.get(ip);
+    if (!e || e.resetAt <= now) { e = { count: 0, resetAt: now + windowMs }; hits.set(ip, e); }
+    if (++e.count > max) return res.status(429).send('Too many submissions. Please try again later.');
+    next();
+  };
+}
+const commentLimiter = makeLimiter({ windowMs: 10 * 60 * 1000, max: 6 });
 
 function baseUrl(req) {
   if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/$/, '');
@@ -119,9 +134,34 @@ export function mountResearchNotes(app) {
     // Canonicalize the URL (SEO: one address per note) — 301 to the number-slug form.
     const canonical = canonicalPath(note);
     if (req.path !== canonical) return res.redirect(301, canonical);
+    note.comments = await comments.getApprovedComments(note.id);
     data.bumpView(note.id, { referrer: req.headers.referer || null }).catch(() => {});
-    sendHtml(res, renderArticle(note, { baseUrl: baseUrl(req) }));
+    const flash = req.query.discussion === 'pending' ? 'comment-pending'
+      : req.query.discussion === 'error' ? 'comment-error' : null;
+    sendHtml(res, renderArticle(note, { baseUrl: baseUrl(req), flash }));
   }));
+
+  // ---- public comment submission (no account; moderated) ------------------
+  app.post('/research-notes/:seg/comments', commentLimiter,
+    express.urlencoded({ extended: false, limit: '64kb' }),
+    wrap(async (req, res) => {
+      const note = await data.getPublishedBySegment(req.params.seg);
+      if (!note) return res.status(404).send('Not found');
+      const back = (flag) => res.redirect(303, `${canonicalPath(note)}?discussion=${flag}#discussion`);
+      const b = req.body || {};
+      if (b.website) return back('pending');            // honeypot tripped — silently drop
+      const name = String(b.author_name || '').trim();
+      const email = String(b.author_email || '').trim();
+      const body = String(b.body || '').trim();
+      if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || body.length < 2) return back('error');
+      await comments.submitComment(note.id, {
+        author_name: name.slice(0, 120), author_email: email.slice(0, 200),
+        author_affiliation: String(b.author_affiliation || '').trim().slice(0, 200) || null,
+        author_orcid: String(b.author_orcid || '').trim().slice(0, 40) || null,
+        body: body.slice(0, 5000), ip: req.ip, created_by: req.user?.id || null,
+      });
+      back('pending');
+    }));
 
   // ======================================================================
   //  Editor JSON API  (/api/research-notes/*)  — requireEditor
@@ -233,4 +273,23 @@ export function mountResearchNotes(app) {
   }));
 
   app.use('/api/research-notes', api);
+
+  // ---- comment moderation API (separate mount to avoid /:id collisions) ---
+  const cmt = express.Router();
+  cmt.use(requireEditor);
+  cmt.get('/', wrap(async (req, res) => res.json({
+    data: await comments.listForModeration(req.query.status || 'pending'),
+    counts: await comments.moderationCounts(),
+  })));
+  cmt.post('/:id/status', wrap(async (req, res) => {
+    const row = await comments.setStatus(req.params.id, req.body?.status, req.user.id);
+    res.json({ data: row });
+  }));
+  cmt.post('/reply', wrap(async (req, res) => {
+    const { note_id, parent_id, body } = req.body || {};
+    if (!note_id || !body?.trim()) return res.status(400).json({ error: 'note_id and body are required' });
+    res.json({ data: await comments.editorReply(note_id, parent_id || null, body.trim(), req.user) });
+  }));
+  cmt.delete('/:id', wrap(async (req, res) => { await comments.deleteComment(req.params.id); res.json({ data: { id: req.params.id } }); }));
+  app.use('/api/rn-comments', cmt);
 }

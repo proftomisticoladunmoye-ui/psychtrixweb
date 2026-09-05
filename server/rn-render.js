@@ -146,7 +146,31 @@ footer.site .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:
 .filters input,.filters select{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:14px}
 .pill{display:inline-block;font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:3px 10px;margin:0 6px 6px 0}
 .empty{color:var(--muted);padding:40px 0}
-@media print{
+.invite{background:linear-gradient(135deg,#0e63d6,#0b4bb0);color:#fff;border-radius:12px;padding:18px;margin:0 0 18px}
+.invite h3{color:#fff;text-transform:none;letter-spacing:0;font-size:16px;margin:0 0 6px}
+.invite p{font-size:13.5px;color:#dbe7fb;margin:0 0 12px}
+.invite a{display:block;text-align:center;background:#fff;color:var(--brand);font-weight:700;border-radius:9px;padding:9px 12px}
+.invite a:hover{text-decoration:none;background:#f0f5ff}
+.discussion{margin-top:44px}
+.cmt{border-top:1px solid var(--line);padding:16px 0}
+.cmt .who{font-weight:600;color:var(--ink)}
+.cmt .meta{font-size:13px;color:var(--muted);margin:0 0 6px}
+.cmt .text{white-space:pre-wrap}
+.cmt.editor{background:var(--brand-soft);border:1px solid #cfe0fb;border-radius:10px;padding:14px 16px;margin:12px 0}
+.cmt .replies{margin:12px 0 0 20px;border-left:2px solid var(--line);padding-left:16px}
+.cmt-tag{display:inline-block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--brand);background:#fff;border:1px solid #cfe0fb;border-radius:5px;padding:1px 6px;margin-left:6px}
+.cmt-form{background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:18px;margin:18px 0}
+.cmt-form h3{margin:0 0 4px;font-size:16px}
+.cmt-form p.help{font-size:13px;color:var(--muted);margin:0 0 12px}
+.cmt-form .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:560px){.cmt-form .row{grid-template-columns:1fr}}
+.cmt-form input,.cmt-form textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit;font-size:14px;margin:0 0 10px;background:#fff}
+.cmt-form textarea{min-height:110px;resize:vertical}
+.cmt-form button{background:var(--brand);color:#fff;border:0;border-radius:9px;padding:10px 18px;font-weight:600;cursor:pointer}
+.cmt-form button:hover{background:#0b53b4}
+.cmt-form .hp{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
+.flash{background:#e7f6ec;border:1px solid #b7e2c5;color:#1b6b3a;border-radius:10px;padding:12px 16px;margin:16px 0}
+@media print{.discussion,.cmt-form,.invite{display:none !important}
   header.site,footer.site,.aside,.crumbs,.share,.no-print{display:none !important}
   .layout{grid-template-columns:1fr;gap:0}
   body{font-size:12pt;color:#000}
@@ -273,6 +297,59 @@ function infoCard(note) {
   </div>`;
 }
 
+function inviteCard(baseUrl) {
+  return `<div class="invite">
+    <h3>New to PsychtrixWeb?</h3>
+    <p>A free platform for psychometric analysis — SEM, IRT, network analysis, CFA, measurement invariance and more, right in your browser.</p>
+    <a href="${esc(baseUrl)}/">Create a free account</a>
+  </div>`;
+}
+
+function oneComment(c) {
+  const aff = [c.author_affiliation, c.author_orcid ? `ORCID ${esc(c.author_orcid)}` : null].filter(Boolean).map(esc).join(' · ');
+  const body = esc(c.body);
+  const replies = (c.replies || []).map(oneComment).join('');
+  return `<div class="cmt${c.is_editor_reply ? ' editor' : ''}">
+    <div class="who">${esc(c.author_name)}${c.is_editor_reply ? '<span class="cmt-tag">Editor</span>' : ''}</div>
+    <div class="meta">${aff ? aff + ' · ' : ''}${esc(fmtDate(c.created_at))}</div>
+    <div class="text">${body}</div>
+    ${replies ? `<div class="replies">${replies}</div>` : ''}
+  </div>`;
+}
+
+function discussionHtml(note, canonicalUrl, flash) {
+  const comments = note.comments || [];
+  const count = comments.reduce((n, c) => n + 1 + (c.replies?.length || 0), 0);
+  const list = comments.length
+    ? comments.map(oneComment).join('')
+    : `<p style="color:var(--muted)">No comments yet. Start the scholarly discussion below.</p>`;
+  const flashHtml = flash === 'comment-pending'
+    ? `<div class="flash">Thank you — your comment has been submitted and will appear here once it has been reviewed by an editor.</div>`
+    : flash === 'comment-error'
+    ? `<div class="flash" style="background:#fdecec;border-color:#f5c2c2;color:#a12626">Your comment could not be submitted. Please provide your name, a valid email, and a comment, then try again.</div>` : '';
+  return `<section class="discussion" id="discussion">
+    <h2 class="section-h">Discuss this Research Note${count ? ` (${count})` : ''}</h2>
+    <p style="color:var(--muted);font-size:14.5px;margin:-4px 0 12px">Scholarly comments are welcome from anyone — no account required. Contributions are moderated before they appear.</p>
+    ${flashHtml}
+    ${list}
+    <form class="cmt-form" method="post" action="${esc(canonicalPath(note))}/comments">
+      <h3>Add a comment</h3>
+      <p class="help">Your email is kept private (used only for moderation) and is never published.</p>
+      <input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true" />
+      <div class="row">
+        <input type="text" name="author_name" required maxlength="120" placeholder="Full name *" />
+        <input type="email" name="author_email" required maxlength="200" placeholder="Email (not published) *" />
+      </div>
+      <div class="row">
+        <input type="text" name="author_affiliation" maxlength="200" placeholder="Affiliation (optional)" />
+        <input type="text" name="author_orcid" maxlength="40" placeholder="ORCID (optional)" />
+      </div>
+      <textarea name="body" required maxlength="5000" placeholder="Contribute to the scholarly discussion…"></textarea>
+      <button type="submit">Submit for moderation</button>
+    </form>
+  </section>`;
+}
+
 function jsonLdArticle(note, canonicalUrl) {
   const authors = (note.authors || []).map((a) => ({
     '@type': 'Person', name: a.full_name,
@@ -300,7 +377,7 @@ function jsonLdArticle(note, canonicalUrl) {
 }
 
 // ---- public exports --------------------------------------------------------
-export function renderArticle(note, { baseUrl }) {
+export function renderArticle(note, { baseUrl, flash }) {
   const canonicalUrl = baseUrl + canonicalPath(note);
   const metaTags = citationMetaTags(note, canonicalUrl);
   const og = [
@@ -336,8 +413,10 @@ export function renderArticle(note, { baseUrl }) {
       ${referencesHtml(note)}
       <h2 class="section-h">Suggested citation</h2>
       <div class="suggested"><code>${esc(apaCitation(note, canonicalUrl))}</code></div>
+      ${discussionHtml(note, canonicalUrl, flash)}
     </article>
     <aside class="aside">
+      ${inviteCard(baseUrl)}
       ${citeCard(note, canonicalUrl)}
       ${shareCard(note, canonicalUrl)}
       ${infoCard(note)}

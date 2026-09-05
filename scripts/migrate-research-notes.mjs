@@ -137,6 +137,27 @@ const statements = [
      created_at timestamptz NOT NULL DEFAULT now()
    )`,
   `CREATE INDEX IF NOT EXISTS rnpv_note_idx ON rn_page_views(note_id, created_at DESC)`,
+
+  // ---- moderated scholarly discussion (public can submit; editors approve) --
+  `CREATE TABLE IF NOT EXISTS rn_comments (
+     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+     note_id uuid NOT NULL REFERENCES research_notes(id) ON DELETE CASCADE,
+     parent_id uuid REFERENCES rn_comments(id) ON DELETE CASCADE,
+     author_name text NOT NULL,
+     author_email text,                 -- private: used for accountability, never rendered publicly
+     author_affiliation text,
+     author_orcid text,
+     body text NOT NULL,
+     status text NOT NULL DEFAULT 'pending',   -- pending | approved | rejected | spam
+     is_editor_reply boolean NOT NULL DEFAULT false,
+     created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+     ip text,
+     approved_at timestamptz,
+     approved_by uuid REFERENCES users(id) ON DELETE SET NULL,
+     created_at timestamptz NOT NULL DEFAULT now()
+   )`,
+  `CREATE INDEX IF NOT EXISTS rncmt_note_status_idx ON rn_comments(note_id, status, created_at)`,
+  `CREATE INDEX IF NOT EXISTS rncmt_status_idx ON rn_comments(status, created_at DESC)`,
 ];
 
 await client.connect();
