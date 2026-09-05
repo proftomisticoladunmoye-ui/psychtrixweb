@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
-  Plus, Trash2, ClipboardPaste, Save, X, Table2, AlertCircle, Grid3x3, Columns3,
+  Plus, Trash2, ClipboardPaste, Save, FilePlus, X, Table2, AlertCircle, Grid3x3, Columns3,
   Ruler, BarChart3, CircleDot, Tags, Eye, EyeOff, ChevronUp, ChevronDown,
 } from 'lucide-react';
 
@@ -33,8 +33,12 @@ interface DataGridEditorProps {
   initialVariables?: VariableDef[]; // preserve measurement level / value labels when editing a saved dataset
   heading?: string;
   saveLabel?: string;
+  saveAsNewLabel?: string;
   saving?: boolean;
   onSave: (name: string, columns: string[], rows: string[][], variables: VariableDef[]) => void | Promise<void>;
+  // When provided (edit mode), a secondary button saves the current grid as a
+  // brand-new dataset instead of overwriting the one being edited.
+  onSaveAsNew?: (name: string, columns: string[], rows: string[][], variables: VariableDef[]) => void | Promise<void>;
   onCancel: () => void;
 }
 
@@ -67,7 +71,7 @@ function rectangular(rows: string[][], width: number): string[][] {
   });
 }
 
-export function DataGridEditor({ initialColumns, initialRows, initialName, initialVariables, heading, saveLabel, saving, onSave, onCancel }: DataGridEditorProps) {
+export function DataGridEditor({ initialColumns, initialRows, initialName, initialVariables, heading, saveLabel, saveAsNewLabel, saving, onSave, onSaveAsNew, onCancel }: DataGridEditorProps) {
   const [variables, setVariables] = useState<VariableDef[]>(
     initialVariables && initialVariables.length
       ? initialVariables.map((v) => ({ ...v, values: v.values.map((x) => ({ ...x })), missing: [...v.missing] }))
@@ -211,18 +215,46 @@ export function DataGridEditor({ initialColumns, initialRows, initialName, initi
     return [...seen].sort((a, b) => (Number(a) - Number(b)) || a.localeCompare(b));
   };
 
-  const handleSave = async () => {
+  // Validate the grid and return the payload to persist, or null (after setting
+  // an error) when something is missing. Shared by "Save" and "Save as new".
+  const validatedPayload = (nameOverride?: string) => {
     setError('');
+    const finalName = (nameOverride ?? name).trim();
     const trimmed = variables.map((v) => ({ ...v, name: v.name.trim() }));
-    if (!name.trim()) return setError('Please give the dataset a name.');
-    if (trimmed.some((v) => !v.name)) return setError('Every variable needs a name.');
-    if (new Set(trimmed.map((v) => v.name.toLowerCase())).size !== trimmed.length)
-      return setError('Variable names must be unique.');
+    if (!finalName) { setError('Please give the dataset a name.'); return null; }
+    if (trimmed.some((v) => !v.name)) { setError('Every variable needs a name.'); return null; }
+    if (new Set(trimmed.map((v) => v.name.toLowerCase())).size !== trimmed.length) {
+      setError('Variable names must be unique.'); return null;
+    }
     const dataRows = rows.filter((r) => r.some((v) => v.trim() !== ''));
-    if (!dataRows.length) return setError('Enter at least one row of data.');
+    if (!dataRows.length) { setError('Enter at least one row of data.'); return null; }
+    return { name: finalName, columns: trimmed.map((v) => v.name), dataRows, trimmed };
+  };
+
+  const handleSave = async () => {
+    const p = validatedPayload();
+    if (!p) return;
     try {
       setBusy(true);
-      await onSave(name.trim(), trimmed.map((v) => v.name), dataRows, trimmed);
+      await onSave(p.name, p.columns, p.dataRows, p.trimmed);
+    } catch (e: any) {
+      setError(e?.message || 'Could not save the dataset. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveAsNew = async () => {
+    if (!onSaveAsNew) return;
+    // Suggest a distinct name so the copy doesn't collide with the original.
+    const suggested = /\(copy\)\s*$/i.test(name.trim()) ? name.trim() : `${name.trim()} (copy)`;
+    const chosen = window.prompt('Save as a new dataset — name:', suggested);
+    if (chosen === null) return;
+    const p = validatedPayload(chosen);
+    if (!p) return;
+    try {
+      setBusy(true);
+      await onSaveAsNew(p.name, p.columns, p.dataRows, p.trimmed);
     } catch (e: any) {
       setError(e?.message || 'Could not save the dataset. Please try again.');
     } finally {
@@ -247,6 +279,12 @@ export function DataGridEditor({ initialColumns, initialRows, initialName, initi
             className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg transition font-medium">
             <Save className="w-4 h-4" />{saving || busy ? 'Saving…' : (saveLabel || 'Save Dataset')}
           </button>
+          {onSaveAsNew && (
+            <button onClick={handleSaveAsNew} disabled={saving || busy} title="Keep the original and save this as a separate dataset"
+              className="flex items-center gap-2 px-4 py-2 bg-white border border-green-600 text-green-700 hover:bg-green-50 disabled:opacity-50 rounded-lg transition font-medium">
+              <FilePlus className="w-4 h-4" />{saveAsNewLabel || 'Save as New'}
+            </button>
+          )}
           <button onClick={onCancel} className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg transition">Cancel</button>
         </div>
       </div>

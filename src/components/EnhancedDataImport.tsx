@@ -244,6 +244,22 @@ export function EnhancedDataImport() {
     loadDatasets();
   };
 
+  // "Save as new" from the editor — always creates a fresh dataset and leaves the
+  // one being edited untouched, so an edit session can branch off a new version.
+  const saveManualDatasetAsNew = async (name: string, columns: string[], rows: string[][], variables?: VariableDef[]) => {
+    const data = rows.map((r) => {
+      const obj: any = {};
+      columns.forEach((c, i) => { obj[c] = r[i] ?? ''; });
+      return obj;
+    });
+    await persistDataset(name, columns, data, `${name}.csv`, JSON.stringify(data).length, 'manual-entry', variables);
+    setSuccess(`Saved as new dataset "${name}" (${data.length} rows, ${columns.length} variables)`);
+    setEditingId(null);
+    setEditInitial(null);
+    setDataView('list');
+    loadDatasets();
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -629,8 +645,10 @@ export function EnhancedDataImport() {
         initialVariables={editInitial?.variables}
         heading={editingId ? 'Edit Dataset' : 'Enter Data'}
         saveLabel={editingId ? 'Save Changes' : 'Save Dataset'}
+        saveAsNewLabel="Save as New"
         saving={uploading}
         onSave={saveManualDataset}
+        onSaveAsNew={editingId ? saveManualDatasetAsNew : undefined}
         onCancel={() => { setDataView('list'); setEditingId(null); setEditInitial(null); setError(''); }}
       />
     );
