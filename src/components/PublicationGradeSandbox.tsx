@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { Bar } from 'react-chartjs-2';
 import { exportResultsToPDF, exportToCSV, exportToJSON } from '../lib/exportUtils';
-import { buildSandboxDataset, resolveHierarchy, parseQuestionnaireImport, validateInstrument, buildFactorStructure, slug as columnSlug, DemographicVariable, DemographicType, DemographicRole, SandboxConstruct, ValidationIssue } from '../lib/sandboxDataset';
+import { buildSandboxDataset, resolveHierarchy, parseQuestionnaireImport, validateInstrument, buildFactorStructure, itemScale, slug as columnSlug, DemographicVariable, DemographicType, DemographicRole, SandboxConstruct, ResponseScale, ValidationIssue } from '../lib/sandboxDataset';
 import { setHandoff, HandoffTarget } from '../lib/analysisHandoff';
 import {
   calculateCronbachAlpha,
@@ -47,6 +47,7 @@ interface Project {
   subscales: string[];
   constructs?: SandboxConstruct[];
   demographics?: DemographicVariable[];
+  scoring?: { minItemsPerScore?: number; prorate?: boolean };
   response_scale: {
     type: 'likert' | 'binary';
     min: number;
@@ -349,6 +350,16 @@ export function EnhancedPsychometricsSandbox() {
     setCurrentProject({ ...currentProject, items: currentProject.items.map(i => i.id === itemId ? { ...i, reversed: !i.reversed } : i) });
   };
 
+  // Per-construct response format (override the instrument-wide scale).
+  const setConstructScale = (cId: string, scale: ResponseScale | undefined) => {
+    if (!currentProject) return;
+    setCurrentProject({ ...currentProject, constructs: (currentProject.constructs ?? []).map(c => c.id === cId ? { ...c, responseScale: scale } : c) });
+  };
+  const setScoring = (patch: Partial<{ minItemsPerScore: number; prorate: boolean }>) => {
+    if (!currentProject) return;
+    setCurrentProject({ ...currentProject, scoring: { ...(currentProject.scoring ?? {}), ...patch } });
+  };
+
   // Import a pasted questionnaire structure into the hierarchy.
   const applyImport = () => {
     if (!currentProject) return;
@@ -384,6 +395,7 @@ export function EnhancedPsychometricsSandbox() {
           subscales: currentProject.subscales,
           constructs: currentProject.constructs ?? [],
           demographics: currentProject.demographics ?? [],
+          scoring: currentProject.scoring ?? {},
           response_scale: currentProject.response_scale,
           status: currentProject.status,
           reliability: currentProject.reliability,
@@ -438,14 +450,15 @@ export function EnhancedPsychometricsSandbox() {
         return;
       }
 
-      // Reverse-score flagged items BEFORE any statistics — analyzing raw
-      // values silently corrupts reliability for scales with reversed items.
-      const scaleMin = currentProject.response_scale?.min ?? 1;
-      const scaleMax = currentProject.response_scale?.max ?? 5;
+      // Reverse-score flagged items BEFORE any statistics — using each item's
+      // own construct scale, so mixed-format instruments reverse correctly.
       const responseMatrix: number[][] = responses.map(r =>
-        (r.responses as number[]).map((v, idx) =>
-          currentProject.items[idx]?.reversed ? scaleMin + scaleMax - v : v
-        )
+        (r.responses as number[]).map((v, idx) => {
+          const it = currentProject.items[idx];
+          if (!it?.reversed) return v;
+          const s = itemScale(currentProject as any, it);
+          return s.min + s.max - v;
+        })
       );
 
       const alpha = calculateCronbachAlpha(responseMatrix);
@@ -477,8 +490,8 @@ export function EnhancedPsychometricsSandbox() {
       const sem = Math.sqrt(totalVariance) * Math.sqrt(Math.max(0, 1 - alpha));
 
       // Floor/ceiling effects (Terwee et al., 2007: flag when > 15%)
-      const minPossible = numItems * scaleMin;
-      const maxPossible = numItems * scaleMax;
+      const minPossible = currentProject.items.reduce((s, it) => s + itemScale(currentProject as any, it).min, 0);
+      const maxPossible = currentProject.items.reduce((s, it) => s + itemScale(currentProject as any, it).max, 0);
       const floorPct = (totalScores.filter(s => s === minPossible).length / totalScores.length) * 100;
       const ceilingPct = (totalScores.filter(s => s === maxPossible).length / totalScores.length) * 100;
 
@@ -1361,6 +1374,36 @@ export function EnhancedPsychometricsSandbox() {
                           />
                         </div>
 
+                        {/* Per-construct response format (override the instrument scale) */}
+                        <div className="flex flex-wrap items-center gap-2 mb-3 text-xs">
+                          <label className="flex items-center gap-1.5 text-gray-600 cursor-pointer">
+                            <input type="checkbox" checked={!!c.responseScale}
+                              onChange={(e) => setConstructScale(c.id, e.target.checked ? { type: 'likert', min: 1, max: 5, labels: [] } : undefined)}
+                              className="rounded" />
+                            Custom response format
+                          </label>
+                          {c.responseScale ? (
+                            <>
+                              <select value={c.responseScale.type}
+                                onChange={(e) => setConstructScale(c.id, { ...c.responseScale!, type: e.target.value as 'likert' | 'binary', ...(e.target.value === 'binary' ? { min: 0, max: 1 } : {}) })}
+                                className="px-1.5 py-0.5 border border-gray-300 rounded bg-white">
+                                <option value="likert">Likert</option>
+                                <option value="binary">Binary</option>
+                              </select>
+                              <span className="text-gray-500">min</span>
+                              <input type="number" value={c.responseScale.min}
+                                onChange={(e) => setConstructScale(c.id, { ...c.responseScale!, min: Number(e.target.value) })}
+                                className="w-14 px-1.5 py-0.5 border border-gray-300 rounded" />
+                              <span className="text-gray-500">max</span>
+                              <input type="number" value={c.responseScale.max}
+                                onChange={(e) => setConstructScale(c.id, { ...c.responseScale!, max: Number(e.target.value) })}
+                                className="w-14 px-1.5 py-0.5 border border-gray-300 rounded" />
+                            </>
+                          ) : (
+                            <span className="text-gray-400">using instrument default ({currentProject.response_scale.min}–{currentProject.response_scale.max})</span>
+                          )}
+                        </div>
+
                         {cItems.length > 0 && (
                           <div className="space-y-1.5 mb-3">
                             {cItems.map((item) => {
@@ -1487,6 +1530,25 @@ export function EnhancedPsychometricsSandbox() {
                   <Plus className="w-5 h-5" />
                   Add Grouping Variable
                 </button>
+              </div>
+            </div>
+
+            {/* Scoring rules for subconstruct / construct / total scores */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h4 className="text-lg font-bold text-gray-900 mb-1">Scoring Rules</h4>
+              <p className="text-sm text-gray-600 mb-4">How subconstruct, construct and total scores handle missing item responses.</p>
+              <div className="flex flex-wrap items-center gap-4">
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  Minimum items answered to score
+                  <input type="number" min={1} value={currentProject.scoring?.minItemsPerScore ?? 1}
+                    onChange={(e) => setScoring({ minItemsPerScore: Math.max(1, Number(e.target.value) || 1) })}
+                    className="w-20 px-2 py-1 border border-gray-300 rounded" />
+                </label>
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                  <input type="checkbox" checked={!!currentProject.scoring?.prorate}
+                    onChange={(e) => setScoring({ prorate: e.target.checked })} className="rounded" />
+                  Prorate totals for missing items (fill with the person's mean)
+                </label>
               </div>
             </div>
           </div>

@@ -215,3 +215,49 @@ test('buildFactorStructure maps subconstruct/construct factors to item columns',
   assert.deepEqual(fs['Academic Stress / Exams'], ['Academic_Stress_Exams_1']);
 });
 
+
+test('mixed response formats: reverse-scoring uses each its own construct scale', () => {
+  const p: SandboxProjectLite = {
+    name: 'Mixed',
+    response_scale: { type: 'likert', min: 1, max: 5 },
+    constructs: [
+      { id: 'c1', name: 'A', subconstructs: [] },
+      { id: 'c2', name: 'B', subconstructs: [], responseScale: { type: 'likert', min: 1, max: 7, labels: ['1','2','3','4','5','6','7'] } },
+    ],
+    items: [
+      { id: 'a1', content: 'a1', reversed: false, constructId: 'c1' },
+      { id: 'a2', content: 'a2', reversed: true, constructId: 'c1' },  // 1-5 -> 6 - v
+      { id: 'b1', content: 'b1', reversed: true, constructId: 'c2' },  // 1-7 -> 8 - v
+    ],
+  };
+  const built = buildSandboxDataset(p, [[4, 2, 3]]);
+  assert.equal(built.data[0].A_1, 4);
+  assert.equal(built.data[0].A_2, 4);   // 6 - 2
+  assert.equal(built.data[0].B_1, 5);   // 8 - 3 (uses the 1-7 override)
+  const bVar = built.variables.find(v => v.name === 'B_1');
+  assert.equal(bVar.values.length, 7);  // 1-7 value labels from the override
+});
+
+test('scoring rules: min-items gate and proration', () => {
+  const base: SandboxProjectLite = {
+    name: 'S',
+    response_scale: { type: 'likert', min: 1, max: 5 },
+    constructs: [{ id: 'c1', name: 'A', subconstructs: [] }],
+    items: [
+      { id: 'i1', content: 'i1', reversed: false, constructId: 'c1' },
+      { id: 'i2', content: 'i2', reversed: false, constructId: 'c1' },
+      { id: 'i3', content: 'i3', reversed: false, constructId: 'c1' },
+    ],
+    scoring: { minItemsPerScore: 2, prorate: true },
+  };
+  // only 1 item answered -> below the 2-item minimum -> blank total
+  assert.equal(buildSandboxDataset(base, [[4, NaN, NaN]]).data[0].A_Total, '');
+  // 2 of 3 answered, prorated: sum 6 * (3/2) = 9 ; mean unaffected = 3
+  const r = buildSandboxDataset(base, [[4, 2, NaN]]).data[0];
+  assert.equal(r.A_Total, 9);
+  assert.equal(r.A_Mean, 3);
+  // without proration: plain sum of available = 6
+  const noPro = { ...base, scoring: { minItemsPerScore: 2, prorate: false } };
+  assert.equal(buildSandboxDataset(noPro, [[4, 2, NaN]]).data[0].A_Total, 6);
+});
+

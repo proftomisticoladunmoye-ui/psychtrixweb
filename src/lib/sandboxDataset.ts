@@ -19,7 +19,10 @@ export interface SandboxItem {
 // constructs, each with optional subconstructs/dimensions; items are assigned
 // to a construct and (optionally) a subconstruct within it.
 export interface SandboxSubconstruct { id: string; name: string }
-export interface SandboxConstruct { id: string; name: string; subconstructs: SandboxSubconstruct[] }
+export interface ResponseScale { type: 'likert' | 'binary'; min: number; max: number; labels?: string[] }
+// A construct may override the instrument-wide response format (mixed formats:
+// e.g. one construct on 1–5 agreement, another on 1–7 frequency, a binary block).
+export interface SandboxConstruct { id: string; name: string; subconstructs: SandboxSubconstruct[]; responseScale?: ResponseScale }
 
 // A demographic / grouping variable defined on the instrument. These are kept
 // structurally separate from the psychometric items and flow into the dataset
@@ -43,6 +46,17 @@ export interface SandboxProjectLite {
   constructs?: SandboxConstruct[];
   demographics?: DemographicVariable[];
   response_scale: { type: 'likert' | 'binary'; min: number; max: number; labels?: string[] };
+  // Scoring rules for the subconstruct/construct/total scores.
+  scoring?: { minItemsPerScore?: number; prorate?: boolean };
+}
+
+// The effective response scale for an item: its construct's override if set,
+// otherwise the instrument-wide scale. Shared by the dataset builder, the
+// in-sandbox analysis and the respondent survey so mixed formats stay consistent.
+export function itemScale(project: SandboxProjectLite, item: SandboxItem): { type: 'likert' | 'binary'; min: number; max: number; labels: string[] } {
+  const c = item.constructId && project.constructs ? project.constructs.find((x) => x.id === item.constructId) : undefined;
+  const s = c?.responseScale ?? project.response_scale;
+  return { type: s?.type ?? 'likert', min: s?.min ?? 1, max: s?.max ?? 5, labels: s?.labels ?? [] };
 }
 
 // ---- questionnaire import ---------------------------------------------------
@@ -219,20 +233,16 @@ export function buildSandboxDataset(
   demographicRows?: Array<Record<string, unknown>>, // aligned with responseRows, keyed by demographic id
 ): BuiltDataset {
   const items = project.items ?? [];
-  const min = project.response_scale?.min ?? 1;
-  const max = project.response_scale?.max ?? 5;
-  const labels = project.response_scale?.labels ?? [];
-  const itemMeasure: Measure = project.response_scale?.type === 'binary' ? 'nominal' : 'ordinal';
 
-  // Value labels for Likert/binary points (min..max → labels), reused per item.
-  const pointValues = () => {
+  // Per-item response scale (construct override or instrument default), so an
+  // instrument with mixed formats reverse-scores and labels each item correctly.
+  const pointValuesFor = (it: SandboxItem) => {
+    const s = itemScale(project, it);
     const out: { value: string; label: string }[] = [];
-    for (let v = min; v <= max; v++) {
-      const lab = labels[v - min];
-      if (lab) out.push({ value: String(v), label: lab });
-    }
+    for (let v = s.min; v <= s.max; v++) { const lab = s.labels[v - s.min]; if (lab) out.push({ value: String(v), label: lab }); }
     return out;
   };
+  const revFor = (raw: number, it: SandboxItem) => { const s = itemScale(project, it); return it.reversed ? s.min + s.max - raw : raw; };
 
   // Resolve the Construct › Subconstruct hierarchy (or derive it from legacy
   // subscales) and name item columns from it.
@@ -240,15 +250,13 @@ export function buildSandboxDataset(
   const usedNames = new Set<string>();
   const itemCols = nameItemColumns(items, placement, usedNames);
 
-  const rev = (raw: number, reversed: boolean) => (reversed ? min + max - raw : raw);
-
   // Item variable definitions.
   const itemVars: VariableDef[] = items.map((it, i) => ({
     name: itemCols[i],
     label: it.content + (it.reversed ? ' (reverse-scored)' : ''),
     type: 'numeric',
-    measure: itemMeasure,
-    values: pointValues(),
+    measure: (itemScale(project, it).type === 'binary' ? 'nominal' : 'ordinal') as Measure,
+    values: pointValuesFor(it),
     missing: [],
   }));
 
@@ -309,14 +317,18 @@ export function buildSandboxDataset(
     });
     const revVals: Array<number | null> = items.map((it, i) => {
       const v = raw?.[i];
-      return isNum(v) ? rev(v, it.reversed) : null;
+      return isNum(v) ? revFor(v, it) : null;
     });
     itemCols.forEach((c, i) => { row[c] = revVals[i] == null ? '' : (revVals[i] as number); });
+    const minItems = Math.max(1, project.scoring?.minItemsPerScore ?? 1);
+    const prorate = !!project.scoring?.prorate;
     for (const sc of scoreCols) {
       const vals = sc.idxs.map((i) => revVals[i]).filter((v): v is number => v != null);
-      if (!vals.length) { row[sc.name] = ''; continue; }
+      if (vals.length < minItems) { row[sc.name] = ''; continue; }
       const sum = vals.reduce((a, b) => a + b, 0);
-      row[sc.name] = sc.kind === 'sum' ? sum : sum / vals.length;
+      // Proration fills missing items with the person's own mean, so an
+      // incomplete total isn't systematically deflated.
+      row[sc.name] = sc.kind === 'mean' ? sum / vals.length : (prorate ? sum * (sc.idxs.length / vals.length) : sum);
     }
     return row;
   });

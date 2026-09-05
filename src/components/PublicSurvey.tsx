@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { CheckCircle, AlertCircle, ChevronRight, BarChart3, Clock } from 'lucide-react';
-import type { DemographicVariable } from '../lib/sandboxDataset';
+import { itemScale, type DemographicVariable, type SandboxConstruct } from '../lib/sandboxDataset';
 
 interface ScaleItem {
   id: string;
   content: string;
   reversed: boolean;
   subscale?: string;
+  constructId?: string;
+  subconstructId?: string;
 }
 
 interface ResponseScale {
@@ -22,6 +24,7 @@ interface SurveyProject {
   name: string;
   description: string;
   items: ScaleItem[];
+  constructs?: SandboxConstruct[];
   demographics?: DemographicVariable[];
   response_scale: ResponseScale;
 }
@@ -65,14 +68,19 @@ export function PublicSurvey({ token }: PublicSurveyProps) {
 
   // Hooks must run on every render — compute the Likert layout here, before any
   // of the early returns below (project is null until the survey loads).
-  const numOptions = project ? project.response_scale.max - project.response_scale.min + 1 : 5;
+  // Per-item response scale (a construct may override the instrument default),
+  // so a mixed-format instrument renders each item on its own scale.
+  const curScale = project && project.items[currentItem]
+    ? itemScale(project as any, project.items[currentItem])
+    : { type: 'likert' as const, min: project?.response_scale.min ?? 1, max: project?.response_scale.max ?? 5, labels: project?.response_scale.labels ?? [] };
+  const numOptions = curScale.max - curScale.min + 1;
   const likertLayout = useLikertLayout(numOptions);
 
   const loadSurvey = async () => {
     try {
       const { data, error } = await supabase
         .from('sandbox_scale_projects')
-        .select('id, name, description, items, demographics, response_scale')
+        .select('id, name, description, items, constructs, demographics, response_scale')
         .eq('shareable_link', token)
         .maybeSingle();
 
@@ -189,7 +197,7 @@ export function PublicSurvey({ token }: PublicSurveyProps) {
 
   if (!project) return null;
 
-  const rs = project.response_scale;
+  const rs = curScale; // per-item scale (construct override or instrument default)
 
   // ─── Intro ──────────────────────────────────────────────────────────────
   if (state === 'intro') {
