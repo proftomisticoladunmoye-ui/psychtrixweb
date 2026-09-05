@@ -9,6 +9,7 @@ import {
   hashPassword, verifyPassword, validateSignup,
 } from './auth.js';
 import { selectRows, insertRows, updateRows, deleteRows } from './tables.js';
+import { mountResearchNotes } from './rn-router.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -98,7 +99,7 @@ app.post('/api/auth/signup', authLimiter, wrap(async (req, res) => {
      RETURNING id, email, created_at`,
     [email, salt, hash],
   );
-  const user = rows[0];
+  const user = { ...rows[0], is_editor: false, is_admin: false };
   const session = await createSession(user.id);
   res.json({ user, ...session });
 }));
@@ -106,7 +107,8 @@ app.post('/api/auth/signup', authLimiter, wrap(async (req, res) => {
 app.post('/api/auth/signin', authLimiter, wrap(async (req, res) => {
   const { email, password } = req.body ?? {};
   const { rows } = await query(
-    `SELECT id, email, created_at, password_salt, password_hash
+    `SELECT id, email, created_at, password_salt, password_hash,
+            COALESCE(is_editor,false) AS is_editor, COALESCE(is_admin,false) AS is_admin
        FROM users WHERE lower(email) = lower($1)`,
     [email ?? ''],
   );
@@ -115,7 +117,7 @@ app.post('/api/auth/signin', authLimiter, wrap(async (req, res) => {
   if (!ok) return res.status(401).json({ error: 'Invalid email or password' });
 
   const session = await createSession(record.id);
-  res.json({ user: { id: record.id, email: record.email, created_at: record.created_at }, ...session });
+  res.json({ user: { id: record.id, email: record.email, created_at: record.created_at, is_editor: record.is_editor, is_admin: record.is_admin }, ...session });
 }));
 
 app.post('/api/auth/signout', wrap(async (req, res) => {
@@ -193,6 +195,11 @@ app.post('/api/rpc/increment_forum_post_views', wrap(async (req, res) => {
   }
   res.json({ ok: true });
 }));
+
+// ---- Research Notes (public server-rendered pages + editor API) ------------
+// Mounted before the SPA fallback so /research-notes/* is crawlable HTML, not
+// the JS shell. Everything else still falls through to the React app.
+mountResearchNotes(app);
 
 // ---- static frontend -------------------------------------------------------
 const dist = path.join(__dirname, '..', 'dist');

@@ -45,7 +45,8 @@ export async function deleteSession(token) {
 export async function userForToken(token) {
   if (!token) return null;
   const { rows } = await query(
-    `SELECT u.id, u.email, u.created_at
+    `SELECT u.id, u.email, u.created_at,
+            COALESCE(u.is_editor, false) AS is_editor, COALESCE(u.is_admin, false) AS is_admin
        FROM sessions s JOIN users u ON u.id = s.user_id
       WHERE s.token = $1 AND s.expires_at > now()`,
     [token],
@@ -68,6 +69,13 @@ export async function attachUser(req, _res, next) {
 
 export function requireUser(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  next();
+}
+
+// Research Notes authoring/admin. Editors and admins may create/manage notes.
+export function requireEditor(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Not signed in' });
+  if (!req.user.is_editor && !req.user.is_admin) return res.status(403).json({ error: 'Editor access required' });
   next();
 }
 
