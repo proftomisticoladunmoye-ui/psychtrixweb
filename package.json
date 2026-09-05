@@ -13,10 +13,12 @@
     "test": "node tests/run.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1127.0",
     "@supabase/supabase-js": "^2.57.4",
     "bcryptjs": "^2.4.3",
     "chart.js": "^4.5.0",
     "express": "^4.21.2",
+    "image-size": "^1.2.1",
     "lucide-react": "^0.344.0",
     "mammoth": "^1.12.2",
     "papaparse": "^5.5.3",

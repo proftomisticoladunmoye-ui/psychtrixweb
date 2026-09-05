@@ -47,7 +47,7 @@ const pad3 = (n: number | null | undefined) => (n == null ? '—' : String(n).pa
 export function ResearchNotesAdmin() {
   const [mode, setMode] = useState<'list' | 'edit'>('list');
   const [notes, setNotes] = useState<Note[]>([]);
-  const [meta, setMeta] = useState<{ note_types: string[]; licenses: Record<string, any>; statuses: string[] } | null>(null);
+  const [meta, setMeta] = useState<{ note_types: string[]; licenses: Record<string, any>; statuses: string[]; storage?: string } | null>(null);
   const [editing, setEditing] = useState<Note | null>(null);
   const [importReport, setImportReport] = useState<any | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -128,7 +128,10 @@ export function ResearchNotesAdmin() {
           <BookOpen className="w-7 h-7 text-blue-600" />
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Research Notes — Admin</h1>
-            <p className="text-sm text-gray-500">Create, import, and manage the PsychtrixWeb Research Note series.</p>
+            <p className="text-sm text-gray-500">Create, import, and manage the PsychtrixWeb Research Note series.
+              {meta?.storage === 'db' && <span className="ml-1 text-amber-600">Figures are stored in the database — set the R2/S3 env vars to use object storage.</span>}
+              {meta?.storage === 's3' && <span className="ml-1 text-green-600">Object storage active.</span>}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -284,6 +287,17 @@ function NoteEditor({ note, meta, importReport, onBack, onSaved }: {
     finally { setBusy(false); }
   };
 
+  const uploadImage = async (file: File) => {
+    const res = await fetch(`/api/research-notes/media?note_id=${f.id}&filename=${encodeURIComponent(file.name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'application/octet-stream', ...(token() ? { Authorization: `Bearer ${token()}` } : {}) },
+      body: file,
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(body?.error || 'Upload failed');
+    return body.data as { url: string; width?: number; height?: number };
+  };
+
   const openPreview = async () => {
     setPreviewing(true); setError('');
     try {
@@ -362,7 +376,7 @@ function NoteEditor({ note, meta, importReport, onBack, onSaved }: {
           <AuthorsEditor authors={f.authors || []} onChange={(a) => set({ authors: a })} />
 
           <Field label="Body">
-            <RichEditor value={f.body_html} onChange={(html) => set({ body_html: html })} />
+            <RichEditor value={f.body_html} onChange={(html) => set({ body_html: html })} onUploadImage={uploadImage} />
           </Field>
 
           <ReferencesEditor refs={f.references || []} onChange={(r) => set({ references: r })} />

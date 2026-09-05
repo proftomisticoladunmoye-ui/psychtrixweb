@@ -123,6 +123,9 @@ const statements = [
      created_at timestamptz NOT NULL DEFAULT now()
    )`,
   `CREATE INDEX IF NOT EXISTS rnmedia_note_idx ON rn_media(note_id)`,
+  // DB-backed fallback storage (used until external object storage is configured).
+  `ALTER TABLE rn_media ADD COLUMN IF NOT EXISTS data bytea`,
+  `ALTER TABLE rn_media ADD COLUMN IF NOT EXISTS original_name text`,
 
   // ---- analytics events (views/downloads/shares) --------------------------
   `CREATE TABLE IF NOT EXISTS rn_page_views (

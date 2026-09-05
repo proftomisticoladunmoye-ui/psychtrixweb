@@ -8,8 +8,12 @@ import {
 // server re-sanitises before public rendering, so this only needs to be usable,
 // not a trust boundary. execCommand is deprecated but works across all current
 // browsers and keeps this dependency-free.
-export function RichEditor({ value, onChange }: { value: string; onChange: (html: string) => void }) {
+export function RichEditor({ value, onChange, onUploadImage }: {
+  value: string; onChange: (html: string) => void;
+  onUploadImage?: (file: File) => Promise<{ url: string; width?: number; height?: number }>;
+}) {
   const ref = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const initialised = useRef(false);
 
   useEffect(() => {
@@ -25,11 +29,22 @@ export function RichEditor({ value, onChange }: { value: string; onChange: (html
   const insert = (html: string) => { focus(); document.execCommand('insertHTML', false, html); sync(); };
 
   const addLink = () => { const url = prompt('Link URL'); if (url) cmd('createLink', url); };
+  const insertFigure = (url: string, alt: string, caption: string, w?: number) => {
+    insert(`<figure><img src="${esc(url)}" alt="${esc(alt)}"${w ? ` width="${w}"` : ''} loading="lazy" />${caption ? `<figcaption>${esc(caption)}</figcaption>` : ''}</figure><p></p>`);
+  };
   const addImage = () => {
+    if (onUploadImage) { fileRef.current?.click(); return; }
     const url = prompt('Image URL (https://…)'); if (!url) return;
-    const alt = prompt('Alt text (describe the image for accessibility)') || '';
-    const caption = prompt('Figure caption (optional)') || '';
-    insert(`<figure><img src="${esc(url)}" alt="${esc(alt)}" loading="lazy" />${caption ? `<figcaption>${esc(caption)}</figcaption>` : ''}</figure><p></p>`);
+    insertFigure(url, prompt('Alt text (describe the image for accessibility)') || '', prompt('Figure caption (optional)') || '');
+  };
+  const onPickImage = async (file: File) => {
+    if (!onUploadImage) return;
+    try {
+      const { url, width } = await onUploadImage(file);
+      const alt = prompt('Alt text (describe the image for accessibility)') || '';
+      const caption = prompt('Figure caption (optional)') || '';
+      insertFigure(url, alt, caption, width && width > 720 ? 720 : width);
+    } catch (e: any) { alert('Image upload failed: ' + (e?.message || 'unknown error')); }
   };
   const addYoutube = () => {
     const url = prompt('YouTube URL'); if (!url) return;
@@ -64,6 +79,9 @@ export function RichEditor({ value, onChange }: { value: string; onChange: (html
         <Sep />
         <Btn onClick={addLink} title="Link"><Link2 className="w-4 h-4" /></Btn>
         <Btn onClick={addImage} title="Image / figure"><ImageIcon className="w-4 h-4" /></Btn>
+        <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden"
+          onChange={(e) => { const file = e.target.files?.[0]; if (file) onPickImage(file); if (fileRef.current) fileRef.current.value = ''; }} />
+
         <Btn onClick={addYoutube} title="YouTube video"><Youtube className="w-4 h-4" /></Btn>
         <Btn onClick={addTable} title="Table"><TableIcon className="w-4 h-4" /></Btn>
         <Btn onClick={addCallout} title="Callout / highlight"><MessageSquare className="w-4 h-4" /></Btn>

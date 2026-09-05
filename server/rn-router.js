@@ -9,6 +9,7 @@ import {
 } from './rn-render.js';
 import { bibtex, ris, suggestedCitation } from './rn-citations.js';
 import { importDocx } from './rn-docx.js';
+import { putImage, getMediaForServe, listMedia, externalizeDataUriImages, isAllowedImage, storageMode } from './rn-storage.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -74,6 +75,16 @@ export function mountResearchNotes(app) {
     }, { baseUrl: baseUrl(req) }));
   }));
 
+  // ---- media (figures stored in Neon when object storage isn't configured) -
+  app.get('/research-notes/media/:id', wrap(async (req, res) => {
+    const m = await getMediaForServe(req.params.id);
+    if (!m) return res.status(404).send('Not found');
+    if (!m.data) return res.redirect(302, m.url); // object storage: bytes live off-origin
+    res.setHeader('Content-Type', m.mime || 'application/octet-stream');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(m.data);
+  }));
+
   // ---- author profile (before :seg so 'authors' isn't treated as a note) --
   app.get('/research-notes/authors/:slug', wrap(async (req, res) => {
     const author = await data.getAuthorBySlug(req.params.slug);
@@ -120,6 +131,7 @@ export function mountResearchNotes(app) {
 
   api.get('/meta', (_req, res) => res.json({
     note_types: data.NOTE_TYPES, licenses: data.LICENSES, statuses: data.STATUSES,
+    storage: storageMode(),
   }));
 
   api.get('/', wrap(async (_req, res) => res.json({ data: await data.listForEditor() })));
@@ -152,8 +164,32 @@ export function mountResearchNotes(app) {
         body_html: sanitizeBody(result.html),
         meta: { imported_from: 'docx', imported_at: new Date().toISOString() },
       }, req.user.id);
+      // Move any images the document embedded (mammoth inlines them as data URIs)
+      // into durable storage so the body stays small and the figures persist.
+      const externalized = await externalizeDataUriImages(note.body_html, { noteId: note.id, userId: req.user.id });
+      if (externalized !== note.body_html) await data.updateNote(note.id, { body_html: externalized });
       res.json({ data: await data.getByIdAnyStatus(note.id), report: result.report, warnings: result.warnings });
     }));
+
+  // Image upload for the editor. Client POSTs raw image bytes; the mime comes
+  // from the Content-Type header. Returns the stored URL + dimensions.
+  api.post('/media',
+    express.raw({ type: () => true, limit: '25mb' }),
+    wrap(async (req, res) => {
+      const buf = req.body;
+      if (!Buffer.isBuffer(buf) || !buf.length) return res.status(400).json({ error: 'No image received' });
+      const mime = (req.headers['content-type'] || '').split(';')[0].trim();
+      if (!isAllowedImage(mime)) return res.status(415).json({ error: 'Unsupported image type. Use PNG, JPEG, WebP or GIF.' });
+      const noteId = req.query.note_id || null;
+      const stored = await putImage({
+        buffer: buf, mime, noteId, userId: req.user.id,
+        alt: req.query.alt || null, caption: req.query.caption || null,
+        originalName: req.query.filename ? decodeURIComponent(req.query.filename) : null,
+      });
+      res.json({ data: stored });
+    }));
+
+  api.get('/:id/media', wrap(async (req, res) => res.json({ data: await listMedia(req.params.id) })));
 
   api.get('/:id', wrap(async (req, res) => {
     const note = await data.getByIdAnyStatus(req.params.id);
