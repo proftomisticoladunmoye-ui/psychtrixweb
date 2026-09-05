@@ -5,9 +5,10 @@ import { requireEditor } from './auth.js';
 import * as data from './rn-data.js';
 import { canonicalPath, pad3, SERIES } from './rn-data.js';
 import {
-  renderArticle, renderHub, renderAuthor, notFoundPage, RN_CLIENT_JS,
+  renderArticle, renderHub, renderAuthor, notFoundPage, RN_CLIENT_JS, sanitizeBody,
 } from './rn-render.js';
 import { bibtex, ris, suggestedCitation } from './rn-citations.js';
+import { importDocx } from './rn-docx.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -134,6 +135,25 @@ export function mountResearchNotes(app) {
     if (req.body?.authors) await data.setAuthors(note.id, req.body.authors);
     res.json({ data: await data.getByIdAnyStatus(note.id) });
   }));
+
+  // Word (.docx) ingestion -> a new draft note + QC report. The client POSTs the
+  // raw file bytes as application/octet-stream.
+  api.post('/import-docx',
+    express.raw({ type: () => true, limit: '30mb' }),
+    wrap(async (req, res) => {
+      const buf = req.body;
+      if (!Buffer.isBuffer(buf) || !buf.length) return res.status(400).json({ error: 'No document received' });
+      let result;
+      try { result = await importDocx(buf); }
+      catch (e) { return res.status(422).json({ error: 'Could not read this .docx file. ' + (e?.message || '') }); }
+      const filenameTitle = decodeURIComponent(req.query.filename || '').replace(/\.docx$/i, '').trim();
+      const note = await data.createNote({
+        title: result.title || filenameTitle || 'Imported Research Note',
+        body_html: sanitizeBody(result.html),
+        meta: { imported_from: 'docx', imported_at: new Date().toISOString() },
+      }, req.user.id);
+      res.json({ data: await data.getByIdAnyStatus(note.id), report: result.report, warnings: result.warnings });
+    }));
 
   api.get('/:id', wrap(async (req, res) => {
     const note = await data.getByIdAnyStatus(req.params.id);

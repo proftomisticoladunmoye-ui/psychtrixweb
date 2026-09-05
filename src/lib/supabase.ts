@@ -12,6 +12,8 @@ export interface AppUser {
   id: string;
   email: string;
   created_at?: string;
+  is_editor?: boolean;
+  is_admin?: boolean;
   // Compatibility fields some components read on the Supabase User type:
   user_metadata?: Record<string, unknown>;
   app_metadata?: Record<string, unknown>;
@@ -85,6 +87,16 @@ function normalizeUser(u: any): AppUser {
 const auth = {
   async getSession() {
     const user = storedUser();
+    // Background refresh so role flags (is_editor/is_admin) and other server-side
+    // changes reach already-signed-in sessions without forcing a re-login.
+    if (storedToken()) {
+      api('/auth/me').then(({ status, body }) => {
+        if (status === 200 && body?.user) {
+          storeSession(normalizeUser(body.user), storedToken());
+          emit('USER_REFRESHED');
+        }
+      }).catch(() => undefined);
+    }
     return { data: { session: user ? { user } : null }, error: null };
   },
 

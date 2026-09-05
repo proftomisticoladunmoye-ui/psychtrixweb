@@ -24,6 +24,7 @@ const CommunityForum = lazy(() => import('./components/CommunityForum').then(m =
 const PLSSEM = lazy(() => import('./components/PLSSEM').then(m => ({ default: m.PLSSEM })));
 const NetworkAnalysis = lazy(() => import('./components/NetworkAnalysis').then(m => ({ default: m.NetworkAnalysis })));
 const About = lazy(() => import('./components/About').then(m => ({ default: m.About })));
+const ResearchNotesAdmin = lazy(() => import('./components/ResearchNotesAdmin').then(m => ({ default: m.ResearchNotesAdmin })));
 
 const ViewLoader = () => (
   <div className="flex items-center justify-center py-24">
@@ -31,7 +32,7 @@ const ViewLoader = () => (
   </div>
 );
 
-export type ViewType = 'dashboard' | 'data-import' | 'ctt-analysis' | 'validity-analysis' | 'irt-analysis' | 'path-analysis' | 'pls-sem' | 'adaptive-testing' | 'network-analysis' | 'sandbox' | 'cultural-adaptation' | 'forum' | 'reports' | 'settings' | 'help' | 'about';
+export type ViewType = 'dashboard' | 'data-import' | 'ctt-analysis' | 'validity-analysis' | 'irt-analysis' | 'path-analysis' | 'pls-sem' | 'adaptive-testing' | 'network-analysis' | 'sandbox' | 'cultural-adaptation' | 'forum' | 'reports' | 'settings' | 'help' | 'about' | 'admin';
 
 function App() {
   const { user, loading } = useAuth();
@@ -108,6 +109,8 @@ function App() {
         return <Help />;
       case 'about':
         return <About />;
+      case 'admin':
+        return <ResearchNotesAdmin />;
       default:
         return <Dashboard onNavigate={setCurrentView} />;
     }
@@ -120,6 +123,7 @@ function App() {
         onViewChange={setCurrentView}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+        isEditor={!!(user?.is_editor || user?.is_admin)}
       />
 
       <div className={`min-h-screen flex flex-col transition-all duration-300 ${

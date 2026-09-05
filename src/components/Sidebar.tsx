@@ -15,7 +15,8 @@ import {
   HelpCircle,
   ChevronLeft,
   MessageCircle,
-  Share2
+  Share2,
+  Newspaper
 } from 'lucide-react';
 import { ViewType } from '../App';
 
@@ -24,6 +25,7 @@ interface SidebarProps {
   onViewChange: (view: ViewType) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  isEditor?: boolean;
 }
 
 interface NavItem {
@@ -48,7 +50,10 @@ const navItems: NavItem[] = [
   { id: 'reports', icon: FileText, label: 'Reports' },
 ];
 
-export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse }: SidebarProps) {
+export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse, isEditor }: SidebarProps) {
+  const items = isEditor
+    ? [...navItems, { id: 'admin' as ViewType, icon: Newspaper, label: 'Research Notes' }]
+    : navItems;
   const handleNavClick = (view: ViewType) => {
     onViewChange(view);
     // Auto-close sidebar on mobile after navigation
@@ -87,7 +92,7 @@ export function Sidebar({ currentView, onViewChange, collapsed, onToggleCollapse
 
         {/* Scrollable nav — flex-1 so it never runs underneath the pinned footer */}
         <nav className="flex-1 min-h-0 p-3 space-y-1 overflow-y-auto">
-          {navItems.map((item) => {
+          {items.map((item) => {
             const Icon = item.icon;
             const isActive = currentView === item.id;
 
