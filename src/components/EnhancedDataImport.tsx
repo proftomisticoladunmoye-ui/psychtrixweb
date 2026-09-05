@@ -18,6 +18,9 @@ import {
   Table2,
   PieChart,
   Calculator,
+  Pencil,
+  Copy,
+  PenLine,
 } from 'lucide-react';
 import { DataGridEditor, VariableDef } from './DataGridEditor';
 import { ComputeVariableModal } from './ComputeVariableModal';
@@ -33,6 +36,7 @@ interface Dataset {
   columns: string[];
   data: any[];
   created_at: string;
+  metadata?: any;
 }
 
 interface DataQualityReport {
@@ -74,6 +78,10 @@ export function EnhancedDataImport() {
   const [maxValue, setMaxValue] = useState<number>(5);
   const [cleanedData, setCleanedData] = useState<any[] | null>(null);
   const [dataView, setDataView] = useState<'list' | 'spreadsheet' | 'quality' | 'editor'>('list');
+  // When set, the grid editor is editing an existing saved dataset (update-in-place)
+  // rather than creating a new one; editInitial seeds it with the saved rows + metadata.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editInitial, setEditInitial] = useState<{ columns: string[]; rows: string[][]; name: string; variables?: VariableDef[] } | null>(null);
   const [showCompute, setShowCompute] = useState(false);
   const [computing, setComputing] = useState(false);
 
@@ -200,15 +208,38 @@ export function EnhancedDataImport() {
     });
   };
 
-  // Save a dataset entered by hand / pasted into the grid editor.
+  // Save a dataset entered by hand / pasted into the grid editor. When editingId is
+  // set we update that saved dataset in place (so deleting columns/rows/roles and
+  // renaming persist onto the existing record); otherwise we create a new one.
   const saveManualDataset = async (name: string, columns: string[], rows: string[][], variables?: VariableDef[]) => {
     const data = rows.map((r) => {
       const obj: any = {};
       columns.forEach((c, i) => { obj[c] = r[i] ?? ''; });
       return obj;
     });
-    await persistDataset(name, columns, data, `${name}.csv`, JSON.stringify(data).length, 'manual-entry', variables);
-    setSuccess(`Dataset "${name}" saved (${data.length} rows, ${columns.length} variables)`);
+    if (editingId) {
+      const { error: updateError } = await supabase.from('datasets').update({
+        name,
+        file_name: `${name}.csv`,
+        file_size: JSON.stringify(data).length,
+        columns,
+        data,
+        rows_count: data.length,
+        metadata: {
+          updatedAt: new Date().toISOString(),
+          source: 'manual-edit',
+          columnTypes: columns.map((col) => ({ name: col, type: detectColumnType(data, col) })),
+          ...(variables && variables.length ? { variables } : {}),
+        },
+      }).eq('id', editingId);
+      if (updateError) throw updateError;
+      setSuccess(`Dataset "${name}" updated (${data.length} rows, ${columns.length} variables)`);
+    } else {
+      await persistDataset(name, columns, data, `${name}.csv`, JSON.stringify(data).length, 'manual-entry', variables);
+      setSuccess(`Dataset "${name}" saved (${data.length} rows, ${columns.length} variables)`);
+    }
+    setEditingId(null);
+    setEditInitial(null);
     setDataView('list');
     loadDatasets();
   };
@@ -517,6 +548,57 @@ export function EnhancedDataImport() {
     }
   };
 
+  // Open a saved dataset in the editable grid — rows AND variable roles
+  // (measurement level, value labels, missing codes) are restored so they can be
+  // edited/deleted and saved back onto the same record.
+  const handleEditDataset = async (dataset: Dataset) => {
+    try {
+      const full = await fetchFullDataset(dataset);
+      const columns = full.columns;
+      const rows = (full.data || []).map((r: any) =>
+        columns.map((c) => { const v = r[c]; return v === null || v === undefined ? '' : String(v); }));
+      const variables = (full.metadata?.variables as VariableDef[] | undefined);
+      setEditingId(dataset.id);
+      setEditInitial({ columns, rows, name: full.name, variables });
+      setError('');
+      setDataView('editor');
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleRename = async (dataset: Dataset) => {
+    const next = window.prompt('Rename dataset', dataset.name);
+    if (next === null) return;
+    const name = next.trim();
+    if (!name || name === dataset.name) return;
+    try {
+      const { error } = await supabase.from('datasets')
+        .update({ name, file_name: `${name}.csv` }).eq('id', dataset.id);
+      if (error) throw error;
+      setSuccess(`Renamed to "${name}"`);
+      loadDatasets();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleDuplicate = async (dataset: Dataset) => {
+    try {
+      const full = await fetchFullDataset(dataset);
+      const copyName = `${full.name} (copy)`;
+      await persistDataset(
+        copyName, full.columns, full.data || [], `${copyName}.csv`,
+        JSON.stringify(full.data || []).length, 'duplicate',
+        full.metadata?.variables as VariableDef[] | undefined,
+      );
+      setSuccess(`Duplicated as "${copyName}"`);
+      loadDatasets();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
   const handleDelete = async (id: string) => {
     if (!confirm('Are you sure you want to delete this dataset?')) return;
 
@@ -540,9 +622,16 @@ export function EnhancedDataImport() {
   if (dataView === 'editor') {
     return (
       <DataGridEditor
+        key={editingId || 'new'}
+        initialColumns={editInitial?.columns}
+        initialRows={editInitial?.rows}
+        initialName={editInitial?.name}
+        initialVariables={editInitial?.variables}
+        heading={editingId ? 'Edit Dataset' : 'Enter Data'}
+        saveLabel={editingId ? 'Save Changes' : 'Save Dataset'}
         saving={uploading}
         onSave={saveManualDataset}
-        onCancel={() => { setDataView('list'); setError(''); }}
+        onCancel={() => { setDataView('list'); setEditingId(null); setEditInitial(null); setError(''); }}
       />
     );
   }
@@ -937,7 +1026,7 @@ export function EnhancedDataImport() {
           <p className="text-gray-600 mt-1">Upload a file, or enter your data directly — no external CSV needed</p>
         </div>
         <button
-          onClick={() => { setError(''); setSuccess(''); setDataView('editor'); }}
+          onClick={() => { setError(''); setSuccess(''); setEditingId(null); setEditInitial(null); setDataView('editor'); }}
           className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-medium shadow-sm"
         >
           <Table2 className="w-5 h-5" />
@@ -1056,6 +1145,27 @@ export function EnhancedDataImport() {
                       title="View & Clean Data"
                     >
                       <Eye className="w-5 h-5 text-blue-600" />
+                    </button>
+                    <button
+                      onClick={() => handleEditDataset(dataset)}
+                      className="p-2 hover:bg-indigo-50 rounded-lg transition"
+                      title="Edit data & variables"
+                    >
+                      <Pencil className="w-5 h-5 text-indigo-600" />
+                    </button>
+                    <button
+                      onClick={() => handleRename(dataset)}
+                      className="p-2 hover:bg-amber-50 rounded-lg transition"
+                      title="Rename"
+                    >
+                      <PenLine className="w-5 h-5 text-amber-600" />
+                    </button>
+                    <button
+                      onClick={() => handleDuplicate(dataset)}
+                      className="p-2 hover:bg-purple-50 rounded-lg transition"
+                      title="Duplicate"
+                    >
+                      <Copy className="w-5 h-5 text-purple-600" />
                     </button>
                     <button
                       onClick={async () => {

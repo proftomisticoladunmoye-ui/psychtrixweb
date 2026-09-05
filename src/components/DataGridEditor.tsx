@@ -30,6 +30,9 @@ interface DataGridEditorProps {
   initialColumns?: string[];
   initialRows?: string[][];
   initialName?: string;
+  initialVariables?: VariableDef[]; // preserve measurement level / value labels when editing a saved dataset
+  heading?: string;
+  saveLabel?: string;
   saving?: boolean;
   onSave: (name: string, columns: string[], rows: string[][], variables: VariableDef[]) => void | Promise<void>;
   onCancel: () => void;
@@ -64,12 +67,14 @@ function rectangular(rows: string[][], width: number): string[][] {
   });
 }
 
-export function DataGridEditor({ initialColumns, initialRows, initialName, saving, onSave, onCancel }: DataGridEditorProps) {
+export function DataGridEditor({ initialColumns, initialRows, initialName, initialVariables, heading, saveLabel, saving, onSave, onCancel }: DataGridEditorProps) {
   const [variables, setVariables] = useState<VariableDef[]>(
-    (initialColumns && initialColumns.length ? initialColumns : ['var1', 'var2', 'var3']).map((n) => makeVar(n)),
+    initialVariables && initialVariables.length
+      ? initialVariables.map((v) => ({ ...v, values: v.values.map((x) => ({ ...x })), missing: [...v.missing] }))
+      : (initialColumns && initialColumns.length ? initialColumns : ['var1', 'var2', 'var3']).map((n) => makeVar(n)),
   );
   const [rows, setRows] = useState<string[][]>(() => {
-    const w = (initialColumns && initialColumns.length) || 3;
+    const w = (initialColumns && initialColumns.length) || (initialVariables && initialVariables.length) || 3;
     if (initialRows && initialRows.length) return rectangular(initialRows, w);
     return Array.from({ length: 8 }, () => Array(w).fill(''));
   });
@@ -235,12 +240,12 @@ export function DataGridEditor({ initialColumns, initialRows, initialName, savin
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Table2 className="w-6 h-6 text-blue-600" />
-          <h1 className="text-2xl font-bold text-gray-900">Enter Data</h1>
+          <h1 className="text-2xl font-bold text-gray-900">{heading || 'Enter Data'}</h1>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={handleSave} disabled={saving || busy}
             className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg transition font-medium">
-            <Save className="w-4 h-4" />{saving || busy ? 'Saving…' : 'Save Dataset'}
+            <Save className="w-4 h-4" />{saving || busy ? 'Saving…' : (saveLabel || 'Save Dataset')}
           </button>
           <button onClick={onCancel} className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg transition">Cancel</button>
         </div>
@@ -486,6 +491,36 @@ function ValueLabelsModal({ variable, distinct, onClose, onApply }: {
   const [pairs, setPairs] = useState<ValueLabel[]>(variable.values.length ? variable.values.map((v) => ({ ...v })) : [{ value: '', label: '' }]);
 
   const set = (i: number, patch: Partial<ValueLabel>) => setPairs((p) => p.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+  // Paste a block copied from Excel / Sheets: one column fills the focused field down,
+  // two columns fill value + label. Starts at the row where the paste happened.
+  const pasteBlock = (start: number, field: 'value' | 'label', text: string) => {
+    const raw = text.replace(/\r/g, '');
+    if (!/[\n\t,]/.test(raw)) return false; // single value → let the browser paste normally
+    const lines = raw.split('\n').filter((l, idx, a) => l !== '' || idx < a.length - 1);
+    const cells = lines.map((l) => {
+      const delim = l.includes('\t') ? '\t' : l.includes(',') ? ',' : '\t';
+      return l.split(delim);
+    });
+    setPairs((prev) => {
+      const next = prev.map((x) => ({ ...x }));
+      cells.forEach((row, k) => {
+        const idx = start + k;
+        while (next.length <= idx) next.push({ value: '', label: '' });
+        if (row.length >= 2) {
+          next[idx].value = row[0].trim();
+          next[idx].label = row.slice(1).join(' ').trim();
+        } else {
+          next[idx][field] = (row[0] || '').trim();
+        }
+      });
+      return next.filter((x, j) => x.value.trim() || x.label.trim() || j === 0);
+    });
+    return true;
+  };
+  const onPaste = (i: number, field: 'value' | 'label') => (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData('text');
+    if (pasteBlock(i, field, text)) e.preventDefault();
+  };
   const add = () => setPairs((p) => [...p, { value: '', label: '' }]);
   const remove = (i: number) => setPairs((p) => (p.length <= 1 ? [{ value: '', label: '' }] : p.filter((_, j) => j !== i)));
   const fillFromData = () => setPairs((prev) => {
@@ -503,7 +538,7 @@ function ValueLabelsModal({ variable, distinct, onClose, onApply }: {
           <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2"><Tags className="w-5 h-5 text-blue-600" />Value labels — <span className="text-blue-700">{variable.name}</span></h3>
           <button onClick={onClose}><X className="w-5 h-5 text-gray-500" /></button>
         </div>
-        <p className="text-sm text-gray-600">Assign a label to each code (e.g. <b>1</b> = Male, <b>2</b> = Female). Codes without a label are ignored.</p>
+        <p className="text-sm text-gray-600">Assign a label to each code (e.g. <b>1</b> = Male, <b>2</b> = Female). Codes without a label are ignored. Tip: copy a two-column list from Excel/Sheets and paste it into the first <b>Value</b> box to fill many rows at once.</p>
 
         <div className="space-y-2 max-h-[45vh] overflow-auto pr-1">
           <div className="flex items-center gap-2 text-xs font-semibold text-gray-500 px-1">
@@ -511,9 +546,9 @@ function ValueLabelsModal({ variable, distinct, onClose, onApply }: {
           </div>
           {pairs.map((p, i) => (
             <div key={i} className="flex items-center gap-2">
-              <input value={p.value} onChange={(e) => set(i, { value: e.target.value })} placeholder="1"
+              <input value={p.value} onChange={(e) => set(i, { value: e.target.value })} onPaste={onPaste(i, 'value')} placeholder="1"
                 className="w-24 px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-400" />
-              <input value={p.label} onChange={(e) => set(i, { label: e.target.value })} placeholder="Male"
+              <input value={p.label} onChange={(e) => set(i, { label: e.target.value })} onPaste={onPaste(i, 'label')} placeholder="Male"
                 className="flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-400" />
               <button onClick={() => remove(i)} title="Remove" className="text-gray-300 hover:text-red-600 w-6 flex justify-center"><X className="w-4 h-4" /></button>
             </div>
