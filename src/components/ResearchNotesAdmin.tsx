@@ -58,7 +58,7 @@ export function ResearchNotesAdmin() {
   const [mode, setMode] = useState<'list' | 'edit' | 'comments'>('list');
   const [pendingComments, setPendingComments] = useState(0);
   const [notes, setNotes] = useState<Note[]>([]);
-  const [meta, setMeta] = useState<{ note_types: string[]; licenses: Record<string, any>; statuses: string[]; storage?: string } | null>(null);
+  const [meta, setMeta] = useState<{ note_types: string[]; licenses: Record<string, any>; statuses: string[]; storage?: string; mail?: boolean } | null>(null);
   const [editing, setEditing] = useState<Note | null>(null);
   const [importReport, setImportReport] = useState<any | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -147,6 +147,8 @@ export function ResearchNotesAdmin() {
             <p className="text-sm text-gray-500">Create, import, and manage the PsychtrixWeb Research Note series.
               {meta?.storage === 'db' && <span className="ml-1 text-amber-600">Figures are stored in the database — set the R2/S3 env vars to use object storage.</span>}
               {meta?.storage === 's3' && <span className="ml-1 text-green-600">Object storage active.</span>}
+              {meta && meta.mail === false && <span className="ml-1 text-amber-600">Email notifications are off — set the SMTP env vars to get comment alerts.</span>}
+              {meta?.mail === true && <span className="ml-1 text-green-600">Email notifications active.</span>}
             </p>
           </div>
         </div>

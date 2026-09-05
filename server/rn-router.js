@@ -11,6 +11,7 @@ import { bibtex, ris, suggestedCitation } from './rn-citations.js';
 import { importDocx } from './rn-docx.js';
 import { putImage, getMediaForServe, listMedia, externalizeDataUriImages, isAllowedImage, storageMode } from './rn-storage.js';
 import * as comments from './rn-comments.js';
+import { notifyNewComment, notifyCommentApproved, mailEnabled } from './rn-mail.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -154,12 +155,14 @@ export function mountResearchNotes(app) {
       const email = String(b.author_email || '').trim();
       const body = String(b.body || '').trim();
       if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || body.length < 2) return back('error');
-      await comments.submitComment(note.id, {
+      const comment = {
         author_name: name.slice(0, 120), author_email: email.slice(0, 200),
         author_affiliation: String(b.author_affiliation || '').trim().slice(0, 200) || null,
         author_orcid: String(b.author_orcid || '').trim().slice(0, 40) || null,
-        body: body.slice(0, 5000), ip: req.ip, created_by: req.user?.id || null,
-      });
+        body: body.slice(0, 5000),
+      };
+      await comments.submitComment(note.id, { ...comment, ip: req.ip, created_by: req.user?.id || null });
+      notifyNewComment({ note, comment, baseUrl: baseUrl(req) }); // fire-and-forget
       back('pending');
     }));
 
@@ -171,7 +174,7 @@ export function mountResearchNotes(app) {
 
   api.get('/meta', (_req, res) => res.json({
     note_types: data.NOTE_TYPES, licenses: data.LICENSES, statuses: data.STATUSES,
-    storage: storageMode(),
+    storage: storageMode(), mail: mailEnabled(),
   }));
 
   api.get('/', wrap(async (_req, res) => res.json({ data: await data.listForEditor() })));
@@ -283,6 +286,10 @@ export function mountResearchNotes(app) {
   })));
   cmt.post('/:id/status', wrap(async (req, res) => {
     const row = await comments.setStatus(req.params.id, req.body?.status, req.user.id);
+    if (row && row.status === 'approved' && row.author_email && !row.is_editor_reply) {
+      const note = await data.getByIdAnyStatus(row.note_id);
+      if (note) notifyCommentApproved({ note, comment: row, baseUrl: baseUrl(req) }); // fire-and-forget
+    }
     res.json({ data: row });
   }));
   cmt.post('/reply', wrap(async (req, res) => {
