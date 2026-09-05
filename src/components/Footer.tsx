@@ -16,6 +16,9 @@ export function Footer() {
         <div className="max-w-screen-2xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-gray-500">
           <p>© {year} Psychtrix Initiative Limited · Publication-grade psychometrics</p>
           <div className="flex items-center gap-4">
+            <a href="/research-notes" className="hover:text-blue-600 transition font-medium">
+              Research Notes
+            </a>
             <button
               onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'about' }))}
               className="hover:text-blue-600 transition font-medium"
