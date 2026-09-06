@@ -268,7 +268,7 @@ function shareCard(note, canonicalUrl) {
   const u = encodeURIComponent(canonicalUrl);
   const t = encodeURIComponent(note.title || SERIES.name);
   return `<div class="card"><h3>Share</h3>
-    <button class="btn primary" data-print>Download PDF</button>
+    <a class="btn primary" href="${esc(canonicalPath(note))}.pdf">Download PDF</a>
     <button class="btn" data-copy-text="${esc(canonicalUrl)}">Copy link</button>
     <div class="share">
       <a href="mailto:?subject=${t}&body=${u}">Email</a>
@@ -373,18 +373,29 @@ function jsonLdArticle(note, canonicalUrl) {
     ...(note.note_number != null ? { issueNumber: note.note_number } : {}),
     license: (LICENSES[note.license] || {}).url || undefined,
   };
-  return JSON.stringify(obj);
+  const origin = canonicalUrl.replace(canonicalPath(note), '');
+  const breadcrumb = {
+    '@type': 'BreadcrumbList',
+    itemListElement: [
+      { '@type': 'ListItem', position: 1, name: 'Home', item: origin + '/' },
+      { '@type': 'ListItem', position: 2, name: 'Research Notes', item: origin + '/research-notes' },
+      { '@type': 'ListItem', position: 3, name: note.note_number != null ? `RN ${pad3(note.note_number)}` : note.title, item: canonicalUrl },
+    ],
+  };
+  return JSON.stringify({ '@context': 'https://schema.org', '@graph': [obj, breadcrumb] });
 }
 
 // ---- public exports --------------------------------------------------------
 export function renderArticle(note, { baseUrl, flash }) {
   const canonicalUrl = baseUrl + canonicalPath(note);
-  const metaTags = citationMetaTags(note, canonicalUrl);
+  const pdfUrl = canonicalUrl + '.pdf';
+  const metaTags = citationMetaTags(note, canonicalUrl, pdfUrl);
   const og = [
     { name: 'og:type', content: 'article' },
     { name: 'og:title', content: note.title },
     { name: 'og:description', content: note.abstract || note.subtitle || SERIES.name },
     { name: 'og:url', content: canonicalUrl },
+    { name: 'og:image', content: baseUrl + '/icon-512.png' },
     { name: 'og:site_name', content: SERIES.name },
     ...(note.published_at ? [{ name: 'article:published_time', content: new Date(note.published_at).toISOString() }] : []),
     ...(note.authors || []).map((a) => ({ name: 'article:author', content: a.full_name })),

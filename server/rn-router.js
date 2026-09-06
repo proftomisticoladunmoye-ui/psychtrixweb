@@ -12,6 +12,8 @@ import { importDocx } from './rn-docx.js';
 import { putImage, getMediaForServe, listMedia, externalizeDataUriImages, isAllowedImage, storageMode } from './rn-storage.js';
 import * as comments from './rn-comments.js';
 import { notifyNewComment, notifyCommentApproved, mailEnabled } from './rn-mail.js';
+import { buildPdf } from './rn-pdf.js';
+import { mintDoi, zenodoEnabled, zenodoEnv } from './rn-zenodo.js';
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -61,13 +63,13 @@ export function mountResearchNotes(app) {
   // ---- sitemap ------------------------------------------------------------
   app.get('/sitemap-research-notes.xml', wrap(async (req, res) => {
     const base = baseUrl(req);
-    const notes = await data.allPublishedForSitemap();
-    const urls = [`${base}/research-notes`, ...notes.map((n) => base + canonicalPath(n))];
-    const body = notes.map((n) => `  <url><loc>${base}${canonicalPath(n)}</loc>` +
+    const [notes, authors] = await Promise.all([data.allPublishedForSitemap(), data.authorsForSitemap()]);
+    const noteUrls = notes.map((n) => `  <url><loc>${base}${canonicalPath(n)}</loc>` +
       `<lastmod>${new Date(n.updated_at || n.published_at).toISOString()}</lastmod>` +
       `<changefreq>monthly</changefreq></url>`).join('\n');
+    const authorUrls = authors.map((a) => `  <url><loc>${base}/research-notes/authors/${a.slug}</loc><changefreq>monthly</changefreq></url>`).join('\n');
     const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-      `  <url><loc>${base}/research-notes</loc><changefreq>daily</changefreq></url>\n${body}\n</urlset>`;
+      `  <url><loc>${base}/research-notes</loc><changefreq>daily</changefreq></url>\n${noteUrls}\n${authorUrls}\n</urlset>`;
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.send(xml);
   }));
@@ -128,6 +130,18 @@ export function mountResearchNotes(app) {
   app.get('/research-notes/:seg.bib', exportHandler('bib'));
   app.get('/research-notes/:seg.ris', exportHandler('ris'));
 
+  // ---- PDF (same publication as the HTML; Scholar's citation_pdf_url) -----
+  app.get('/research-notes/:seg.pdf', wrap(async (req, res) => {
+    const note = await data.getPublishedBySegment(req.params.seg);
+    if (!note) return res.status(404).send('Not found');
+    const buf = await buildPdf(note, baseUrl(req));
+    data.bumpDownload(note.id).catch(() => {});
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${pad3(note.note_number)}-${note.slug}.pdf"`);
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(buf);
+  }));
+
   // ---- article ------------------------------------------------------------
   app.get('/research-notes/:seg', wrap(async (req, res) => {
     const note = await data.getPublishedBySegment(req.params.seg);
@@ -175,6 +189,7 @@ export function mountResearchNotes(app) {
   api.get('/meta', (_req, res) => res.json({
     note_types: data.NOTE_TYPES, licenses: data.LICENSES, statuses: data.STATUSES,
     storage: storageMode(), mail: mailEnabled(),
+    zenodo: { enabled: zenodoEnabled(), env: zenodoEnv() },
   }));
 
   api.get('/', wrap(async (_req, res) => res.json({ data: await data.listForEditor() })));
@@ -266,6 +281,23 @@ export function mountResearchNotes(app) {
   api.delete('/:id', wrap(async (req, res) => {
     await data.deleteNote(req.params.id);
     res.json({ data: { id: req.params.id } });
+  }));
+
+  // Mint a real DOI on Zenodo (explicit, permanent). Published notes only, and
+  // only when no DOI exists yet.
+  api.post('/:id/mint-doi', wrap(async (req, res) => {
+    if (!zenodoEnabled()) return res.status(400).json({ error: 'Zenodo is not configured. Set ZENODO_TOKEN on the server.' });
+    const note = await data.getByIdAnyStatus(req.params.id);
+    if (!note) return res.status(404).json({ error: 'Not found' });
+    if (note.status !== 'published') return res.status(400).json({ error: 'Publish the Research Note before minting a DOI.' });
+    if (note.doi) return res.status(409).json({ error: `This note already has a DOI (${note.doi}).` });
+    const pdf = await buildPdf(note, baseUrl(req));
+    const result = await mintDoi(note, { filename: `${pad3(note.note_number)}-${note.slug}.pdf`, buffer: pdf }, baseUrl(req));
+    await data.saveDoi(note.id, {
+      doi: result.doi, zenodo_deposition_id: result.deposition_id, zenodo_record_url: result.record_url,
+      zenodo_concept_doi: result.concept_doi, doi_env: result.env,
+    });
+    res.json({ data: await data.getByIdAnyStatus(note.id), zenodo: result });
   }));
 
   // Server-rendered preview for any status (shown in an iframe in the editor).

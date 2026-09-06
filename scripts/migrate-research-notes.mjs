@@ -158,6 +158,12 @@ const statements = [
    )`,
   `CREATE INDEX IF NOT EXISTS rncmt_note_status_idx ON rn_comments(note_id, status, created_at)`,
   `CREATE INDEX IF NOT EXISTS rncmt_status_idx ON rn_comments(status, created_at DESC)`,
+
+  // ---- Zenodo DOI minting (real DOIs only; populated when minted) ----------
+  `ALTER TABLE research_notes ADD COLUMN IF NOT EXISTS zenodo_deposition_id text`,
+  `ALTER TABLE research_notes ADD COLUMN IF NOT EXISTS zenodo_record_url text`,
+  `ALTER TABLE research_notes ADD COLUMN IF NOT EXISTS zenodo_concept_doi text`,
+  `ALTER TABLE research_notes ADD COLUMN IF NOT EXISTS doi_env text`, // sandbox | production
 ];
 
 await client.connect();

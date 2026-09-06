@@ -42,6 +42,7 @@ interface Note {
   seo_description?: string; featured?: boolean; view_count?: number; published_at?: string | null;
   updated_at?: string; authors?: Author[]; references?: Reference[];
   internal_citations?: InternalCite[]; cited_by?: any[];
+  zenodo_record_url?: string | null; doi_env?: string | null;
 }
 
 const STATUS_STYLE: Record<string, string> = {
@@ -58,7 +59,7 @@ export function ResearchNotesAdmin() {
   const [mode, setMode] = useState<'list' | 'edit' | 'comments'>('list');
   const [pendingComments, setPendingComments] = useState(0);
   const [notes, setNotes] = useState<Note[]>([]);
-  const [meta, setMeta] = useState<{ note_types: string[]; licenses: Record<string, any>; statuses: string[]; storage?: string; mail?: boolean } | null>(null);
+  const [meta, setMeta] = useState<{ note_types: string[]; licenses: Record<string, any>; statuses: string[]; storage?: string; mail?: boolean; zenodo?: { enabled: boolean; env: string } } | null>(null);
   const [editing, setEditing] = useState<Note | null>(null);
   const [importReport, setImportReport] = useState<any | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -256,6 +257,7 @@ function NoteEditor({ note, meta, importReport, onBack, onSaved }: {
   const [showReport, setShowReport] = useState(!!importReport);
   const previewRef = useRef<HTMLIFrameElement>(null);
   const [previewing, setPreviewing] = useState(false);
+  const [minting, setMinting] = useState(false);
 
   const set = (patch: Partial<Note>) => setF((prev) => ({ ...prev, ...patch }));
 
@@ -319,6 +321,22 @@ function NoteEditor({ note, meta, importReport, onBack, onSaved }: {
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error(body?.error || 'Upload failed');
     return body.data as { url: string; width?: number; height?: number };
+  };
+
+  const doMint = async () => {
+    const env = meta.zenodo?.env || 'sandbox';
+    const msg = env === 'production'
+      ? 'Mint a REAL, permanent DOI on Zenodo for this Research Note?\n\nThis publishes a public record to Zenodo and CANNOT be undone.'
+      : 'Mint a SANDBOX (test) DOI on Zenodo?\n\nSandbox DOIs are for testing and do not resolve publicly.';
+    if (!confirm(msg)) return;
+    setMinting(true); setError(''); setSuccess('');
+    try {
+      const { data } = await rn(`/${f.id}/mint-doi`, { method: 'POST' });
+      setF((prev) => ({ ...prev, ...data }));
+      onSaved(data);
+      setSuccess(`DOI minted: ${data.doi}`);
+    } catch (e: any) { setError(e.message); }
+    finally { setMinting(false); }
   };
 
   const openPreview = async () => {
@@ -448,6 +466,29 @@ function NoteEditor({ note, meta, importReport, onBack, onSaved }: {
                 {STATUS_LABEL[s]}
               </button>
             ))}
+          </div>
+
+          <div className="bg-white border border-gray-200 rounded-xl p-4">
+            <h3 className="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-2">DOI</h3>
+            {f.doi ? (
+              <div className="text-sm">
+                <a href={f.zenodo_record_url || `https://doi.org/${f.doi}`} target="_blank" rel="noopener" className="text-blue-600 break-all hover:underline">{f.doi}</a>
+                <p className="text-xs text-gray-500 mt-1">{f.doi_env === 'sandbox' ? 'Zenodo Sandbox (test DOI — does not resolve)' : 'Registered on Zenodo'}</p>
+              </div>
+            ) : meta.zenodo?.enabled ? (
+              <>
+                <p className="text-xs text-gray-500 mb-2">Mint a permanent DOI via Zenodo
+                  <span className={`ml-1 px-1.5 py-0.5 rounded ${meta.zenodo.env === 'production' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>{meta.zenodo.env}</span>
+                </p>
+                <button onClick={doMint} disabled={minting || f.status !== 'published'}
+                  className="w-full flex items-center justify-center gap-2 px-3 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50">
+                  {minting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />} Mint DOI on Zenodo
+                </button>
+                {f.status !== 'published' && <p className="text-xs text-amber-600 mt-2">Publish the note before minting.</p>}
+              </>
+            ) : (
+              <p className="text-xs text-amber-600">Zenodo not configured — set <code>ZENODO_TOKEN</code> on the server to enable DOI minting.</p>
+            )}
           </div>
         </div>
       </div>

@@ -337,6 +337,18 @@ export async function deleteNote(id) {
   await query('DELETE FROM research_notes WHERE id = $1', [id]);
 }
 
+export async function saveDoi(id, { doi, zenodo_deposition_id, zenodo_record_url, zenodo_concept_doi, doi_env }) {
+  const { rows } = await query(
+    `UPDATE research_notes SET doi=$2, zenodo_deposition_id=$3, zenodo_record_url=$4,
+        zenodo_concept_doi=$5, doi_env=$6, updated_at=now() WHERE id=$1 RETURNING *`,
+    [id, doi, zenodo_deposition_id, zenodo_record_url, zenodo_concept_doi || null, doi_env]);
+  return rows[0] || null;
+}
+
+export async function bumpDownload(id) {
+  await query('UPDATE research_notes SET download_count = download_count + 1 WHERE id = $1', [id]);
+}
+
 export async function bumpView(id, { country = null, referrer = null } = {}) {
   await query('UPDATE research_notes SET view_count = view_count + 1 WHERE id = $1', [id]);
   await query('INSERT INTO rn_page_views (note_id, event, country, referrer) VALUES ($1,$2,$3,$4)',
@@ -347,6 +359,15 @@ export async function allPublishedForSitemap() {
   const { rows } = await query(
     `SELECT note_number, slug, updated_at, published_at FROM research_notes
       WHERE status='published' ORDER BY note_number ASC`);
+  return rows;
+}
+
+export async function authorsForSitemap() {
+  const { rows } = await query(
+    `SELECT DISTINCT a.slug FROM rn_authors a
+       JOIN research_note_authors na ON na.author_id = a.id
+       JOIN research_notes n ON n.id = na.note_id AND n.status='published'
+      ORDER BY a.slug`);
   return rows;
 }
 
