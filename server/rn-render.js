@@ -92,7 +92,7 @@ h1.title{font-size:34px;line-height:1.2;margin:16px 0 6px;letter-spacing:-.01em}
 .body{font-size:17.5px}
 .body h2{font-size:24px;margin:36px 0 10px;letter-spacing:-.01em}
 .body h3{font-size:19px;margin:28px 0 8px}
-.body p{margin:0 0 18px}
+.body p{margin:0 0 18px;text-align:justify;-webkit-hyphens:auto;hyphens:auto}
 .body figure{margin:26px 0;text-align:center}
 .body figure img{max-width:100%;height:auto;border-radius:8px;border:1px solid var(--line)}
 .body figcaption{font-size:14px;color:var(--muted);margin-top:8px}
@@ -549,6 +549,8 @@ export function notFoundPage(baseUrl) {
 // passes the strict script-src 'self' CSP).
 export const RN_CLIENT_JS = `
 document.addEventListener('click',function(e){
+  var shareEl=e.target.closest('.share a,[data-copy-text]');
+  if(shareEl){try{navigator.sendBeacon(location.pathname.replace(/\\/$/,'')+'/share');}catch(_){}}
   var c=e.target.closest('[data-copy]');
   if(c){var el=document.querySelector(c.getAttribute('data-copy'));if(el){navigator.clipboard.writeText(el.innerText).then(function(){var t=c.textContent;c.textContent='Copied ✓';setTimeout(function(){c.textContent=t},1500)})}return}
   var ct=e.target.closest('[data-copy-text]');

@@ -93,6 +93,13 @@ export function mountResearchNotes(app) {
     }, { baseUrl: baseUrl(req) }));
   }));
 
+  // ---- share beacon (navigator.sendBeacon from the article page) ----------
+  app.post('/research-notes/:seg/share', wrap(async (req, res) => {
+    const note = await data.getPublishedBySegment(req.params.seg);
+    if (note) data.bumpShare(note.id).catch(() => {});
+    res.status(204).end();
+  }));
+
   // ---- media (figures stored in Neon when object storage isn't configured) -
   app.get('/research-notes/media/:id', wrap(async (req, res) => {
     const m = await getMediaForServe(req.params.id);
@@ -219,9 +226,14 @@ export function mountResearchNotes(app) {
       const filenameTitle = decodeURIComponent(req.query.filename || '').replace(/\.docx$/i, '').trim();
       const note = await data.createNote({
         title: result.title || filenameTitle || 'Imported Research Note',
+        abstract: result.abstract || null,
+        keywords: result.keywords || [],
         body_html: sanitizeBody(result.html),
         meta: { imported_from: 'docx', imported_at: new Date().toISOString() },
       }, req.user.id);
+      // Auto-fill the structured fields the importer detected.
+      if (result.authors && result.authors.length) await data.setAuthors(note.id, result.authors);
+      if (result.references && result.references.length) await data.setReferences(note.id, result.references);
       // Move any images the document embedded (mammoth inlines them as data URIs)
       // into durable storage so the body stays small and the figures persist.
       const externalized = await externalizeDataUriImages(note.body_html, { noteId: note.id, userId: req.user.id });

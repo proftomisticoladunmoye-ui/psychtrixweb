@@ -164,6 +164,7 @@ const statements = [
   `ALTER TABLE research_notes ADD COLUMN IF NOT EXISTS zenodo_record_url text`,
   `ALTER TABLE research_notes ADD COLUMN IF NOT EXISTS zenodo_concept_doi text`,
   `ALTER TABLE research_notes ADD COLUMN IF NOT EXISTS doi_env text`, // sandbox | production
+  `ALTER TABLE research_notes ADD COLUMN IF NOT EXISTS share_count integer NOT NULL DEFAULT 0`,
 ];
 
 await client.connect();

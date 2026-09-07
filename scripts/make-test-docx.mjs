@@ -62,11 +62,19 @@ const p = (text, style) => `<w:p>${style ? `<w:pPr><w:pStyle w:val="${style}"/><
 const document = B(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
 ${p('Measurement Invariance in Cross-Cultural Assessment', 'Title')}
+${p('Jane A. Smith, John B. Doe')}
+${p('Department of Psychology, University of Testing')}
+${p('Abstract', 'Heading1')}
+${p('This study examines measurement invariance across cultural groups and demonstrates that a Word manuscript can be imported into the PsychtrixWeb Research Note model with its title, authors, affiliation, abstract, keywords and references placed automatically into the correct fields.')}
+${p('Keywords: measurement invariance, cross-cultural assessment, psychometrics')}
 ${p('Background', 'Heading1')}
 ${p('This imported note demonstrates that a Microsoft Word document can be absorbed directly into the PsychtrixWeb Research Note content model, becoming native, publishable scholarly content rather than a downloadable attachment.')}
 ${p('Methodological considerations', 'Heading1')}
-${p('The importer preserves the document structure: the title becomes the Research Note title, Word headings become section headings, and body paragraphs are retained. Tables, images and hyperlinks are carried across where present, and a quality-control report summarises exactly what was imported so the editor can review before publication.')}
+${p('The importer preserves the document structure: Word headings become section headings and body paragraphs are retained. A quality-control report summarises exactly what was imported so the editor can review before publication.')}
 ${p('Further discussion is available at https://www.youtube.com/watch?v=dQw4w9WgXcQ for readers who prefer a walkthrough.')}
+${p('References', 'Heading1')}
+${p('American Educational Research Association. (2014). Standards for educational and psychological testing. AERA.')}
+${p('Meredith, W. (1993). Measurement invariance, factor analysis and factorial invariance. Psychometrika, 58(4), 525-543.')}
 </w:body></w:document>`);
 
 const out = process.argv[2] || 'test.docx';

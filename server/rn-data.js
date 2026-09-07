@@ -172,7 +172,7 @@ export async function setInternalCitations(citingNoteId, citedIds = []) {
 
 // ---- notes -----------------------------------------------------------------
 const LIST_COLS = `id, note_number, slug, note_type, status, title, subtitle, abstract,
-  keywords, categories, license, doi, version, featured, view_count, download_count,
+  keywords, categories, license, doi, version, featured, view_count, download_count, share_count,
   published_at, created_at, updated_at`;
 
 export async function getPublishedList({ limit = 20, offset = 0, category, keyword, q, year, sort = 'recent' } = {}) {
@@ -347,6 +347,11 @@ export async function saveDoi(id, { doi, zenodo_deposition_id, zenodo_record_url
 
 export async function bumpDownload(id) {
   await query('UPDATE research_notes SET download_count = download_count + 1 WHERE id = $1', [id]);
+}
+
+export async function bumpShare(id) {
+  await query('UPDATE research_notes SET share_count = share_count + 1 WHERE id = $1', [id]);
+  await query('INSERT INTO rn_page_views (note_id, event) VALUES ($1, $2)', [id, 'share']);
 }
 
 export async function bumpView(id, { country = null, referrer = null } = {}) {

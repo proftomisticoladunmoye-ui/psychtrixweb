@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Plus, Upload, FileText, Eye, Trash2, ArrowLeft, Save, Send, Undo2, ExternalLink,
   CheckCircle2, Circle, AlertTriangle, Loader2, X, Search, BookOpen, CreditCard, Archive,
-  MessageSquare, Reply, Check, Ban,
+  MessageSquare, Reply, Check, Ban, Download, Share2,
 } from 'lucide-react';
 import { RichEditor } from './RichEditor';
 
@@ -39,7 +39,7 @@ interface Note {
   id: string; note_number: number | null; slug: string; note_type: string; status: string;
   title: string; subtitle?: string; abstract?: string; keywords: string[]; categories: string[];
   body_html: string; license: string; version: string; doi?: string | null; seo_title?: string;
-  seo_description?: string; featured?: boolean; view_count?: number; published_at?: string | null;
+  seo_description?: string; featured?: boolean; view_count?: number; download_count?: number; share_count?: number; published_at?: string | null;
   updated_at?: string; authors?: Author[]; references?: Reference[];
   internal_citations?: InternalCite[]; cited_by?: any[];
   zenodo_record_url?: string | null; doi_env?: string | null;
@@ -213,13 +213,20 @@ export function ResearchNotesAdmin() {
                 <p className="text-xs text-gray-500 mt-0.5">
                   {(n.authors || []).map((a) => a.full_name).join(', ') || 'No authors'}
                   {n.updated_at ? ` · updated ${new Date(n.updated_at).toLocaleDateString()}` : ''}
-                  {n.status === 'published' ? ` · ${n.view_count || 0} views` : ''}
                 </p>
+                {n.status === 'published' && (
+                  <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-500">
+                    <span className="flex items-center gap-1" title="Page views"><Eye className="w-3.5 h-3.5" />{n.view_count || 0}</span>
+                    <span className="flex items-center gap-1" title="PDF downloads (reads)"><Download className="w-3.5 h-3.5" />{n.download_count || 0}</span>
+                    <span className="flex items-center gap-1" title="Shares"><Share2 className="w-3.5 h-3.5" />{n.share_count || 0}</span>
+                    {n.doi && <span className="flex items-center gap-1 text-indigo-600" title="DOI registered"><Archive className="w-3.5 h-3.5" />DOI</span>}
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-1">
                 {n.status === 'published' && (
                   <a href={`/research-notes/${pad3(n.note_number)}-${n.slug}`} target="_blank" rel="noopener"
-                    className="p-2 rounded-lg hover:bg-blue-50 text-blue-600" title="View public page"><Eye className="w-5 h-5" /></a>
+                    className="flex items-center gap-1 px-2.5 py-1.5 text-sm rounded-lg hover:bg-blue-50 text-blue-600" title="Preview the public page"><Eye className="w-4 h-4" />Preview</a>
                 )}
                 <button onClick={() => openEditor(n.id)} className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700">Edit</button>
                 <button onClick={() => del(n.id)} className="p-2 rounded-lg hover:bg-red-50 text-red-500" title="Delete"><Trash2 className="w-5 h-5" /></button>
@@ -756,8 +763,10 @@ function CommentsModeration({ onBack }: { onBack: () => void }) {
 
 function ImportReport({ report, warnings, onClose }: { report: any; warnings: string[]; onClose: () => void }) {
   const rows: [string, boolean | number][] = [
-    ['Title detected', report.title_detected], ['Headings', report.headings], ['Paragraphs', report.paragraphs],
-    ['Tables', report.tables], ['Images', report.images], ['YouTube links', report.youtube], ['Links', report.links],
+    ['Title', report.title_detected], ['Authors', report.authors], ['Affiliation', report.affiliation_detected],
+    ['Abstract', report.abstract_detected], ['Keywords', report.keywords], ['References', report.references],
+    ['Headings', report.headings], ['Paragraphs', report.paragraphs], ['Tables', report.tables],
+    ['Images', report.images], ['YouTube', report.youtube], ['Links', report.links],
   ];
   return (
     <div className="bg-blue-50/60 border border-blue-200 rounded-xl p-4">
