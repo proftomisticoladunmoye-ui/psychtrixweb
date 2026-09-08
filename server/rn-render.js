@@ -94,8 +94,9 @@ h1.title{font-size:34px;line-height:1.2;margin:16px 0 6px;letter-spacing:-.01em}
 .body h3{font-size:19px;margin:28px 0 8px}
 .body p{margin:0 0 18px;text-align:justify;-webkit-hyphens:auto;hyphens:auto}
 .body figure{margin:26px 0;text-align:center}
-.body figure img{max-width:100%;height:auto;border-radius:8px;border:1px solid var(--line)}
-.body figcaption{font-size:14px;color:var(--muted);margin-top:8px}
+.body img{display:block;max-width:100%;max-height:460px;width:auto;height:auto;margin:20px auto;border-radius:8px;border:1px solid var(--line)}
+.body figure img{margin:0 auto}
+.body figcaption{font-size:14px;color:var(--muted);margin-top:8px;text-align:center}
 .body table{border-collapse:collapse;width:100%;margin:22px 0;font-size:15px;display:block;overflow-x:auto}
 .body th,.body td{border:1px solid var(--line);padding:8px 12px;text-align:left}
 .body thead th{background:var(--soft)}

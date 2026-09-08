@@ -106,7 +106,7 @@ export function RichEditor({ value, onChange, onUploadImage }: {
         .rn-body-editor ol{list-style:decimal;padding-left:24px;margin:0 0 12px}
         .rn-body-editor blockquote{border-left:3px solid #0e63d6;padding:2px 14px;color:#5b6472;margin:14px 0}
         .rn-body-editor figure{margin:16px 0;text-align:center}
-        .rn-body-editor figure img{max-width:100%;border:1px solid #e6e9ef;border-radius:8px}
+        .rn-body-editor img{display:block;max-width:100%;max-height:460px;width:auto;height:auto;margin:16px auto;border:1px solid #e6e9ef;border-radius:8px}
         .rn-body-editor figcaption{font-size:13px;color:#5b6472;margin-top:6px}
         .rn-body-editor table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
         .rn-body-editor th,.rn-body-editor td{border:1px solid #e6e9ef;padding:6px 10px}
