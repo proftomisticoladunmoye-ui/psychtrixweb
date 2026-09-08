@@ -4,9 +4,11 @@
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import PDFDocument from 'pdfkit';
+import SVGtoPDF from 'svg-to-pdfkit';
 import { SERIES, LICENSES, canonicalPath, pad3 } from './rn-data.js';
 import { apaCitation } from './rn-citations.js';
 import { getMediaForServe } from './rn-storage.js';
+import { tex2svg, svgMetrics } from './rn-math.js';
 
 // pdfkit's built-in fonts are Latin-1 only, so Greek/math characters (λ, η, Σ,
 // √, subscripts) — common in psychometrics — render as garbage. Embed DejaVu
@@ -65,7 +67,15 @@ function htmlToBlocks(html) {
     const m = line.match(/^(H2|H3|H4|QUOTE|CAP|LI|P)\x1f([\s\S]*)$/);
     const type = m ? m[1] : 'P';
     const text = decodeEntities(m ? m[2] : line).replace(/\s+/g, ' ').trim();
-    if (text) out.push({ type, text });
+    if (!text) continue;
+    // A paragraph that is solely a display equation -> a MATH block.
+    if (type === 'P' || !m) {
+      const dm = text.match(/^\$\$([\s\S]+)\$\$$/) || text.match(/^\\\[([\s\S]+)\\\]$/);
+      if (dm) { out.push({ type: 'MATH', latex: dm[1].trim() }); continue; }
+    }
+    // Inline math has no good inline-PDF form; strip delimiters, keep the LaTeX legible.
+    const cleaned = text.replace(/\$([^$\n]+?)\$/g, '$1').replace(/\\\(([\s\S]+?)\\\)/g, '$1');
+    out.push({ type, text: cleaned });
   }
   return out;
 }
@@ -153,7 +163,20 @@ export async function buildPdf(note, baseUrl) {
 
     doc.moveDown(0.9);
     for (const b of blocks) {
-      if (b.type === 'IMG') {
+      if (b.type === 'MATH') {
+        const svg = tex2svg(b.latex, true);
+        if (!svg) { doc.moveDown(0.3).fillColor(INK).font(F.italic).fontSize(10.5).text(b.latex, { align: 'center' }); doc.moveDown(0.3); continue; }
+        const met = svgMetrics(svg);
+        const scale = 9;
+        let w = (met.wEx || 10) * scale, h = (met.hEx || 3) * scale;
+        if (w > W) { const r = W / w; w = W; h *= r; }
+        doc.moveDown(0.5);
+        if (doc.y + h + 22 > pageBottom) doc.addPage();
+        const x = doc.page.margins.left + (W - w) / 2;
+        try { SVGtoPDF(doc, svg, x, doc.y, { width: w, height: h }); doc.y += h + 8; }
+        catch { doc.fillColor(INK).font(F.italic).fontSize(10.5).text(b.latex, { align: 'center' }); }
+        doc.moveDown(0.4);
+      } else if (b.type === 'IMG') {
         const buf = imgCache.get(b.src);
         if (!buf) continue;
         let img;

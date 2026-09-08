@@ -5,6 +5,7 @@
 import sanitizeHtml from 'sanitize-html';
 import { SERIES, LICENSES, canonicalPath, pad3, slugify } from './rn-data.js';
 import { citationMetaTags, suggestedCitation, apaCitation, parseName } from './rn-citations.js';
+import { renderMathToHtml } from './rn-math.js';
 
 export function esc(s) {
   return String(s == null ? '' : s)
@@ -108,6 +109,9 @@ h1.title{font-size:34px;line-height:1.2;margin:16px 0 6px;letter-spacing:-.01em}
 .body .video{position:relative;padding-bottom:56.25%;height:0;margin:24px 0}
 .body .video iframe{position:absolute;inset:0;width:100%;height:100%;border:0;border-radius:10px}
 .body iframe{max-width:100%}
+.rn-math-block{text-align:center;margin:22px 0;overflow-x:auto;overflow-y:hidden}
+.rn-math-block svg{max-width:100%;height:auto}
+.rn-math svg{max-width:100%}
 .section-h{font-size:14px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:44px 0 12px;border-bottom:1px solid var(--line);padding-bottom:8px}
 ol.refs{padding-left:22px;font-size:15px;color:#333}
 ol.refs li{margin:0 0 12px;line-height:1.6}
@@ -405,7 +409,8 @@ export function renderArticle(note, { baseUrl, flash }) {
     { name: 'twitter:description', content: note.abstract || SERIES.name },
   ];
   const metaHtml = metaTagsHtml([...metaTags, ...og]);
-  const body = sanitizeBody(note.body_html);
+  // Sanitize the author HTML first, then inject server-generated math SVG (trusted).
+  const body = renderMathToHtml(sanitizeBody(note.body_html));
 
   const content = `
   <div class="crumbs"><a href="/">Home</a> › <a href="/research-notes">Research Notes</a> › ${note.note_number != null ? 'RN ' + pad3(note.note_number) : esc(note.note_type)}</div>
