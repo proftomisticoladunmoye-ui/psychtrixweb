@@ -26,9 +26,16 @@ async function api(path, { method = 'GET', body, raw } = {}) {
   else if (body) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
   const res = await fetch(url, opts);
   const text = await res.text();
-  let json = null; try { json = text ? JSON.parse(text) : null; } catch { /* non-json */ }
+  let json = null; try { json = text ? JSON.parse(text) : null; } catch { /* non-json (e.g. an HTML error page) */ }
   if (!res.ok) {
-    const msg = json?.message || json?.errors?.[0]?.message || text || `Zenodo ${res.status}`;
+    // Zenodo/Cloudflare rate limiting — a temporary IP block, not an account issue.
+    if (res.status === 403 || res.status === 429) {
+      throw Object.assign(new Error(
+        'Zenodo is temporarily rate-limiting requests from the server ("unusual traffic"). This is temporary and not a problem with your account or token — please wait a few minutes and try minting again (and avoid repeated clicks).'
+      ), { status: 429 });
+    }
+    // Otherwise surface a concise message, never a full HTML page.
+    const msg = json?.message || json?.errors?.[0]?.message || (text && text.length < 200 ? text.trim() : `HTTP ${res.status}`);
     throw Object.assign(new Error(`Zenodo error (${res.status}): ${msg}`), { status: 502, zenodo: json });
   }
   return json;
