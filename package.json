@@ -17,6 +17,7 @@
     "@supabase/supabase-js": "^2.57.4",
     "bcryptjs": "^2.4.3",
     "chart.js": "^4.5.0",
+    "dejavu-fonts-ttf": "^2.37.3",
     "express": "^4.21.2",
     "image-size": "^1.2.1",
     "lucide-react": "^0.344.0",
