@@ -280,6 +280,11 @@ export function mountResearchNotes(app) {
   }));
 
   api.post('/:id/status', wrap(async (req, res) => {
+    // Only admins may publish (make a note public). Editors can draft, review,
+    // ready, unpublish and archive.
+    if (req.body?.status === 'published' && !req.user.is_admin) {
+      return res.status(403).json({ error: 'Only an administrator can publish a Research Note.' });
+    }
     const note = await data.setStatus(req.params.id, req.body?.status);
     res.json({ data: await data.getByIdAnyStatus(note.id) });
   }));

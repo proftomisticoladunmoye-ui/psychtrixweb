@@ -10,7 +10,7 @@ import {
 // browsers and keeps this dependency-free.
 export function RichEditor({ value, onChange, onUploadImage }: {
   value: string; onChange: (html: string) => void;
-  onUploadImage?: (file: File) => Promise<{ url: string; width?: number; height?: number }>;
+  onUploadImage?: (file: Blob) => Promise<{ url: string; width?: number; height?: number }>;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -40,7 +40,8 @@ export function RichEditor({ value, onChange, onUploadImage }: {
   const onPickImage = async (file: File) => {
     if (!onUploadImage) return;
     try {
-      const { url, width } = await onUploadImage(file);
+      const optimized = await downscaleImage(file);   // auto-resize huge images (keeps research quality)
+      const { url, width } = await onUploadImage(optimized);
       const alt = prompt('Alt text (describe the image for accessibility)') || '';
       const caption = prompt('Figure caption (optional)') || '';
       insertFigure(url, alt, caption, width && width > 720 ? 720 : width);
@@ -117,6 +118,31 @@ export function RichEditor({ value, onChange, onUploadImage }: {
       `}</style>
     </div>
   );
+}
+
+// Downscale oversized images in the browser before upload so figures are
+// optimized automatically. 1600px on the long edge keeps research-quality
+// detail while cutting multi-MB phone/camera images down dramatically. Returns
+// the original file when it's already small enough or not a raster we can draw.
+async function downscaleImage(file: File, maxDim = 1600, quality = 0.85): Promise<Blob> {
+  if (!/^image\/(png|jpe?g|webp)$/i.test(file.type)) return file;
+  try {
+    const dataUrl: string = await new Promise((res, rej) => {
+      const r = new FileReader(); r.onload = () => res(r.result as string); r.onerror = rej; r.readAsDataURL(file);
+    });
+    const img: HTMLImageElement = await new Promise((res, rej) => {
+      const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = dataUrl;
+    });
+    const long = Math.max(img.width, img.height);
+    if (long <= maxDim) return file;
+    const scale = maxDim / long;
+    const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+    canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
+    const outType = file.type === 'image/png' ? 'image/png' : 'image/jpeg'; // webp -> jpeg (portable, PDF-embeddable)
+    const blob: Blob | null = await new Promise((res) => canvas.toBlob(res, outType, quality));
+    return blob || file;
+  } catch { return file; }
 }
 
 function Sep() { return <span className="w-px h-5 bg-gray-200 mx-1" />; }

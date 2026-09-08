@@ -319,8 +319,9 @@ function NoteEditor({ note, meta, importReport, onBack, onSaved }: {
     finally { setBusy(false); }
   };
 
-  const uploadImage = async (file: File) => {
-    const res = await fetch(`/api/research-notes/media?note_id=${f.id}&filename=${encodeURIComponent(file.name)}`, {
+  const uploadImage = async (file: Blob) => {
+    const name = (file as any).name || 'image';
+    const res = await fetch(`/api/research-notes/media?note_id=${f.id}&filename=${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: { 'Content-Type': file.type || 'application/octet-stream', ...(token() ? { Authorization: `Bearer ${token()}` } : {}) },
       body: file,
