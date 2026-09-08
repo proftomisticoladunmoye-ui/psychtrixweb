@@ -134,13 +134,20 @@ export async function buildPdf(note, baseUrl) {
       if (b.type === 'IMG') {
         const buf = imgCache.get(b.src);
         if (!buf) continue;
-        const maxH = 380;
-        if (doc.y + 120 > pageBottom) doc.addPage();
-        doc.moveDown(0.4);
-        try { doc.image(buf, { fit: [W, maxH], align: 'center' }); }
-        catch { continue; }
-        if (b.caption) doc.moveDown(0.3).fillColor(MUTED).font('Helvetica-Oblique').fontSize(9).text(b.caption, { align: 'center' });
-        doc.moveDown(0.4);
+        let img;
+        try { img = doc.openImage(buf); } catch { continue; }
+        const maxH = 360;
+        const scale = Math.min(W / img.width, maxH / img.height, 1);
+        const iw = Math.round(img.width * scale), ih = Math.round(img.height * scale);
+        doc.moveDown(0.5);
+        // New page if the figure won't fit — prevents overlap with the footer/next text.
+        if (doc.y + ih + 26 > pageBottom) doc.addPage();
+        const x = doc.page.margins.left + (W - iw) / 2; // centered
+        try { doc.image(buf, x, doc.y, { width: iw, height: ih }); } catch { continue; }
+        doc.y += ih + 6; // advance the cursor past the image (pdfkit does not do this for us)
+        if (b.caption) doc.fillColor(MUTED).font('Helvetica-Oblique').fontSize(9)
+          .text(b.caption, doc.page.margins.left, doc.y, { width: W, align: 'center' });
+        doc.moveDown(0.6);
       } else if (b.type === 'H2') doc.moveDown(0.6).fillColor(INK).font('Helvetica-Bold').fontSize(14).text(b.text, { lineGap: 1 });
       else if (b.type === 'H3') doc.moveDown(0.4).fillColor(INK).font('Helvetica-Bold').fontSize(12).text(b.text);
       else if (b.type === 'H4') doc.moveDown(0.3).fillColor(INK).font('Helvetica-Bold').fontSize(10.5).text(b.text);
