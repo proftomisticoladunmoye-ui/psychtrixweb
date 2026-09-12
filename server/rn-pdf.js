@@ -119,6 +119,12 @@ export async function buildPdf(note, baseUrl) {
       info: { Title: note.title, Author: (note.authors || []).map((a) => a.full_name).join(', '), Subject: (note.keywords || []).join(', ') },
     });
     const F = registerFonts(doc);
+    if (process.env.RN_PDF_DEBUG) {
+      const counts = {}; for (const b of blocks) counts[b.type] = (counts[b.type] || 0) + 1;
+      console.error('[pdf] blocks:', JSON.stringify(counts));
+      const _add = doc.addPage.bind(doc);
+      doc.addPage = (...a) => { console.error('[pdf] addPage at y=' + Math.round(doc.y)); return _add(...a); };
+    }
     const chunks = [];
     doc.on('data', (c) => chunks.push(c));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
@@ -217,6 +223,10 @@ export async function buildPdf(note, baseUrl) {
     const range = doc.bufferedPageRange();
     for (let i = 0; i < range.count; i++) {
       doc.switchToPage(range.start + i);
+      // The footer sits in the bottom margin; drop the bottom margin to 0 for this
+      // page so writing there does NOT trigger pdfkit's auto page-break (which was
+      // appending a cascade of blank pages).
+      doc.page.margins.bottom = 0;
       const y = doc.page.height - 48;
       doc.fillColor(MUTED).font(F.body).fontSize(8)
         .text(`${SERIES.name}${note.note_number != null ? ' ' + pad3(note.note_number) : ''} · ${SERIES.publisher}`,
