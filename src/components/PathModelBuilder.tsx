@@ -45,6 +45,7 @@ interface Props {
   results?: BuilderResults | null;             // when present, overlays estimates on the drawn paths
   variables?: VariableInfo[];                  // rich variable index (types/labels) for the Variable Explorer
   hasMeasureMeta?: boolean;                    // expose Scale/Ordinal/Nominal filters only when metadata supports it
+  getStats?: (name: string) => import('../lib/pathVariableUtils').VarStats | null; // lazy descriptives for the ⓘ preview
 }
 
 // ─── Model derivation (feeds the existing OLS/MLE engine) ─────────────────────
@@ -334,7 +335,7 @@ function arrowhead(ctx: CanvasRenderingContext2D, x: number, y: number, angle: n
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived, results, variables, hasMeasureMeta }: Props) {
+export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived, results, variables, hasMeasureMeta, getStats }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasColRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -612,6 +613,13 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
     const y = 120 + Math.floor(count / 5) * 130;
     commit({ ...graph, nodes: [...graph.nodes, { id: col, x, y }] });
   };
+  // Add a node at a specific logical position (used by drag-and-drop from the Explorer).
+  const addNodeAt = (col: string, x: number, y: number) => {
+    if (graph.nodes.some(n => n.id === col)) return;
+    const cx = Math.max(NODE_W / 2, Math.min(LOGICAL_W - NODE_W / 2, x));
+    const cy = Math.max(NODE_H / 2, Math.min(LOGICAL_H - NODE_H / 2, y));
+    commit({ ...graph, nodes: [...graph.nodes, { id: col, x: cx, y: cy }] });
+  };
   // Find on Canvas: pan/zoom so the node is centred, then briefly highlight it.
   const focusNode = (id: string) => {
     const n = graph.nodes.find(nn => nn.id === id);
@@ -727,9 +735,12 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
             onRemove={removeNode}
             onFind={focusNode}
             hasMeasureMeta={hasMeasureMeta}
+            getStats={getStats}
           />
         </div>
-        <div ref={canvasColRef} className="flex-1 min-w-0 bg-white rounded-lg border border-gray-200 overflow-hidden">
+        <div ref={canvasColRef} className="flex-1 min-w-0 bg-white rounded-lg border border-gray-200 overflow-hidden"
+          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }}
+          onDrop={(e) => { e.preventDefault(); const name = e.dataTransfer.getData('text/plain'); if (name && columns.includes(name)) { const p = toLogical(e.clientX, e.clientY); addNodeAt(name, p.x, p.y); } }}>
           <canvas
             ref={canvasRef}
             style={{ display: 'block', width: displayW, height: displayH, cursor: mode === 'connect' ? 'crosshair' : mode === 'erase' ? 'pointer' : 'grab' }}

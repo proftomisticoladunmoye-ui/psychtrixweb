@@ -69,7 +69,50 @@ export function buildVariableIndex(
   });
 }
 
-export type VarFilter = 'all' | 'numeric' | 'categorical' | 'scale' | 'ordinal' | 'nominal' | 'inmodel' | 'unused';
+export type VarFilter = 'all' | 'numeric' | 'categorical' | 'scale' | 'ordinal' | 'nominal' | 'inmodel' | 'unused' | 'favorites' | 'recent';
+
+export interface VarStats {
+  type: VarType;
+  validN: number;
+  missing: number;
+  missingPct: number;
+  distinct: number;
+  distinctCapped: boolean;
+  mean?: number;
+  sd?: number;
+  min?: number;
+  max?: number;
+}
+
+// Single-pass descriptive summary of one column. Cheap enough to run lazily on
+// demand (e.g. when a metadata popover opens) and cache; never fabricates values.
+export function computeVarStats(name: string, data: any[]): VarStats {
+  let n = 0, miss = 0, sum = 0, sumsq = 0, min = Infinity, max = -Infinity, numericCount = 0;
+  let nonNumeric = false, capped = false;
+  const seen = new Set<string>();
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i]?.[name];
+    if (v === null || v === undefined || v === '' || (typeof v === 'number' && Number.isNaN(v))) { miss++; continue; }
+    n++;
+    if (!capped) { seen.add(typeof v === 'string' ? v : String(v)); if (seen.size >= 200) capped = true; }
+    const num = typeof v === 'number' ? v : Number(v);
+    if (Number.isFinite(num) && (typeof v === 'number' || (typeof v === 'string' && v.trim() !== ''))) {
+      numericCount++; sum += num; sumsq += num * num; if (num < min) min = num; if (num > max) max = num;
+    } else nonNumeric = true;
+  }
+  const total = n + miss;
+  const type: VarType = n === 0 ? 'unknown' : (!nonNumeric && numericCount === n ? 'numeric' : 'categorical');
+  const stats: VarStats = {
+    type, validN: n, missing: miss, missingPct: total ? +((miss / total) * 100).toFixed(1) : 0,
+    distinct: seen.size, distinctCapped: capped,
+  };
+  if (type === 'numeric' && numericCount > 0) {
+    const mean = sum / numericCount;
+    const varc = numericCount > 1 ? (sumsq - (sum * sum) / numericCount) / (numericCount - 1) : 0;
+    stats.mean = mean; stats.sd = Math.sqrt(Math.max(0, varc)); stats.min = min; stats.max = max;
+  }
+  return stats;
+}
 
 export function matchesFilter(v: VariableInfo, filter: VarFilter, inModel: Set<string>): boolean {
   switch (filter) {

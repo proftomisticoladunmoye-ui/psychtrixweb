@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
-import { buildVariableIndex, type VariableInfo } from '../lib/pathVariableUtils';
+import { buildVariableIndex, computeVarStats, type VariableInfo, type VarStats } from '../lib/pathVariableUtils';
 import {
   GitBranch,
   Play,
@@ -302,6 +302,19 @@ export function PathAnalysis() {
     });
   }, [currentDataset?.id, currentDataset?.columns, currentDataset?.metadata]);
   const hasMeasureMeta = !!currentDataset?.metadata?.variables?.some((v: any) => v.measure);
+
+  // Lazy, cached per-variable descriptives for the Explorer's ⓘ preview — computed
+  // once per variable on first open and cleared when the dataset changes.
+  const statsCache = useRef<Map<string, VarStats>>(new Map());
+  useEffect(() => { statsCache.current = new Map(); }, [currentDataset?.id]);
+  const getVarStats = React.useCallback((name: string): VarStats | null => {
+    if (!currentDataset) return null;
+    const c = statsCache.current.get(name);
+    if (c) return c;
+    const s = computeVarStats(name, currentDataset.data);
+    statsCache.current.set(name, s);
+    return s;
+  }, [currentDataset?.id]);
 
   useEffect(() => {
     loadDatasets();
@@ -2225,6 +2238,7 @@ export function PathAnalysis() {
               columns={currentDataset?.columns || []}
               variables={variableIndex}
               hasMeasureMeta={hasMeasureMeta}
+              getStats={getVarStats}
               graph={builderGraph}
               onGraphChange={setBuilderGraph}
               onModelDerived={applyDerived}
@@ -3023,6 +3037,7 @@ export function PathAnalysis() {
                     columns={currentDataset.columns}
                     variables={variableIndex}
                     hasMeasureMeta={hasMeasureMeta}
+              getStats={getVarStats}
                     graph={builderGraph}
                     onGraphChange={setBuilderGraph}
                     onModelDerived={applyDerived}
