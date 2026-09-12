@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   MousePointer2, Spline, GitBranch, Zap, Link2, Trash2, Eraser,
-  Undo2, Redo2, Maximize2, ZoomIn, ZoomOut, Plus, LayoutGrid, Download,
+  Undo2, Redo2, Maximize2, ZoomIn, ZoomOut, LayoutGrid, Download, Crosshair,
 } from 'lucide-react';
+import { VariableExplorer } from './VariableExplorer';
+import { type VariableInfo } from '../lib/pathVariableUtils';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -41,6 +43,8 @@ interface Props {
   onGraphChange: (g: BuilderGraph) => void;
   onModelDerived: (m: DerivedModel) => void;
   results?: BuilderResults | null;             // when present, overlays estimates on the drawn paths
+  variables?: VariableInfo[];                  // rich variable index (types/labels) for the Variable Explorer
+  hasMeasureMeta?: boolean;                    // expose Scale/Ordinal/Nominal filters only when metadata supports it
 }
 
 // ─── Model derivation (feeds the existing OLS/MLE engine) ─────────────────────
@@ -164,9 +168,10 @@ interface SceneOpts {
   mode?: 'select' | 'connect' | 'erase';
   pendingFrom?: string | null;
   hoverPoint?: { x: number; y: number } | null;
+  highlightId?: string | null;
 }
 function drawScene(ctx: CanvasRenderingContext2D, graph: BuilderGraph, opts: SceneOpts) {
-  const { results, showSE, showCI, showR2, roleOf, selectedEdge, mode, pendingFrom, hoverPoint } = opts;
+  const { results, showSE, showCI, showR2, roleOf, selectedEdge, mode, pendingFrom, hoverPoint, highlightId } = opts;
   const pos = new Map(graph.nodes.map(n => [n.id, n]));
   const covLanes = covLaneMap(graph.edges);
 
@@ -245,6 +250,16 @@ function drawScene(ctx: CanvasRenderingContext2D, graph: BuilderGraph, opts: Sce
     const fill = role === 'med' ? '#fef9c3' : role === 'out' ? '#dcfce7' : role === 'mod' ? '#f3e8ff' : '#dbeafe';
     const stroke = role === 'med' ? '#b45309' : role === 'out' ? '#16a34a' : role === 'mod' ? '#7c3aed' : '#2563eb';
     const isPending = n.id === pendingFrom;
+    if (highlightId === n.id) {
+      // "Find on canvas" highlight — a bright ring drawn just outside the node.
+      ctx.save();
+      ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 4; ctx.setLineDash([]);
+      ctx.beginPath();
+      (ctx as any).roundRect?.(n.x - NODE_W / 2 - 6, n.y - NODE_H / 2 - 6, NODE_W + 12, NODE_H + 12, 10)
+        ?? ctx.rect(n.x - NODE_W / 2 - 6, n.y - NODE_H / 2 - 6, NODE_W + 12, NODE_H + 12);
+      ctx.stroke();
+      ctx.restore();
+    }
     ctx.save();
     ctx.shadowColor = 'rgba(0,0,0,0.08)'; ctx.shadowBlur = 5; ctx.shadowOffsetY = 2;
     ctx.fillStyle = fill;
@@ -319,9 +334,21 @@ function arrowhead(ctx: CanvasRenderingContext2D, x: number, y: number, angle: n
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived, results }: Props) {
+export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived, results, variables, hasMeasureMeta }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const canvasColRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Variable index for the Explorer — use the rich index when provided, else a
+  // minimal name-only index built from columns (types unknown).
+  const varIndex: VariableInfo[] = useMemo(
+    () => variables && variables.length
+      ? variables
+      : columns.map((c) => ({ name: c, type: 'unknown' as const, _h: c.toLowerCase() })),
+    [variables, columns],
+  );
   const [containerW, setContainerW] = useState(900);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -362,14 +389,16 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
     onGraphChange(nxt); derive(nxt);
   };
 
-  // Responsive width
+  // Responsive width — measured from the canvas column (which now shares the row
+  // with the Variable Explorer), so the canvas sizes to its own available width.
   useEffect(() => {
-    const el = containerRef.current;
+    const el = canvasColRef.current;
     if (!el) return;
     const ro = new ResizeObserver(entries => { const w = entries[0]?.contentRect.width; if (w) setContainerW(w); });
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+  useEffect(() => () => { if (highlightTimer.current) clearTimeout(highlightTimer.current); }, []);
 
   const displayW = Math.round(containerW);
   const displayH = Math.round(containerW * (LOGICAL_H / LOGICAL_W));
@@ -398,8 +427,8 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
     for (let x = 0; x < LOGICAL_W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, LOGICAL_H); ctx.stroke(); }
     for (let y = 0; y < LOGICAL_H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(LOGICAL_W, y); ctx.stroke(); }
 
-    drawScene(ctx, graph, { results, showSE, showCI, showR2, roleOf, selectedEdge, mode, pendingFrom, hoverPoint });
-  }, [graph, displayW, displayH, scale, pan, zoom, mode, pendingFrom, hoverPoint, selectedEdge, results, showSE, showCI, showR2]);
+    drawScene(ctx, graph, { results, showSE, showCI, showR2, roleOf, selectedEdge, mode, pendingFrom, hoverPoint, highlightId });
+  }, [graph, displayW, displayH, scale, pan, zoom, mode, pendingFrom, hoverPoint, selectedEdge, results, showSE, showCI, showR2, highlightId]);
 
   // Delete / Backspace removes the currently selected path (when not typing).
   useEffect(() => {
@@ -583,6 +612,21 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
     const y = 120 + Math.floor(count / 5) * 130;
     commit({ ...graph, nodes: [...graph.nodes, { id: col, x, y }] });
   };
+  // Find on Canvas: pan/zoom so the node is centred, then briefly highlight it.
+  const focusNode = (id: string) => {
+    const n = graph.nodes.find(nn => nn.id === id);
+    if (!n) return;
+    const dw = Math.round(containerW);
+    const dh = Math.round(containerW * (LOGICAL_H / LOGICAL_W));
+    const targetZoom = Math.max(zoom, 1);
+    const newScale = (dw / LOGICAL_W) * targetZoom;
+    setZoom(targetZoom);
+    setPan({ x: dw / (2 * newScale) - n.x, y: dh / (2 * newScale) - n.y });
+    setSelectedEdge(null);
+    setHighlightId(id);
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    highlightTimer.current = setTimeout(() => setHighlightId(null), 2600);
+  };
   const removeSelectedEdge = () => {
     if (!selectedEdge) return;
     commit({ ...graph, edges: graph.edges.filter(e => e.id !== selectedEdge) });
@@ -672,29 +716,30 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
         )}
       </div>
 
-      {/* Variable palette */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-xs font-medium text-gray-500 mr-1">Add variable:</span>
-        {availableCols.length === 0 && <span className="text-xs text-gray-400">all variables added</span>}
-        {availableCols.slice(0, 40).map(col => (
-          <button key={col} onClick={() => addNode(col)}
-            className="flex items-center gap-1 px-2 py-1 text-xs bg-white border border-gray-300 rounded-md hover:border-blue-400 hover:bg-blue-50 transition">
-            <Plus className="w-3 h-3 text-blue-500" />{col}
-          </button>
-        ))}
-      </div>
-
-      {/* Canvas */}
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-        <canvas
-          ref={canvasRef}
-          style={{ display: 'block', width: displayW, height: displayH, cursor: mode === 'connect' ? 'crosshair' : mode === 'erase' ? 'pointer' : 'grab' }}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerUp}
-          className="touch-none"
-        />
+      {/* Variable Explorer + Canvas (scales to thousands of variables; only added
+          variables become canvas nodes) */}
+      <div className="flex flex-col lg:flex-row gap-3 items-stretch">
+        <div className="w-full lg:w-80 flex-shrink-0 h-80 lg:h-auto">
+          <VariableExplorer
+            variables={varIndex}
+            inModel={graph.nodes.map(n => n.id)}
+            onAdd={addNode}
+            onRemove={removeNode}
+            onFind={focusNode}
+            hasMeasureMeta={hasMeasureMeta}
+          />
+        </div>
+        <div ref={canvasColRef} className="flex-1 min-w-0 bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <canvas
+            ref={canvasRef}
+            style={{ display: 'block', width: displayW, height: displayH, cursor: mode === 'connect' ? 'crosshair' : mode === 'erase' ? 'pointer' : 'grab' }}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+            className="touch-none"
+          />
+        </div>
       </div>
 
       {/* Selected-edge inspector */}
@@ -725,18 +770,41 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
         </div>
       )}
 
-      {/* Node list / delete */}
-      {graph.nodes.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs font-medium text-gray-500 mr-1">Variables in model:</span>
-          {graph.nodes.map(n => (
-            <span key={n.id} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-gray-100 rounded-md">
-              {n.id}
-              <button onClick={() => removeNode(n.id)} className="text-gray-400 hover:text-red-600" title="Remove">×</button>
-            </span>
-          ))}
-        </div>
-      )}
+      {/* Model Variables — the subset of dataset variables on the canvas, grouped
+          by the role the drawn paths imply (roles update as paths change). */}
+      {graph.nodes.length > 0 && (() => {
+        const roleGroups: Array<{ role: 'exo' | 'med' | 'out' | 'mod'; label: string; color: string }> = [
+          { role: 'exo', label: 'Predictors', color: 'text-blue-700' },
+          { role: 'med', label: 'Mediators', color: 'text-amber-700' },
+          { role: 'out', label: 'Outcome', color: 'text-green-700' },
+          { role: 'mod', label: 'Moderators', color: 'text-purple-700' },
+        ];
+        return (
+          <div className="bg-white border border-gray-200 rounded-lg p-3">
+            <div className="text-xs font-semibold text-gray-700 mb-2">Model Variables <span className="text-gray-400">({graph.nodes.length})</span></div>
+            <div className="flex flex-wrap gap-x-6 gap-y-2">
+              {roleGroups.map(({ role, label, color }) => {
+                const ids = graph.nodes.map(n => n.id).filter(id => roleOf(id) === role);
+                if (!ids.length) return null;
+                return (
+                  <div key={role} className="min-w-[120px]">
+                    <div className={`text-[11px] font-semibold uppercase tracking-wide ${color} mb-1`}>{label}</div>
+                    <div className="flex flex-wrap gap-1">
+                      {ids.map(id => (
+                        <span key={id} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-gray-100 rounded-md">
+                          <button onClick={() => focusNode(id)} className="text-gray-400 hover:text-blue-600" title="Find on canvas"><Crosshair className="w-3 h-3" /></button>
+                          {id}
+                          <button onClick={() => removeNode(id)} className="text-gray-400 hover:text-red-600" title="Remove">×</button>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Legend + derived summary */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">

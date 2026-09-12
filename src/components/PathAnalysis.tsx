@@ -1,5 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
+import { buildVariableIndex, type VariableInfo } from '../lib/pathVariableUtils';
 import {
   GitBranch,
   Play,
@@ -50,6 +51,7 @@ interface Dataset {
   name: string;
   columns: string[];
   data: any[];
+  metadata?: any;
 }
 
 interface PathAnalysisResults {
@@ -288,6 +290,19 @@ export function PathAnalysis() {
   const chartRef = useRef<any>(null);
   const currentDataset = datasets.find(d => d.id === selectedDataset);
 
+  // Rich variable index for the Visual Builder's Variable Explorer. Types come
+  // from stored SPSS-style metadata first, then a small data sample; built once
+  // per dataset so it stays cheap even with thousands of variables.
+  const variableIndex: VariableInfo[] = useMemo(() => {
+    if (!currentDataset) return [];
+    return buildVariableIndex(currentDataset.columns, {
+      meta: currentDataset.metadata?.variables,
+      columnTypes: currentDataset.metadata?.columnTypes,
+      data: currentDataset.data,
+    });
+  }, [currentDataset?.id, currentDataset?.columns, currentDataset?.metadata]);
+  const hasMeasureMeta = !!currentDataset?.metadata?.variables?.some((v: any) => v.measure);
+
   useEffect(() => {
     loadDatasets();
   }, []);
@@ -299,7 +314,7 @@ export function PathAnalysis() {
 
       const { data, error } = await supabase
         .from('datasets')
-        .select('id, name, columns, data')
+        .select('id, name, columns, data, metadata')
         .eq('user_id', user.id);
 
       if (error) throw error;
@@ -2208,6 +2223,8 @@ export function PathAnalysis() {
             </div>
             <PathModelBuilder
               columns={currentDataset?.columns || []}
+              variables={variableIndex}
+              hasMeasureMeta={hasMeasureMeta}
               graph={builderGraph}
               onGraphChange={setBuilderGraph}
               onModelDerived={applyDerived}
@@ -3004,6 +3021,8 @@ export function PathAnalysis() {
                   </p>
                   <PathModelBuilder
                     columns={currentDataset.columns}
+                    variables={variableIndex}
+                    hasMeasureMeta={hasMeasureMeta}
                     graph={builderGraph}
                     onGraphChange={setBuilderGraph}
                     onModelDerived={applyDerived}
