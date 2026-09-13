@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState, useCallback } from 'react';
 import {
   MousePointer2, Spline, GitBranch, Trash2, Undo2, Redo2, LayoutGrid,
   Maximize2, Plus, Play, CheckCircle2, AlertTriangle, XCircle, Info, ZoomIn, ZoomOut, Circle, Square,
-  Code2, Copy, Check, FileStack,
+  Code2, Copy, Check, FileStack, Users, SendHorizontal,
 } from 'lucide-react';
 import { VariableExplorer } from './VariableExplorer';
 import { type VariableInfo, type VarStats } from '../lib/pathVariableUtils';
@@ -18,6 +18,9 @@ interface Props {
   hasMeasureMeta?: boolean;
   getStats?: (name: string) => VarStats | null;
   onEstimate: (model: TranslatedModel, options: SemOptions) => void;
+  /** Hand the current measurement model + a grouping variable to a group-based
+   *  analysis tab (Measurement Invariance / Multi-group SEM). Optional. */
+  onSendToGroupAnalysis?: (target: 'invariance' | 'multigroup', model: TranslatedModel, groupVariable: string) => void;
   loading?: boolean;
 }
 
@@ -39,7 +42,8 @@ function clipToNode(fromC: { cx: number; cy: number }, n: SemNode) {
   return { x: cx + dx * scale, y: cy + dy * scale };
 }
 
-export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimate, loading }: Props) {
+export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimate, onSendToGroupAnalysis, loading }: Props) {
+  const [groupVar, setGroupVar] = useState('');
   const [family, setFamily] = useState<SemFamily>('full');
   const [graph, setGraph] = useState<SemGraph>(() => emptyGraph('full'));
   const [mode, setMode] = useState<Mode>('select');
@@ -496,6 +500,40 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
             <Play className="w-4 h-4" /> {loading ? 'Estimating…' : 'Estimate Model'}
           </button>
           {errorCount > 0 && <p className="text-[11px] text-red-500 text-center">Resolve errors before estimating.</p>}
+
+          {/* Multi-group analysis: reuse this measurement model across groups */}
+          {onSendToGroupAnalysis && (() => {
+            const hasMM = Object.values(translated.measurementModel).some((inds) => inds.length > 0);
+            const groupCandidates = variables.filter((v) => !inModel.includes(v.name));
+            const ready = hasMM && !!groupVar;
+            return (
+              <div className="pt-3 border-t border-gray-100 space-y-2">
+                <h4 className="text-sm font-bold text-gray-900 flex items-center gap-1.5"><Users className="w-4 h-4 text-teal-600" /> Multi-group analysis</h4>
+                <p className="text-[11px] text-gray-500">Test this measurement model across groups. Runs on the exact latent structure you built above.</p>
+                <label className="block text-xs text-gray-500">Grouping variable
+                  <select value={groupVar} onChange={(e) => setGroupVar(e.target.value)} className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1 text-xs">
+                    <option value="">— select a grouping variable —</option>
+                    {groupCandidates.map((v) => <option key={v.name} value={v.name}>{v.name}{v.label ? ` · ${v.label}` : ''}</option>)}
+                  </select>
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => onSendToGroupAnalysis('invariance', translated, groupVar)}
+                    disabled={!ready}
+                    title={ready ? 'Send to Measurement Invariance' : 'Add indicators and pick a grouping variable first'}
+                    className="flex items-center justify-center gap-1 px-2 py-2 text-xs font-medium bg-teal-50 text-teal-700 rounded-lg hover:bg-teal-100 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  ><SendHorizontal className="w-3.5 h-3.5" /> Invariance</button>
+                  <button
+                    onClick={() => onSendToGroupAnalysis('multigroup', translated, groupVar)}
+                    disabled={!ready}
+                    title={ready ? 'Send to Multi-group SEM' : 'Add indicators and pick a grouping variable first'}
+                    className="flex items-center justify-center gap-1 px-2 py-2 text-xs font-medium bg-teal-50 text-teal-700 rounded-lg hover:bg-teal-100 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  ><SendHorizontal className="w-3.5 h-3.5" /> Multi-group</button>
+                </div>
+                {!hasMM && <p className="text-[11px] text-gray-400">Connect indicators to a latent variable to enable this.</p>}
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>

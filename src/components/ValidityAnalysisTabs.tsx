@@ -726,6 +726,7 @@ export default function ValidityAnalysisTabs() {
               variables={variableIndex}
               hasMeasureMeta={hasMeasureMeta}
               getStats={getVarStats}
+              onNavigate={(tab) => { setActiveTab(tab); setResults(null); }}
             />
           )}
 

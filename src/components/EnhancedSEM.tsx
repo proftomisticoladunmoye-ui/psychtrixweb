@@ -13,6 +13,7 @@ import { SEMEstimator, type SEMResults as LibSEMResults } from '../lib/structura
 import { SemModelBuilder } from './SemModelBuilder';
 import { type VariableInfo, type VarStats } from '../lib/pathVariableUtils';
 import { type TranslatedModel, type SemOptions } from '../lib/semGraph';
+import { setHandoff } from '../lib/analysisHandoff';
 
 interface Dataset {
   id: string;
@@ -47,6 +48,8 @@ interface EnhancedSEMProps {
   variables?: VariableInfo[];
   hasMeasureMeta?: boolean;
   getStats?: (name: string) => VarStats | null;
+  /** Switch the Validity Analysis tab (used for the multi-group hand-off). */
+  onNavigate?: (tab: 'invariance' | 'multigroup') => void;
 }
 
 function pStar(p: number): string {
@@ -86,7 +89,7 @@ function getFitLabel(index: string, value: number): string {
   }
 }
 
-export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variables, hasMeasureMeta, getStats }: EnhancedSEMProps) {
+export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variables, hasMeasureMeta, getStats, onNavigate }: EnhancedSEMProps) {
   const [builderMode, setBuilderMode] = useState<'visual' | 'classic'>('visual');
   const [measurementModel, setMeasurementModel] = useState<{ [key: string]: string[] }>({});
   const [structuralPaths, setStructuralPaths] = useState<Array<{ from: string; to: string }>>([]);
@@ -959,6 +962,17 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
               loading={loading}
               onEstimate={(model: TranslatedModel, options: SemOptions) =>
                 estimateModel(model.measurementModel, model.structuralPaths, model.mediators, options.estimator)}
+              onSendToGroupAnalysis={(target, model, groupVariable) => {
+                const ds = datasets.find(d => d.id === selectedDataset);
+                setHandoff({
+                  target,
+                  datasetId: selectedDataset,
+                  datasetName: ds?.name,
+                  groupVariable,
+                  factorStructure: model.measurementModel,
+                });
+                onNavigate?.(target);
+              }}
             />
           )}
         </>
