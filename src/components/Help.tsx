@@ -797,6 +797,43 @@ export function Help() {
                 <li>• <strong>Publication export</strong> — one-click <strong>APA report</strong> (embedded diagram + tables + auto-written narrative) and a <strong>high-resolution PNG</strong> of the diagram (2× resolution) for papers and slides.</li>
               </ul>
             </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <Filter className="w-5 h-5 text-blue-600" /> Variable Explorer &amp; Command Palette
+                <span className="text-xs font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">New</span>
+              </h2>
+              <p className="text-sm text-gray-700 mb-3">
+                Instead of a wall of variable chips, the builder uses a scalable <strong>Variable Explorer</strong> that stays
+                fast even with thousands of variables. Only the variables you choose become nodes on the canvas.
+              </p>
+              <ul className="text-sm text-gray-700 space-y-1.5">
+                <li>• <strong>Search, filter &amp; group</strong> — debounced search over name and label; filter by type (numeric/categorical), in-model, unused, favorites, and recently used; related items (e.g. PAT1…PAT6) are grouped automatically.</li>
+                <li>• <strong>Types &amp; descriptives, never faked</strong> — each variable shows a type badge (from your saved metadata, or inferred from the data — “Type n/a” when it genuinely can’t be determined) and an ⓘ preview of valid N, % missing, distinct values, M/SD.</li>
+                <li>• <strong>Add to canvas</strong> — click <em>Add</em> (or drag a variable onto the canvas), <em>Find</em> to locate one already placed, and star your <em>Favorites</em>.</li>
+                <li>• <strong>Command palette (⌘/Ctrl + K)</strong> — one search box to add/find variables and run builder actions (auto-layout, drawing modes, reset view, export PNG, clear).</li>
+              </ul>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <Lightbulb className="w-5 h-5 text-amber-500" /> Describe-your-model (Proposed model)
+                <span className="text-xs font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">New</span>
+              </h2>
+              <p className="text-sm text-gray-700 mb-3">
+                In the command palette you can type a plain-English description — e.g.
+                <em> “the effect of self-efficacy on burnout, mediated by workload, controlling for age and sex.”</em>
+                Psychtrix interprets the <strong>sentence structure</strong> (mediation, moderation, “effect of X on Y”,
+                “relationship between X and Y”, “controlling for …”) and matches each phrase to your real variables.
+              </p>
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-gray-700">
+                <strong>This is a starting point, not a conclusion.</strong> It is rule-based (no black-box AI), makes
+                <strong> no causal or statistical claim</strong>, never invents variables (an unmatched phrase asks you to
+                pick one), and shows the result as a reviewable <strong>“Proposed model”</strong> with an editable
+                variable for each role. Nothing is added to the canvas until <em>you</em> confirm — the model
+                specification remains yours.
+              </div>
+            </div>
           </div>
         )}
 
@@ -972,6 +1009,29 @@ export function Help() {
               <p className="text-xs text-gray-500 mt-3">
                 Reverse-scored items are automatically recoded before any statistic is computed, so mark them
                 as “reversed” when adding them rather than pre-recoding.
+              </p>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <Share2 className="w-5 h-5 text-indigo-600" /> Send straight to a group-based analysis
+                <span className="text-xs font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">New</span>
+              </h2>
+              <p className="text-sm text-gray-700 mb-3">
+                After you’ve collected data, you don’t have to re-specify your model elsewhere. From the sandbox
+                results, one click saves the responses as a dataset and opens the chosen analysis with the
+                <strong> dataset, grouping variable, and factor structure (your constructs → items) already filled in</strong>:
+              </p>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {['CFA', 'Measurement Invariance', 'Multi-Group CFA', 'DIF'].map(t => (
+                  <div key={t} className="flex items-center gap-1.5 px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-lg text-sm text-indigo-800">
+                    <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" /> {t}
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-gray-500 mt-3">
+                For the group-based analyses (Invariance, Multi-Group), define a demographic with the
+                <strong> grouping</strong> role (e.g. sex, country) so it can be passed as the grouping variable.
               </p>
             </div>
 
@@ -1167,7 +1227,7 @@ export function Help() {
           <div className="space-y-6">
             <div>
               <h1 className="text-3xl font-bold text-gray-900">Structural Equation Modeling (SEM)</h1>
-              <p className="text-gray-600 mt-2">Full models with measurement and structural components</p>
+              <p className="text-gray-600 mt-2">Full models with measurement and structural components — build them visually or with the classic form</p>
             </div>
 
             <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -1218,6 +1278,88 @@ export function Help() {
                 mean-adjusted robust (WLSMV-style) test statistic — the reference standard used by Mplus
                 and lavaan for ordinal data. The resulting figure is a fully interactive path diagram
                 (drag, pan, lock, double-click to rename, Export PNG).
+              </p>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <GitBranch className="w-5 h-5 text-blue-600" /> Visual SEM Builder
+                <span className="text-xs font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">New</span>
+              </h2>
+              <p className="text-sm text-gray-700 mb-3">
+                The SEM tab now has two modes — <strong>Visual Builder</strong> and <strong>Classic Builder</strong> —
+                switchable at the top right. The classic form is unchanged. The visual builder lets you specify the
+                model by drawing it; whichever you use, it is estimated by the <em>same</em> engine and produces the
+                <em> same</em> results. The drawn model is a faithful specification of exactly what gets estimated.
+              </p>
+              <ul className="text-sm text-gray-700 space-y-1.5">
+                <li>• <strong>Connect indicators the easy way</strong> — click <strong>“+ Latent”</strong> (it becomes selected), then click variables in the Variable Explorer to attach them as its indicators. Add the next latent and repeat. (A manual <em>Measurement</em> click-to-connect mode is also available.)</li>
+                <li>• <strong>Structural paths</strong> — switch to <strong>Path</strong> mode and click a predictor latent then an outcome latent to draw a regression path. Mediators are detected automatically (a latent with both an incoming and an outgoing path).</li>
+                <li>• <strong>Variable Explorer</strong> — the same scalable search / filter / group / favorites panel as Path Analysis, so datasets with thousands of variables stay manageable.</li>
+                <li>• <strong>Model Inspector &amp; live Validation</strong> — select any node to see its indicators, descriptives and identification; a validation panel flags issues (no indicators, fewer than three indicators, cross-loadings, isolated nodes, self/duplicate paths) before you estimate.</li>
+                <li>• <strong>Templates</strong> — “Start Model” scaffolds a recognisable structure (CFA, Two-Factor CFA, Full SEM, Mediation). Templates create the latent shells and paths only — they never fabricate variables; you assign your own.</li>
+                <li>• <strong>Canvas controls</strong> — drag to move, drag the background to pan, zoom, Auto-Layout, Fit-to-screen, undo/redo, and an <strong>Expand</strong> button for a full-screen canvas.</li>
+                <li>• <strong>lavaan-style syntax</strong> — a <strong>Syntax</strong> panel shows the model as lavaan syntax, live. It mirrors exactly what will be estimated (read-only, copy to clipboard).</li>
+              </ul>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4">Model Families (honest capability)</h2>
+              <p className="text-sm text-gray-700 mb-3">
+                A model-family selector offers a range of SEM types. Families the current estimator can actually fit
+                are active; the rest are shown clearly marked <strong>“· roadmap”</strong> and are disabled, so nothing
+                looks operational that isn’t.
+              </p>
+              <div className="grid md:grid-cols-2 gap-4">
+                <div className="p-3 bg-green-50 rounded-lg">
+                  <h4 className="font-semibold text-green-900 mb-1">Available now</h4>
+                  <ul className="text-sm text-gray-700 space-y-1">
+                    <li>• CFA</li>
+                    <li>• Path Model</li>
+                    <li>• Full SEM</li>
+                    <li>• Mediation SEM</li>
+                  </ul>
+                </div>
+                <div className="p-3 bg-gray-50 rounded-lg">
+                  <h4 className="font-semibold text-gray-700 mb-1">Roadmap (drawn, not yet estimated)</h4>
+                  <ul className="text-sm text-gray-600 space-y-1">
+                    <li>• Second-Order / Higher-Order CFA, Bifactor</li>
+                    <li>• MIMIC, Moderation (latent interactions)</li>
+                    <li>• Latent Growth, Multigroup &amp; Invariance (in the builder)</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <Users className="w-5 h-5 text-teal-600" /> Send to Measurement Invariance / Multi-group
+                <span className="text-xs font-semibold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">New</span>
+              </h2>
+              <p className="text-sm text-gray-700">
+                In the visual builder’s <strong>Multi-group analysis</strong> panel, pick a grouping variable and send your
+                current measurement model straight to the <strong>Measurement Invariance</strong> or <strong>Multi-group SEM</strong>
+                tab. The grouping variable and factor structure arrive pre-filled, so you can run configural → metric →
+                scalar → strict without re-specifying the model you already built.
+              </p>
+            </div>
+
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <Download className="w-5 h-5 text-blue-600" /> Results &amp; Complete Export
+              </h2>
+              <p className="text-sm text-gray-700 mb-3">
+                Estimation reports the full picture: 19 fit indices (χ², χ²/df, CFI, TLI, RMSEA with 90% CI, SRMR, WRMR,
+                NFI, NNFI, GFI, AGFI, PGFI, PNFI, AIC, BIC), factor loadings with R², reliability &amp; validity (α, CR, AVE,
+                MSV, ASV), HTMT, factor-score determinacy, R² explained, effects decomposition (direct/indirect/total),
+                mediation (Sobel + CIs), modification indices, standardised residuals, plus identification (t-rule) and
+                Heywood-case checks.
+              </p>
+              <p className="text-sm text-gray-700">
+                <strong>Exports carry all of it.</strong> The <strong>Word</strong> and <strong>HTML</strong> reports and
+                the <strong>JSON</strong> export include every section above; per-table <strong>CSV</strong> extracts are
+                available for paths, loadings, reliability, mediation, and fit indices. The path diagram exports separately
+                as PNG/SVG from the diagram toolbar.
               </p>
             </div>
           </div>
