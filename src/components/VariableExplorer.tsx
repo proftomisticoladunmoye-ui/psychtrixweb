@@ -88,18 +88,6 @@ export function VariableExplorer({ variables, inModel, onAdd, onRemove, onFind, 
     return [...openItems, ...grouped.ungrouped];
   }, [filtered, grouped, filter, toggled, searching, variables.length]);
 
-  // ── Keyboard: Cmd/Ctrl+K focuses search ──────────────────────────────────────
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        const el = searchRef.current;
-        if (el && el.offsetParent !== null) { e.preventDefault(); el.focus(); el.select(); }
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
   const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Escape') { setQuery(''); }
     else if (e.key === 'Enter') {
@@ -188,7 +176,7 @@ export function VariableExplorer({ variables, inModel, onAdd, onRemove, onFind, 
           <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
           <input
             ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={onSearchKey} aria-label="Search variables"
-            placeholder={`Search ${variables.length} variables…  (⌘K)`}
+            placeholder={`Search ${variables.length} variables…`}
             className="flex-1 min-w-0 text-sm outline-none bg-transparent"
           />
           {query && <button onClick={() => setQuery('')} aria-label="Clear search"><X className="w-4 h-4 text-gray-400 hover:text-gray-600" /></button>}

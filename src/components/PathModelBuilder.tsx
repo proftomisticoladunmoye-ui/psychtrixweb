@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   MousePointer2, Spline, GitBranch, Zap, Link2, Trash2, Eraser,
-  Undo2, Redo2, Maximize2, ZoomIn, ZoomOut, LayoutGrid, Download, Crosshair,
+  Undo2, Redo2, Maximize2, ZoomIn, ZoomOut, LayoutGrid, Download, Crosshair, Sparkles,
 } from 'lucide-react';
 import { VariableExplorer } from './VariableExplorer';
+import { CommandPalette } from './CommandPalette';
 import { type VariableInfo } from '../lib/pathVariableUtils';
+import { type ProposedPath } from '../lib/modelFromText';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -341,6 +343,7 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Variable index for the Explorer — use the rich index when provided, else a
   // minimal name-only index built from columns (types unknown).
@@ -400,6 +403,16 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
     return () => ro.disconnect();
   }, []);
   useEffect(() => () => { if (highlightTimer.current) clearTimeout(highlightTimer.current); }, []);
+  // ⌘/Ctrl+K opens the command palette — only the visible builder responds.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        if (containerRef.current && containerRef.current.offsetParent !== null) { e.preventDefault(); setPaletteOpen(true); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const displayW = Math.round(containerW);
   const displayH = Math.round(containerW * (LOGICAL_H / LOGICAL_W));
@@ -620,6 +633,33 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
     const cy = Math.max(NODE_H / 2, Math.min(LOGICAL_H - NODE_H / 2, y));
     commit({ ...graph, nodes: [...graph.nodes, { id: col, x: cx, y: cy }] });
   };
+  // Apply a natural-language "Proposed model": replace the graph with the proposed
+  // nodes + edges, laid out by causal depth. Pushed to history so it can be undone.
+  const applyModel = (nodeIds: string[], edges: ProposedPath[]) => {
+    const bEdges: BuilderEdge[] = edges
+      .filter(e => nodeIds.includes(e.from) && nodeIds.includes(e.to))
+      .map((e, i) => ({ id: `e${Date.now()}_${i}`, from: e.from, to: e.to, type: e.type, moderates: e.moderates && nodeIds.includes(e.moderates) ? e.moderates : undefined }));
+    const directed = bEdges.filter(e => e.type === 'direct' || e.type === 'mediation');
+    const depth: Record<string, number> = {}; nodeIds.forEach(id => { depth[id] = 0; });
+    for (let it = 0; it < nodeIds.length + 1; it++) {
+      let changed = false;
+      directed.forEach(e => { if (depth[e.to] < depth[e.from] + 1) { depth[e.to] = depth[e.from] + 1; changed = true; } });
+      if (!changed) break;
+    }
+    bEdges.filter(e => e.type === 'moderation' && e.moderates).forEach(e => {
+      if (!directed.some(d => d.from === e.from || d.to === e.from)) depth[e.from] = Math.max(0, depth[e.moderates!] ?? 0);
+    });
+    const maxDepth = Math.max(0, ...Object.values(depth));
+    const byDepth: Record<number, string[]> = {};
+    nodeIds.forEach(id => { const d = depth[id]; (byDepth[d] = byDepth[d] || []).push(id); });
+    const colGap = maxDepth > 0 ? (LOGICAL_W - 320) / maxDepth : 0;
+    const nodes: BuilderNode[] = nodeIds.map(id => {
+      const d = depth[id]; const col = byDepth[d]; const idx = col.indexOf(id);
+      return { id, x: 160 + d * colGap, y: LOGICAL_H / 2 + (idx - (col.length - 1) / 2) * 120 };
+    });
+    commit({ nodes, edges: bEdges });
+    setZoom(1); setPan({ x: 0, y: 0 });
+  };
   // Find on Canvas: pan/zoom so the node is centred, then briefly highlight it.
   const focusNode = (id: string) => {
     const n = graph.nodes.find(nn => nn.id === id);
@@ -703,6 +743,10 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
         </button>
         <button onClick={exportPNG} disabled={graph.nodes.length === 0} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-200 disabled:opacity-40" title="Export the diagram as a high-resolution PNG">
           <Download className="w-4 h-4" /> PNG
+        </button>
+        <button onClick={() => setPaletteOpen(true)} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-purple-700 hover:bg-purple-50"
+          title="Command palette: search variables, run actions, or describe a model in plain English (⌘K)">
+          <Sparkles className="w-4 h-4" /> Assist <kbd className="hidden sm:inline text-[10px] text-purple-400 border border-purple-200 rounded px-1">⌘K</kbd>
         </button>
         {mode === 'connect' && (
           <span className="text-xs ml-1" style={{ color: drawType === 'covariance' ? TYPE_META.covariance.color : '#1d4ed8' }}>
@@ -829,6 +873,26 @@ export function PathModelBuilder({ columns, graph, onGraphChange, onModelDerived
           {derived.moderators.length > 0 && ` · ${derived.moderators.length} moderation(s)`}
         </span>
       </div>
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        variables={varIndex}
+        inModel={graph.nodes.map(n => n.id)}
+        onAdd={addNode}
+        onFind={focusNode}
+        onApplyModel={applyModel}
+        actions={[
+          { id: 'autolayout', label: 'Auto-layout', hint: 'Arrange nodes by causal order', run: () => graph.nodes.length && autoLayout() },
+          { id: 'select', label: 'Select / move mode', run: () => { setMode('select'); setPendingFrom(null); } },
+          { id: 'draw', label: 'Draw path mode', hint: 'Connect two variables', run: () => { setMode('connect'); setDrawType('direct'); setPendingFrom(null); } },
+          { id: 'cov', label: 'Draw covariance mode', run: () => { setMode('connect'); setDrawType('covariance'); setPendingFrom(null); } },
+          { id: 'erase', label: 'Erase mode', run: () => { setMode('erase'); setPendingFrom(null); setSelectedEdge(null); } },
+          { id: 'reset', label: 'Reset view', run: () => { setZoom(1); setPan({ x: 0, y: 0 }); } },
+          { id: 'png', label: 'Export PNG', run: () => graph.nodes.length && exportPNG() },
+          { id: 'clear', label: 'Clear model', hint: 'Remove all nodes and paths', run: () => { if (graph.nodes.length) commit({ nodes: [], edges: [] }); } },
+        ]}
+      />
     </div>
   );
 }
