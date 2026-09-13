@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState, useCallback } from 'react';
 import {
   MousePointer2, Spline, GitBranch, Trash2, Undo2, Redo2, LayoutGrid,
   Maximize2, Plus, Play, CheckCircle2, AlertTriangle, XCircle, Info, ZoomIn, ZoomOut, Circle, Square,
-  Code2, Copy, Check, FileStack, Users, SendHorizontal,
+  Code2, Copy, Check, FileStack, Users, SendHorizontal, Expand, Shrink, X,
 } from 'lucide-react';
 import { VariableExplorer } from './VariableExplorer';
 import { type VariableInfo, type VarStats } from '../lib/pathVariableUtils';
@@ -55,6 +55,7 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
   const [showIssues, setShowIssues] = useState(false);
   const [showSyntax, setShowSyntax] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ id: string | null; dx: number; dy: number; panX: number; panY: number; panning: boolean } | null>(null);
@@ -100,18 +101,54 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
     return { x: 60 + (n % 5) * 150, y: 90 + Math.floor(n / 5) * 120 };
   };
 
+  // The latent an explorer-added indicator will attach to (the selected latent).
+  const activeLatent = selected ? graph.nodes.find((n) => n.id === selected && n.kind === 'latent') || null : null;
+
+  // Place a new indicator just below its latent, fanned out by how many it has.
+  const nearLatentSpot = (lat: SemNode, g: SemGraph) => {
+    const count = g.edges.filter((e) => e.kind === 'loading' && (e.from === lat.id || e.to === lat.id)).length;
+    return { x: Math.max(0, lat.x - 80 + count * 48), y: lat.y + 130 };
+  };
+
   // ── Node / edge operations ────────────────────────────────────────────────────
   const addLatent = () => {
     const count = graph.nodes.filter((n) => n.kind === 'latent').length + 1;
     const name = `Latent${count}`;
     const spot = freeSpot();
-    commit({ ...graph, nodes: [...graph.nodes, { id: makeId('lat'), kind: 'latent', name, x: spot.x, y: spot.y }] });
+    const id = makeId('lat');
+    commit({ ...graph, nodes: [...graph.nodes, { id, kind: 'latent', name, x: spot.x, y: spot.y }] });
+    setSelected(id); // auto-select so the next explorer clicks become its indicators
   };
 
+  // Explorer "Add": create the observed node if needed, and — if a latent is
+  // selected — attach it as an indicator immediately (the reliable connect path,
+  // no canvas precision required). Falls back to just dropping a node otherwise.
   const addObserved = (colName: string) => {
-    if (graph.nodes.some((n) => n.kind === 'observed' && n.name === colName)) return;
-    const spot = freeSpot();
-    commit({ ...graph, nodes: [...graph.nodes, { id: makeId('obs'), kind: 'observed', name: colName, x: spot.x, y: spot.y }] });
+    let nodes = graph.nodes;
+    let edges = graph.edges;
+    let obs = nodes.find((n) => n.kind === 'observed' && n.name === colName);
+    if (!obs) {
+      const spot = activeLatent ? nearLatentSpot(activeLatent, graph) : freeSpot();
+      obs = { id: makeId('obs'), kind: 'observed', name: colName, x: spot.x, y: spot.y };
+      nodes = [...nodes, obs];
+    }
+    if (activeLatent) {
+      const exists = edges.some((e) => e.kind === 'loading' && ((e.from === activeLatent.id && e.to === obs!.id) || (e.from === obs!.id && e.to === activeLatent.id)));
+      if (!exists) edges = [...edges, { id: makeId('load'), from: activeLatent.id, to: obs.id, kind: 'loading' }];
+    }
+    commit({ ...graph, nodes, edges });
+  };
+
+  // Remove an indicator from a latent (drops the loading edge; removes the node
+  // too if it's no longer connected to anything).
+  const detachIndicator = (latentName: string, indName: string) => {
+    const lat = graph.nodes.find((n) => n.kind === 'latent' && n.name === latentName);
+    const obs = graph.nodes.find((n) => n.kind === 'observed' && n.name === indName);
+    if (!lat || !obs) return;
+    const edges = graph.edges.filter((e) => !(e.kind === 'loading' && ((e.from === lat.id && e.to === obs.id) || (e.from === obs.id && e.to === lat.id))));
+    const stillUsed = edges.some((e) => e.from === obs.id || e.to === obs.id);
+    const nodes = stillUsed ? graph.nodes : graph.nodes.filter((n) => n.id !== obs.id);
+    commit({ ...graph, nodes, edges });
   };
 
   const removeObservedByName = (colName: string) => {
@@ -239,8 +276,10 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
     >{icon}<span className="hidden sm:inline">{label}</span></button>
   );
 
+  const canvasHeight = expanded ? 'calc(100vh - 250px)' : 560;
+
   return (
-    <div className="space-y-3">
+    <div className={expanded ? 'fixed inset-0 z-50 bg-white p-4 overflow-auto space-y-3' : 'space-y-3'}>
       {/* Family selector */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium text-gray-700">Model Type:</span>
@@ -309,28 +348,35 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
             <button onClick={() => setView((v) => ({ ...v, scale: Math.max(0.3, v.scale - 0.15) }))} title="Zoom out" className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-200"><ZoomOut className="w-3.5 h-3.5" /></button>
             <div className="flex-1" />
             <button
+              onClick={() => { setExpanded((v) => !v); setTimeout(fitToScreen, 60); }}
+              title={expanded ? 'Exit fullscreen' : 'Expand to fullscreen'}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition ${expanded ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            >{expanded ? <Shrink className="w-3.5 h-3.5" /> : <Expand className="w-3.5 h-3.5" />}<span className="hidden sm:inline">{expanded ? 'Exit' : 'Expand'}</span></button>
+            <button
               onClick={() => setShowSyntax((s) => !s)}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition ${showSyntax ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
             ><Code2 className="w-3.5 h-3.5" /><span className="hidden sm:inline">Syntax</span></button>
             <button onClick={clearModel} className="text-xs text-gray-400 hover:text-red-600">Clear</button>
           </div>
 
-          {/* Mode hint */}
-          {(mode === 'loading' || mode === 'path') && (
-            <div className="px-3 py-1.5 bg-blue-50 border-b border-blue-100 text-xs text-blue-800 flex items-center gap-1.5">
-              <Info className="w-3.5 h-3.5" />
-              {mode === 'loading'
-                ? 'Click a latent variable, then an observed variable, to connect an indicator.'
-                : 'Click a predictor latent variable, then an outcome latent variable, to draw a structural path.'}
-              {pendingSource && <span className="font-medium">· source: {nodeById(graph, pendingSource)?.label || nodeById(graph, pendingSource)?.name}</span>}
-            </div>
-          )}
+          {/* Persistent hint bar — always rendered (fixed height) so switching
+              modes never reflows the canvas underneath the cursor. */}
+          <div className="h-7 flex items-center gap-1.5 px-3 border-b border-blue-100 bg-blue-50 text-xs text-blue-800 overflow-hidden">
+            <Info className="w-3.5 h-3.5 flex-shrink-0" />
+            <span className="truncate">
+              {mode === 'delete' ? 'Click a node or arrow to delete it.'
+                : mode === 'loading' ? <>Click a latent, then an observed variable, to connect an indicator.{pendingSource && <b> · from: {nodeById(graph, pendingSource)?.label || nodeById(graph, pendingSource)?.name}</b>}</>
+                : mode === 'path' ? <>Click a predictor latent, then an outcome latent, to draw a path.{pendingSource && <b> · from: {nodeById(graph, pendingSource)?.label || nodeById(graph, pendingSource)?.name}</b>}</>
+                : activeLatent ? <>Adding indicators to <b>{activeLatent.label || activeLatent.name}</b> — click variables in the explorer to attach them.</>
+                : 'Tip: click “+ Latent”, then click variables in the explorer to add its indicators.'}
+            </span>
+          </div>
 
           {/* Canvas */}
           <div
             ref={canvasRef}
             className="relative overflow-hidden bg-[radial-gradient(circle,#e5e7eb_1px,transparent_1px)] [background-size:20px_20px]"
-            style={{ height: 460, cursor: mode === 'select' ? 'grab' : 'crosshair' }}
+            style={{ height: canvasHeight, cursor: mode === 'select' ? 'grab' : 'crosshair' }}
             onMouseDown={onCanvasPointerDown}
             onMouseMove={onPointerMove}
             onMouseUp={onPointerUp}
@@ -340,7 +386,7 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
               <div className="absolute inset-0 flex flex-col items-center justify-center text-center text-gray-400 pointer-events-none px-6">
                 <GitBranch className="w-12 h-12 mb-2 text-gray-300" />
                 <p className="text-sm font-medium text-gray-500">Build your model visually</p>
-                <p className="text-xs mt-1">Add a latent variable, drag observed variables from the explorer, then use Measurement and Path modes to connect them.</p>
+                <p className="text-xs mt-1">1. Click <b>“+ Latent”</b> to add a factor (it becomes selected).<br />2. Click variables in the explorer — they attach as its indicators.<br />3. Use <b>Path</b> mode to draw structural paths between latents.</p>
               </div>
             )}
             <div className="absolute top-0 left-0 origin-top-left" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}>
@@ -446,9 +492,12 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
                     <p className="text-gray-500 mb-1">Indicators ({translated.measurementModel[selNode.name]?.length || 0})</p>
                     <div className="flex flex-wrap gap-1">
                       {(translated.measurementModel[selNode.name] || []).map((ind) => (
-                        <span key={ind} className="px-1.5 py-0.5 bg-gray-100 rounded text-gray-700">{ind}</span>
+                        <span key={ind} className="inline-flex items-center gap-1 pl-1.5 pr-1 py-0.5 bg-emerald-50 border border-emerald-200 rounded text-emerald-800">
+                          {ind}
+                          <button onClick={() => detachIndicator(selNode.name, ind)} title="Remove indicator" className="text-emerald-400 hover:text-red-600"><X className="w-3 h-3" /></button>
+                        </span>
                       ))}
-                      {!(translated.measurementModel[selNode.name] || []).length && <span className="text-gray-400 italic">none — use Measurement mode</span>}
+                      {!(translated.measurementModel[selNode.name] || []).length && <span className="text-blue-600">Click variables in the explorer to add them here →</span>}
                     </div>
                   </div>
                   <p className="text-gray-500">Identification: <span className="text-gray-800">marker / fixed-variance (std. solution)</span></p>
