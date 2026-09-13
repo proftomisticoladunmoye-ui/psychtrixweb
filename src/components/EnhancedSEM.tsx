@@ -270,6 +270,22 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
         { index: 'AIC', value: results.fitIndices.aic },
         { index: 'BIC', value: results.fitIndices.bic },
       ], 'SEM_Fit_Indices');
+    else if (format === 'csv-reliability') exportToCSV(
+      Object.entries(results.measurementModel.reliability).map(([factor, r]: any) => ({
+        factor,
+        cronbach_alpha: r.cronbach_alpha,
+        composite_reliability: r.composite_reliability,
+        ave: r.ave,
+        msv: r.maxSharedVariance,
+        asv: r.averageSharedVariance,
+      })), 'SEM_Reliability_Validity');
+    else if (format === 'csv-mediation') exportToCSV(
+      (results.mediation || []).map((m: any) => ({
+        iv: m.iv, mediator: m.mediator, dv: m.dv,
+        direct: m.directEffect, indirect: m.indirectEffect, total: m.totalEffect,
+        proportion: m.proportion, sobel_z: m.sobelZ, sobel_p: m.sobelP,
+        ci_lower: m.bootstrapCI?.[0], ci_upper: m.bootstrapCI?.[1], type: m.mediationType,
+      })), 'SEM_Mediation');
   };
 
   // ── Results View ────────────────────────────────────────────────────────────
@@ -871,12 +887,16 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
         {/* Export */}
         <div className="bg-white rounded-xl border border-gray-200 p-6">
           <h4 className="text-lg font-bold text-gray-900 mb-4">Export Results</h4>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+          <p className="text-xs text-gray-500 mb-3">Word &amp; HTML reports and JSON include the full output (fit, loadings, reliability/AVE/HTMT, effects, mediation, modification indices, residuals, diagnostics). CSVs are per-table extracts.</p>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
             {[
               { label: 'Word Report', fmt: 'word', cls: 'bg-blue-600 hover:bg-blue-700' },
               { label: 'HTML Report', fmt: 'html', cls: 'bg-green-600 hover:bg-green-700' },
-              { label: 'JSON Data', fmt: 'json', cls: 'bg-slate-600 hover:bg-slate-700' },
+              { label: 'JSON (full)', fmt: 'json', cls: 'bg-slate-600 hover:bg-slate-700' },
               { label: 'Paths CSV', fmt: 'csv-paths', cls: 'bg-teal-600 hover:bg-teal-700' },
+              { label: 'Loadings CSV', fmt: 'csv-loadings', cls: 'bg-teal-600 hover:bg-teal-700' },
+              { label: 'Reliability CSV', fmt: 'csv-reliability', cls: 'bg-teal-600 hover:bg-teal-700' },
+              ...(results.mediation?.length ? [{ label: 'Mediation CSV', fmt: 'csv-mediation', cls: 'bg-teal-600 hover:bg-teal-700' }] : []),
               { label: 'Fit CSV', fmt: 'csv-fit', cls: 'bg-orange-600 hover:bg-orange-700' },
             ].map(btn => (
               <button

@@ -3095,6 +3095,138 @@ export const exportCFAToHTML = (results: any, studyName: string = 'CFA Analysis'
   URL.revokeObjectURL(link.href);
 };
 
+// Shared, complete SEM report body used by BOTH the Word and HTML exports so they
+// stay in sync and capture everything the estimator produced (mirrors the on-screen
+// results view). Sections with no data are omitted; nothing is fabricated.
+const buildSEMReportBody = (results: any): string => {
+  const num = (v: any, d = 3) => (v == null || isNaN(Number(v))) ? '—' : Number(v).toFixed(d);
+  const pv = (v: any) => v == null ? '—' : (Number(v) < 0.001 ? '<.001' : Number(v).toFixed(3));
+  const fi = results.fitIndices || {};
+  const mm = results.measurementModel || {};
+  const sm = results.structuralModel || {};
+  const diag = results.diagnostics || {};
+  const parts: string[] = [];
+
+  // Estimation & identification
+  const ids = diag.identificationStatus;
+  parts.push(`<h2>Estimation &amp; Identification</h2><table>
+    <tr><th>Property</th><th>Value</th></tr>
+    <tr><td>Estimator</td><td>${results.estimator || (fi.scaled ? 'DWLS (robust, mean-adjusted)' : 'ULS')}</td></tr>
+    ${ids ? `<tr><td>Identification</td><td>${ids.identified ? 'Identified' : 'Not identified'} ${ids.tRule ? '(t-rule satisfied)' : '(t-rule violated)'}</td></tr>
+    <tr><td>Details</td><td>${ids.details || ''}</td></tr>` : ''}
+  </table>`);
+
+  // Fit indices — full set
+  parts.push(`<h2>Model Fit Indices</h2><table>
+    <tr><th>Index</th><th>Value</th></tr>
+    <tr><td>χ²</td><td>${num(fi.chisq, 2)}</td></tr>
+    <tr><td>df</td><td>${fi.df != null ? String(fi.df) : '—'}</td></tr>
+    <tr><td>p-value</td><td>${pv(fi.pvalue)}</td></tr>
+    <tr><td>χ²/df</td><td>${num(fi.chisq_df_ratio)}</td></tr>
+    <tr><td>CFI</td><td>${num(fi.cfi)}</td></tr>
+    <tr><td>TLI / NNFI</td><td>${num(fi.nnfi ?? fi.tli)}</td></tr>
+    <tr><td>NFI</td><td>${num(fi.nfi)}</td></tr>
+    <tr><td>RMSEA</td><td>${num(fi.rmsea)}${fi.rmsea_ci_lower != null ? ` [${num(fi.rmsea_ci_lower)}, ${num(fi.rmsea_ci_upper)}]` : ''}</td></tr>
+    <tr><td>SRMR</td><td>${num(fi.srmr)}</td></tr>
+    <tr><td>WRMR</td><td>${num(fi.wrmr)}</td></tr>
+    <tr><td>GFI</td><td>${num(fi.gfi)}</td></tr>
+    <tr><td>AGFI</td><td>${num(fi.agfi)}</td></tr>
+    <tr><td>PGFI</td><td>${num(fi.pgfi)}</td></tr>
+    <tr><td>PNFI</td><td>${num(fi.pnfi)}</td></tr>
+    <tr><td>AIC</td><td>${num(fi.aic, 2)}</td></tr>
+    <tr><td>BIC</td><td>${num(fi.bic, 2)}</td></tr>
+  </table>`);
+
+  // Factor loadings (with R²)
+  const fl = mm.factorLoadings || [];
+  if (fl.length) parts.push(`<h2>Factor Loadings</h2><table>
+    <tr><th>Item</th><th>Factor</th><th>λ (std)</th><th>SE</th><th>z</th><th>p-value</th><th>R²</th></tr>
+    ${fl.map((l: any) => `<tr><td>${l.item}</td><td>${l.factor}</td><td>${num(l.std_loading ?? l.loading)}</td><td>${num(l.se)}</td><td>${num(l.z, 2)}</td><td>${pv(l.pvalue)}</td><td>${num(l.r_squared)}</td></tr>`).join('')}
+  </table>`);
+
+  // Reliability & validity
+  const rel = mm.reliability || {};
+  const relRows = Object.entries(rel);
+  if (relRows.length) parts.push(`<h2>Reliability &amp; Validity</h2><table>
+    <tr><th>Factor</th><th>α</th><th>CR</th><th>AVE</th><th>MSV</th><th>ASV</th></tr>
+    ${relRows.map(([f, r]: any) => `<tr><td>${f}</td><td>${num(r.cronbach_alpha)}</td><td>${num(r.composite_reliability)}</td><td>${num(r.ave)}</td><td>${num(r.maxSharedVariance)}</td><td>${num(r.averageSharedVariance)}</td></tr>`).join('')}
+  </table><p class="info">AVE &gt; .50 = convergent validity; AVE &gt; MSV = discriminant validity.</p>`);
+
+  // HTMT
+  const htmt = mm.htmt || {};
+  const htmtRows = Object.entries(htmt);
+  if (htmtRows.length) parts.push(`<h2>HTMT Discriminant Validity</h2><table>
+    <tr><th>Pair</th><th>HTMT</th><th>Verdict</th></tr>
+    ${htmtRows.map(([pair, v]: any) => `<tr><td>${String(pair).replace('_', ' vs ')}</td><td>${num(v)}</td><td>${Number(v) < 0.85 ? 'Supported' : Number(v) < 0.90 ? 'Borderline' : 'Violated'}</td></tr>`).join('')}
+  </table><p class="info">Threshold: &lt;.85 (Henseler 2015), &lt;.90 (Gold 2001).</p>`);
+
+  // Factor score determinacy
+  const fsd = diag.factorScoreDeterminacy || {};
+  const fsdRows = Object.entries(fsd);
+  if (fsdRows.length) parts.push(`<h2>Factor Score Determinacy</h2><table>
+    <tr><th>Factor</th><th>FSD</th><th>Verdict</th></tr>
+    ${fsdRows.map(([f, v]: any) => `<tr><td>${f}</td><td>${num(v)}</td><td>${Number(v) >= 0.80 ? 'Adequate' : 'Low'}</td></tr>`).join('')}
+  </table><p class="info">Threshold: FSD ≥ .80 (Grice 2001).</p>`);
+
+  // Structural paths (std + unstd)
+  const paths = sm.paths || results.pathCoefficients || [];
+  if (paths.length) parts.push(`<h2>Structural Path Coefficients</h2><table>
+    <tr><th>From</th><th>To</th><th>β (std)</th><th>B (unstd)</th><th>SE</th><th>z</th><th>p-value</th></tr>
+    ${paths.map((p: any) => `<tr><td>${p.from}</td><td>${p.to}</td><td>${num(p.std_coefficient ?? p.coefficient)}</td><td>${num(p.coefficient)}</td><td>${num(p.se)}</td><td>${num(p.z, 2)}</td><td>${pv(p.pvalue)}</td></tr>`).join('')}
+  </table>`);
+
+  // R² variance explained
+  const rsq = sm.rSquared || {};
+  const rsqRows = Object.entries(rsq);
+  if (rsqRows.length) parts.push(`<h2>R² Variance Explained</h2><table>
+    <tr><th>Variable</th><th>R²</th></tr>
+    ${rsqRows.map(([v, r]: any) => `<tr><td>${v}</td><td>${num(r)}</td></tr>`).join('')}
+  </table>`);
+
+  // Effects decomposition
+  const ea = results.effectArrays;
+  if (ea) {
+    const effTable = (rows: any[], withVia = false) => rows.length ? `<table>
+      <tr><th>From</th><th>To</th>${withVia ? '<th>Via</th>' : ''}<th>Effect</th><th>SE</th><th>p-value</th>${withVia ? '<th>95% CI</th>' : ''}</tr>
+      ${rows.map((e: any) => `<tr><td>${e.from}</td><td>${e.to}</td>${withVia ? `<td>${e.via || ''}</td>` : ''}<td>${num(e.effect)}</td><td>${num(e.se)}</td><td>${pv(e.pvalue)}</td>${withVia ? `<td>${e.bootstrapCI ? `[${num(e.bootstrapCI[0])}, ${num(e.bootstrapCI[1])}]` : '—'}</td>` : ''}</tr>`).join('')}
+    </table>` : '<p class="info">None.</p>';
+    parts.push(`<h2>Effects Decomposition</h2>
+      <h3>Direct effects</h3>${effTable(ea.direct || [])}
+      <h3>Indirect effects</h3>${effTable(ea.indirect || [], true)}
+      <h3>Total effects</h3>${effTable(ea.total || [])}`);
+  }
+
+  // Mediation
+  const med = results.mediation || [];
+  if (med.length) parts.push(`<h2>Mediation Analysis</h2><table>
+    <tr><th>IV</th><th>Mediator</th><th>DV</th><th>Direct</th><th>Indirect</th><th>Total</th><th>Proportion</th><th>Sobel z</th><th>p-value</th><th>Type</th></tr>
+    ${med.map((m: any) => `<tr><td>${m.iv}</td><td>${m.mediator}</td><td>${m.dv}</td><td>${num(m.directEffect)}</td><td>${num(m.indirectEffect)}</td><td>${num(m.totalEffect)}</td><td>${m.proportion != null ? (Number(m.proportion) * 100).toFixed(1) + '%' : '—'}</td><td>${num(m.sobelZ)}</td><td>${pv(m.sobelP)}</td><td>${m.mediationType || ''}</td></tr>`).join('')}
+  </table><p class="info">95% CI via delta-method (Sobel 1982). Full = significant indirect, non-significant direct; partial = both significant.</p>`);
+
+  // Modification indices
+  const mi = diag.modificationIndices || [];
+  if (mi.length) parts.push(`<h2>Modification Indices</h2><table>
+    <tr><th>Parameter</th><th>Type</th><th>MI</th><th>EPC</th><th>Std EPC</th></tr>
+    ${[...mi].sort((a: any, b: any) => b.mi - a.mi).map((m: any) => `<tr><td>${m.param}</td><td>${m.type}</td><td>${num(m.mi, 2)}</td><td>${num(m.epc)}</td><td>${num(m.std_epc)}</td></tr>`).join('')}
+  </table><p class="info">MI ≥ 10 suggests freeing the parameter would substantially improve fit; free only theoretically justifiable parameters.</p>`);
+
+  // Standardised residuals (|z| ≥ 1.96)
+  const sr = (diag.standardisedResiduals || []).filter((r: any) => Math.abs(r.residual) >= 1.96);
+  if (sr.length) parts.push(`<h2>Large Standardised Residuals (|z| ≥ 1.96)</h2><table>
+    <tr><th>Row</th><th>Col</th><th>Std residual</th></tr>
+    ${[...sr].sort((a: any, b: any) => Math.abs(b.residual) - Math.abs(a.residual)).map((r: any) => `<tr><td>${r.row}</td><td>${r.col}</td><td>${num(r.residual)}</td></tr>`).join('')}
+  </table>`);
+
+  // Heywood cases
+  const hey = diag.heywoodCases || [];
+  if (hey.length) parts.push(`<h2>Heywood Cases</h2><table>
+    <tr><th>Item</th><th>Loading</th><th>Issue</th></tr>
+    ${hey.map((h: any) => `<tr><td>${h.item}</td><td>${num(h.loading)}</td><td>${h.issue}</td></tr>`).join('')}
+  </table>`);
+
+  return parts.join('\n');
+};
+
 export const exportSEMToWord = (results: any, studyName: string = 'SEM Analysis') => {
   if (!results) return;
 
@@ -3110,6 +3242,7 @@ export const exportSEMToWord = (results: any, studyName: string = 'SEM Analysis'
         body { font-family: 'Calibri', sans-serif; font-size: 11pt; line-height: 1.5; margin: 40px; }
         h1 { font-size: 16pt; font-weight: bold; margin-bottom: 12pt; color: #1e40af; }
         h2 { font-size: 14pt; font-weight: bold; margin-top: 18pt; margin-bottom: 10pt; color: #2563eb; }
+        h3 { font-size: 12pt; font-weight: bold; margin-top: 10pt; margin-bottom: 6pt; color: #374151; }
         table { border-collapse: collapse; width: 100%; margin: 12pt 0; }
         th, td { border: 1px solid #000; padding: 6pt; text-align: left; }
         th { background-color: #dbeafe; font-weight: bold; }
@@ -3119,62 +3252,8 @@ export const exportSEMToWord = (results: any, studyName: string = 'SEM Analysis'
     <body>
       <h1>${studyName}</h1>
       <p class="info">Generated: ${timestamp}</p>
-
-      <h2>Model Fit Indices</h2>
-      <table>
-        <tr>
-          <th>Index</th>
-          <th>Value</th>
-        </tr>
-        ${(() => {
-          const fi = results.fitIndices || {};
-          const show: Array<[string, string]> = [
-            ['χ²', fi.chisq != null ? Number(fi.chisq).toFixed(2) : '—'],
-            ['df', fi.df != null ? String(fi.df) : '—'],
-            ['p-value', fi.pvalue != null ? Number(fi.pvalue).toFixed(3) : '—'],
-            ['CFI', fi.cfi != null ? Number(fi.cfi).toFixed(3) : '—'],
-            ['TLI', fi.tli != null ? Number(fi.tli).toFixed(3) : '—'],
-            ['RMSEA', fi.rmsea != null ? Number(fi.rmsea).toFixed(3) : '—'],
-            ['SRMR', fi.srmr != null ? Number(fi.srmr).toFixed(3) : '—'],
-            ['AIC', fi.aic != null ? Number(fi.aic).toFixed(2) : '—'],
-            ['BIC', fi.bic != null ? Number(fi.bic).toFixed(2) : '—'],
-          ];
-          if (fi.scaled) show.push(['Estimator', 'DWLS (robust, mean-adjusted)']);
-          return show.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
-        })()}
-      </table>
-
-      <h2>Structural Path Coefficients</h2>
-      <table>
-        <tr>
-          <th>From</th>
-          <th>To</th>
-          <th>β (std)</th>
-          <th>SE</th>
-          <th>z</th>
-          <th>p-value</th>
-        </tr>
-        ${((results.structuralModel?.paths) || results.pathCoefficients || []).map((path: any) => `
-          <tr>
-            <td>${path.from}</td>
-            <td>${path.to}</td>
-            <td>${Number(path.std_coefficient ?? path.coefficient).toFixed(3)}</td>
-            <td>${Number(path.se).toFixed(3)}</td>
-            <td>${path.z != null ? Number(path.z).toFixed(3) : 'N/A'}</td>
-            <td>${path.pvalue != null ? Number(path.pvalue).toFixed(3) : 'N/A'}</td>
-          </tr>
-        `).join('')}
-      </table>
-
-      ${(() => {
-        const fl = results.measurementModel?.factorLoadings || [];
-        return fl.length ? `<h2>Factor Loadings</h2><table>
-          <tr><th>Item</th><th>Factor</th><th>λ (std)</th><th>SE</th><th>z</th><th>p-value</th></tr>
-          ${fl.map((l: any) => `<tr><td>${l.item}</td><td>${l.factor}</td><td>${Number(l.std_loading ?? l.loading).toFixed(3)}</td><td>${Number(l.se).toFixed(3)}</td><td>${Number(l.z).toFixed(3)}</td><td>${Number(l.pvalue).toFixed(3)}</td></tr>`).join('')}
-        </table>` : '';
-      })()}
-
-      <p class="info">Note: SEM path diagram should be exported separately as PNG</p>
+      ${buildSEMReportBody(results)}
+      <p class="info">Note: the SEM path diagram can be exported separately as PNG/SVG from the diagram toolbar.</p>
     </body>
     </html>
   `;
@@ -3264,6 +3343,8 @@ export const exportSEMToHTML = (results: any, studyName: string = 'SEM Analysis'
         .print-btn:hover {
           background-color: #1e40af;
         }
+        h3 { color: #374151; font-size: 18px; margin-top: 20px; margin-bottom: 8px; }
+        .info { color: #6b7280; font-size: 13px; margin: 6px 0; }
         @media print {
           body { background: white; padding: 0; }
           .container { box-shadow: none; padding: 20px; }
@@ -3276,62 +3357,8 @@ export const exportSEMToHTML = (results: any, studyName: string = 'SEM Analysis'
         <h1>${studyName}</h1>
         <p style="color: #6b7280; font-size: 14px;">Generated: ${timestamp}</p>
         <button class="print-btn" onclick="window.print()">Print Report</button>
-
-        <h2>Model Fit Indices</h2>
-        <table>
-          <tr>
-            <th>Index</th>
-            <th>Value</th>
-          </tr>
-          ${(() => {
-            const fi = results.fitIndices || {};
-            const show: Array<[string, string]> = [
-              ['χ²', fi.chisq != null ? Number(fi.chisq).toFixed(2) : '—'],
-              ['df', fi.df != null ? String(fi.df) : '—'],
-              ['p-value', fi.pvalue != null ? Number(fi.pvalue).toFixed(3) : '—'],
-              ['CFI', fi.cfi != null ? Number(fi.cfi).toFixed(3) : '—'],
-              ['TLI', fi.tli != null ? Number(fi.tli).toFixed(3) : '—'],
-              ['RMSEA', fi.rmsea != null ? Number(fi.rmsea).toFixed(3) : '—'],
-              ['SRMR', fi.srmr != null ? Number(fi.srmr).toFixed(3) : '—'],
-              ['AIC', fi.aic != null ? Number(fi.aic).toFixed(2) : '—'],
-              ['BIC', fi.bic != null ? Number(fi.bic).toFixed(2) : '—'],
-            ];
-            if (fi.scaled) show.push(['Estimator', 'DWLS (robust, mean-adjusted)']);
-            return show.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
-          })()}
-        </table>
-
-        <h2>Structural Path Coefficients</h2>
-        <table>
-          <tr>
-            <th>From</th>
-            <th>To</th>
-            <th>β (std)</th>
-            <th>SE</th>
-            <th>z</th>
-            <th>p-value</th>
-          </tr>
-          ${((results.structuralModel?.paths) || results.pathCoefficients || []).map((path: any) => `
-            <tr>
-              <td>${path.from}</td>
-              <td>${path.to}</td>
-              <td>${Number(path.std_coefficient ?? path.coefficient).toFixed(3)}</td>
-              <td>${Number(path.se).toFixed(3)}</td>
-              <td>${path.z != null ? Number(path.z).toFixed(3) : 'N/A'}</td>
-              <td>${path.pvalue != null ? Number(path.pvalue).toFixed(3) : 'N/A'}</td>
-            </tr>
-          `).join('')}
-        </table>
-
-        ${(() => {
-          const fl = results.measurementModel?.factorLoadings || [];
-          return fl.length ? `<h2>Factor Loadings</h2><table>
-            <tr><th>Item</th><th>Factor</th><th>λ (std)</th><th>SE</th><th>z</th><th>p-value</th></tr>
-            ${fl.map((l: any) => `<tr><td>${l.item}</td><td>${l.factor}</td><td>${Number(l.std_loading ?? l.loading).toFixed(3)}</td><td>${Number(l.se).toFixed(3)}</td><td>${Number(l.z).toFixed(3)}</td><td>${Number(l.pvalue).toFixed(3)}</td></tr>`).join('')}
-          </table>` : '';
-        })()}
-
-        <p style="color: #6b7280; font-size: 14px; margin-top: 20px;">Note: SEM path diagram should be exported separately as PNG</p>
+        ${buildSEMReportBody(results)}
+        <p class="info" style="margin-top: 20px;">Note: the SEM path diagram can be exported separately as PNG/SVG from the diagram toolbar.</p>
       </div>
     </body>
     </html>
