@@ -28,8 +28,8 @@ export const SEM_FAMILIES: SemFamilyInfo[] = [
   { id: 'path', label: 'Path Model', supported: true },
   { id: 'full', label: 'Full SEM', supported: true },
   { id: 'mediation', label: 'Mediation SEM', supported: true },
-  { id: 'second-order', label: 'Second-Order CFA', supported: true },
   { id: 'moderation', label: 'Moderation SEM', supported: false, note: 'Latent interactions are not yet estimable here — use Multi-group SEM for group moderation.' },
+  { id: 'second-order', label: 'Second-Order CFA', supported: false, note: 'A higher-order factor is drawn, but the estimator fits first-order factors only — true higher-order estimation is planned.' },
   { id: 'multigroup', label: 'Multigroup SEM', supported: false, note: 'Use the Multi-group SEM tab; visual multigroup wiring is planned.' },
   { id: 'invariance', label: 'Measurement Invariance', supported: false, note: 'Use the Measurement Invariance tab; shared-graph wiring is planned.' },
   { id: 'mimic', label: 'MIMIC Model', supported: false, note: 'Covariates → latent direct effects are not yet estimable client-side.' },
@@ -197,3 +197,110 @@ export function validateGraph(g: SemGraph): ValidationIssue[] {
 
   return issues;
 }
+
+// ── Syntax synchronization (visual → lavaan-style) ─────────────────────────────
+// One-way, always-faithful rendering of the CURRENT graph as lavaan syntax. It is
+// derived from toSEMModel(), so what you read is exactly what the estimator fits —
+// no separate representation that could drift out of sync. Read-only by design:
+// the visual model stays the single source of truth (editing text back would risk
+// inconsistency), so this is a live mirror, not a second editor.
+export function toLavaanSyntax(g: SemGraph): string {
+  const { measurementModel, structuralPaths } = toSEMModel(g);
+  const labelOf = (latentName: string) => {
+    const n = g.nodes.find((x) => x.kind === 'latent' && x.name === latentName);
+    return n?.label && n.label !== n.name ? `  # ${n.label}` : '';
+  };
+
+  const lines: string[] = [];
+  const latents = Object.keys(measurementModel);
+
+  if (latents.length) {
+    lines.push('# Measurement model');
+    for (const lv of latents) {
+      const inds = measurementModel[lv];
+      if (inds.length) lines.push(`${lv} =~ ${inds.join(' + ')}${labelOf(lv)}`);
+      else lines.push(`# ${lv} =~ (no indicators yet)`);
+    }
+  }
+
+  if (structuralPaths.length) {
+    // Group regressions by outcome: "Y ~ X1 + X2".
+    const byOutcome = new Map<string, string[]>();
+    for (const p of structuralPaths) {
+      if (!byOutcome.has(p.to)) byOutcome.set(p.to, []);
+      byOutcome.get(p.to)!.push(p.from);
+    }
+    lines.push('', '# Structural model');
+    for (const [to, froms] of byOutcome) lines.push(`${to} ~ ${froms.join(' + ')}`);
+  }
+
+  // Explicit covariances, if the researcher drew any.
+  const covs = g.edges.filter((e) => e.kind === 'covariance');
+  if (covs.length) {
+    lines.push('', '# Covariances');
+    for (const e of covs) {
+      const a = nodeById(g, e.from), b = nodeById(g, e.to);
+      if (a && b) lines.push(`${a.name} ~~ ${b.name}`);
+    }
+  }
+
+  return lines.length ? lines.join('\n') : '# Empty model — add latent variables and indicators.';
+}
+
+// ── Model templates ─────────────────────────────────────────────────────────────
+// A template scaffolds the STRUCTURE (latent shells and the paths between them)
+// so the researcher starts from a recognisable shape, then assigns their own
+// variables as indicators. It never fabricates observed variables.
+export interface SemTemplate {
+  id: string;
+  label: string;
+  description: string;
+  family: SemFamily;
+  build: () => SemGraph;
+}
+
+const latentNode = (name: string, x: number, y: number): SemNode => ({ id: makeId('lat'), kind: 'latent', name, x, y });
+
+export const SEM_TEMPLATES: SemTemplate[] = [
+  {
+    id: 'blank', label: 'Blank Model', family: 'full',
+    description: 'Start from scratch.',
+    build: () => emptyGraph('full'),
+  },
+  {
+    id: 'cfa', label: 'CFA', family: 'cfa',
+    description: 'One latent factor — add its indicators.',
+    build: () => ({ ...emptyGraph('cfa'), nodes: [latentNode('Factor1', 260, 90)] }),
+  },
+  {
+    id: 'cfa2', label: 'Two-Factor CFA', family: 'cfa',
+    description: 'Two correlated latent factors.',
+    build: () => ({ ...emptyGraph('cfa'), nodes: [latentNode('Factor1', 180, 90), latentNode('Factor2', 460, 90)] }),
+  },
+  {
+    id: 'full', label: 'Full SEM', family: 'full',
+    description: 'Predictor → outcome, each with indicators.',
+    build: () => {
+      const x = latentNode('Predictor', 160, 110);
+      const y = latentNode('Outcome', 480, 110);
+      return { ...emptyGraph('full'), nodes: [x, y], edges: [{ id: makeId('reg'), from: x.id, to: y.id, kind: 'regression' }] };
+    },
+  },
+  {
+    id: 'mediation', label: 'Mediation', family: 'mediation',
+    description: 'X → M → Y with a direct X → Y path.',
+    build: () => {
+      const X = latentNode('X', 120, 210);
+      const M = latentNode('M', 340, 80);
+      const Y = latentNode('Y', 560, 210);
+      return {
+        ...emptyGraph('mediation'), nodes: [X, M, Y],
+        edges: [
+          { id: makeId('reg'), from: X.id, to: M.id, kind: 'regression' },
+          { id: makeId('reg'), from: M.id, to: Y.id, kind: 'regression' },
+          { id: makeId('reg'), from: X.id, to: Y.id, kind: 'regression' },
+        ],
+      };
+    },
+  },
+];

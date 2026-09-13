@@ -2,12 +2,13 @@ import React, { useMemo, useRef, useState, useCallback } from 'react';
 import {
   MousePointer2, Spline, GitBranch, Trash2, Undo2, Redo2, LayoutGrid,
   Maximize2, Plus, Play, CheckCircle2, AlertTriangle, XCircle, Info, ZoomIn, ZoomOut, Circle, Square,
+  Code2, Copy, Check, FileStack,
 } from 'lucide-react';
 import { VariableExplorer } from './VariableExplorer';
 import { type VariableInfo, type VarStats } from '../lib/pathVariableUtils';
 import {
   type SemGraph, type SemNode, type SemFamily, type SemOptions, type TranslatedModel,
-  SEM_FAMILIES, emptyGraph, makeId, nodeById, toSEMModel, validateGraph,
+  SEM_FAMILIES, SEM_TEMPLATES, emptyGraph, makeId, nodeById, toSEMModel, validateGraph, toLavaanSyntax,
 } from '../lib/semGraph';
 
 type Mode = 'select' | 'loading' | 'path' | 'delete';
@@ -48,6 +49,8 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
   const [history, setHistory] = useState<SemGraph[]>([]);
   const [future, setFuture] = useState<SemGraph[]>([]);
   const [showIssues, setShowIssues] = useState(false);
+  const [showSyntax, setShowSyntax] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ id: string | null; dx: number; dy: number; panX: number; panY: number; panning: boolean } | null>(null);
@@ -64,6 +67,23 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
   const errorCount = issues.filter((i) => i.level === 'error').length;
   const warnCount = issues.filter((i) => i.level === 'warning').length;
   const translated = useMemo(() => toSEMModel({ ...graph, family }), [graph, family]);
+  const syntax = useMemo(() => toLavaanSyntax({ ...graph, family }), [graph, family]);
+
+  const applyTemplate = (id: string) => {
+    const tpl = SEM_TEMPLATES.find((t) => t.id === id);
+    if (!tpl) return;
+    if (graph.nodes.length && !confirm(`Replace the current model with the ${tpl.label} template?`)) return;
+    const g = tpl.build();
+    commit(g);
+    setFamily(g.family);
+    setSelected(null);
+    setPendingSource(null);
+    setTimeout(fitToScreen, 0);
+  };
+
+  const copySyntax = async () => {
+    try { await navigator.clipboard.writeText(syntax); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
+  };
 
   // ── Screen → logical coordinate ──────────────────────────────────────────────
   const toLogical = (clientX: number, clientY: number) => {
@@ -220,6 +240,20 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
       {/* Family selector */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium text-gray-700">Model Type:</span>
+        {/* Start Model / templates */}
+        <div className="relative inline-flex items-center">
+          <FileStack className="w-3.5 h-3.5 text-gray-400 absolute left-2 pointer-events-none" />
+          <select
+            value=""
+            onChange={(e) => { if (e.target.value) { applyTemplate(e.target.value); e.target.value = ''; } }}
+            title="Start from a template structure (no variables are fabricated)"
+            className="pl-7 pr-2 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100 hover:bg-blue-100 cursor-pointer"
+          >
+            <option value="">Start Model…</option>
+            {SEM_TEMPLATES.map((t) => <option key={t.id} value={t.id}>{t.label} — {t.description}</option>)}
+          </select>
+        </div>
+        <div className="w-px h-5 bg-gray-200" />
         <div className="flex flex-wrap gap-1.5">
           {SEM_FAMILIES.map((f) => (
             <button
@@ -270,6 +304,10 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
             <button onClick={() => setView((v) => ({ ...v, scale: Math.min(2, v.scale + 0.15) }))} title="Zoom in" className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-200"><ZoomIn className="w-3.5 h-3.5" /></button>
             <button onClick={() => setView((v) => ({ ...v, scale: Math.max(0.3, v.scale - 0.15) }))} title="Zoom out" className="p-1.5 rounded-lg text-gray-500 hover:bg-gray-200"><ZoomOut className="w-3.5 h-3.5" /></button>
             <div className="flex-1" />
+            <button
+              onClick={() => setShowSyntax((s) => !s)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition ${showSyntax ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            ><Code2 className="w-3.5 h-3.5" /><span className="hidden sm:inline">Syntax</span></button>
             <button onClick={clearModel} className="text-xs text-gray-400 hover:text-red-600">Clear</button>
           </div>
 
@@ -366,6 +404,19 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
             </span>
             <span className="text-gray-400">Drag background to pan · drag node to move</span>
           </div>
+
+          {/* Syntax panel — live, faithful mirror of the model that will be estimated */}
+          {showSyntax && (
+            <div className="border-t border-gray-100 bg-gray-900">
+              <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-800">
+                <span className="text-xs font-medium text-gray-300 flex items-center gap-1.5"><Code2 className="w-3.5 h-3.5" /> lavaan-style syntax <span className="text-gray-500">· reflects exactly what will be estimated</span></span>
+                <button onClick={copySyntax} className="flex items-center gap-1 text-xs text-gray-400 hover:text-white">
+                  {copied ? <><Check className="w-3.5 h-3.5 text-green-400" /> Copied</> : <><Copy className="w-3.5 h-3.5" /> Copy</>}
+                </button>
+              </div>
+              <pre className="px-3 py-2 text-xs text-gray-100 font-mono overflow-x-auto whitespace-pre max-h-40">{syntax}</pre>
+            </div>
+          )}
         </div>
 
         {/* Inspector */}
