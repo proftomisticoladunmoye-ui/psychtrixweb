@@ -10,6 +10,9 @@ import {
 } from '../lib/exportUtils';
 import { SEMPathDiagram } from './SEMPathDiagram';
 import { SEMEstimator, type SEMResults as LibSEMResults } from '../lib/structuralEquationModeling';
+import { SemModelBuilder } from './SemModelBuilder';
+import { type VariableInfo, type VarStats } from '../lib/pathVariableUtils';
+import { type TranslatedModel, type SemOptions } from '../lib/semGraph';
 
 interface Dataset {
   id: string;
@@ -40,6 +43,10 @@ interface EnhancedSEMProps {
   datasets: Dataset[];
   selectedDataset: string;
   onDatasetChange: (id: string) => void;
+  /** Variable index for the Visual Builder's Variable Explorer (optional). */
+  variables?: VariableInfo[];
+  hasMeasureMeta?: boolean;
+  getStats?: (name: string) => VarStats | null;
 }
 
 function pStar(p: number): string {
@@ -79,7 +86,8 @@ function getFitLabel(index: string, value: number): string {
   }
 }
 
-export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: EnhancedSEMProps) {
+export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variables, hasMeasureMeta, getStats }: EnhancedSEMProps) {
+  const [builderMode, setBuilderMode] = useState<'visual' | 'classic'>('visual');
   const [measurementModel, setMeasurementModel] = useState<{ [key: string]: string[] }>({});
   const [structuralPaths, setStructuralPaths] = useState<Array<{ from: string; to: string }>>([]);
   const [mediators, setMediators] = useState<string[]>([]);
@@ -157,15 +165,30 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
     setMediators(detected);
   };
 
-  const runSEM = async () => {
-    if (!currentDataset || Object.keys(measurementModel).length === 0 || structuralPaths.length === 0) {
-      setError('Please select a dataset, specify measurement model, and add structural paths');
+  const runSEM = () => estimateModel(measurementModel, structuralPaths, mediators);
+
+  // Shared estimation core: both the Classic form and the Visual Builder call
+  // this with a specified model. The model is echoed into component state so the
+  // results view (path diagram, mediator highlighting) renders it.
+  const estimateModel = async (
+    mm: { [key: string]: string[] },
+    sp: Array<{ from: string; to: string }>,
+    meds: string[],
+    estimatorOverride?: 'auto' | 'DWLS' | 'ULS',
+  ) => {
+    if (!currentDataset || Object.keys(mm).length === 0 || sp.length === 0) {
+      setError('Please select a dataset, specify a measurement model, and add structural paths');
       return;
     }
     setLoading(true);
     setError('');
+    setMeasurementModel(mm);
+    setStructuralPaths(sp);
+    setMediators(meds);
 
     try {
+      const measurementModel = mm;
+      const structuralPaths = sp;
       const allVariables = [...new Set(Object.values(measurementModel).flat())];
       const variableIndices = allVariables.map(v => currentDataset.columns.indexOf(v));
       if (variableIndices.some(i => i === -1)) {
@@ -188,7 +211,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
       }
 
       const libResults = SEMEstimator.estimate(numericData, { measurementModel, structuralPaths }, allVariables, {
-        estimator: advancedOptions.estimator,
+        estimator: estimatorOverride ?? advancedOptions.estimator,
       });
 
       const directRows: EffectRow[] = Array.from(libResults.structuralModel.effects.direct.entries()).map(([key, e]) => {
@@ -870,11 +893,32 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
   }
 
   // ── Setup View ──────────────────────────────────────────────────────────────
+  const canUseVisual = !!variables && variables.length > 0;
+
   return (
     <div className="space-y-6">
-      <div>
-        <h3 className="text-2xl font-bold text-gray-900">Structural Equation Modeling (SEM)</h3>
-        <p className="text-gray-600 mt-1">Professional-grade SEM with AMOS/LISREL/lavaan standard features</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-2xl font-bold text-gray-900">Structural Equation Modeling (SEM)</h3>
+          <p className="text-gray-600 mt-1">Professional-grade SEM with AMOS/LISREL/lavaan standard features</p>
+        </div>
+        {/* Visual / Classic mode toggle */}
+        <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+          <button
+            onClick={() => setBuilderMode('visual')}
+            disabled={!canUseVisual}
+            title={canUseVisual ? 'Visual model specification' : 'Select a dataset to use the visual builder'}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${builderMode === 'visual' ? 'bg-white shadow-sm text-blue-700' : 'text-gray-500 hover:text-gray-700'} disabled:opacity-40`}
+          >
+            Visual Builder
+          </button>
+          <button
+            onClick={() => setBuilderMode('classic')}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${builderMode === 'classic' ? 'bg-white shadow-sm text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}
+          >
+            Classic Builder
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -884,22 +928,61 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
         </div>
       )}
 
-      <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
-        {/* Dataset */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">Select Dataset</label>
-          <select
-            value={selectedDataset}
-            onChange={e => onDatasetChange(e.target.value)}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="">Choose a dataset...</option>
-            {datasets.map(d => (
-              <option key={d.id} value={d.id}>{d.name} ({d.columns.length} variables, {d.data.length} cases)</option>
-            ))}
-          </select>
-        </div>
+      {/* Dataset selector (shared by both modes) */}
+      <div className="bg-white rounded-xl border border-gray-200 p-4">
+        <label className="block text-sm font-medium text-gray-700 mb-2">Select Dataset</label>
+        <select
+          value={selectedDataset}
+          onChange={e => onDatasetChange(e.target.value)}
+          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+        >
+          <option value="">Choose a dataset...</option>
+          {datasets.map(d => (
+            <option key={d.id} value={d.id}>{d.name} ({d.columns.length} variables, {d.data.length} cases)</option>
+          ))}
+        </select>
+      </div>
 
+      {/* Visual Builder */}
+      {builderMode === 'visual' && canUseVisual && (
+        <>
+          {!selectedDataset ? (
+            <div className="p-12 border-2 border-dashed border-gray-300 rounded-xl text-center bg-gray-50">
+              <Network className="w-14 h-14 text-gray-400 mx-auto mb-3" />
+              <p className="text-gray-600 font-medium">Select a dataset above to start building</p>
+            </div>
+          ) : (
+            <SemModelBuilder
+              variables={variables!}
+              hasMeasureMeta={hasMeasureMeta}
+              getStats={getStats}
+              loading={loading}
+              onEstimate={(model: TranslatedModel, options: SemOptions) =>
+                estimateModel(model.measurementModel, model.structuralPaths, model.mediators, options.estimator)}
+            />
+          )}
+        </>
+      )}
+
+      {builderMode === 'visual' && canUseVisual && (
+        <div className="bg-blue-50 rounded-lg p-4 border-l-4 border-blue-600">
+          <div className="flex items-start gap-3">
+            <Info className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+            <p className="text-sm text-gray-700">
+              The visual model is a faithful specification of the model that will be estimated — the same ULS/DWLS engine, fit indices, and diagnostics as the Classic builder. Switch to <strong>Classic Builder</strong> any time; both feed the identical estimator.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Classic Builder */}
+      {(builderMode === 'classic' || !canUseVisual) && (
+      <>
+      {!canUseVisual && (
+        <p className="text-xs text-gray-400 -mt-2">Visual Builder becomes available once a dataset with variables is selected.</p>
+      )}
+
+      <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
         {/* Advanced Options */}
         <div>
           <button
@@ -1131,6 +1214,8 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange }: Enha
           </div>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }

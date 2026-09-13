@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { peekHandoff } from '../lib/analysisHandoff';
 import { supabase } from '../lib/supabase';
+import { buildVariableIndex, computeVarStats, type VarStats } from '../lib/pathVariableUtils';
 import {
   Target, Users, TrendingUp, CheckCircle, Network, GitBranch,
   Globe, AlertCircle, Download, Play, Settings, FileImage, ScanSearch
@@ -29,6 +30,7 @@ interface Dataset {
   name: string;
   columns: string[];
   data: any[];
+  metadata?: any;
 }
 
 type TabType = 'content' | 'construct' | 'cfa' | 'sem' | 'invariance' | 'multigroup' | 'dif';
@@ -121,7 +123,7 @@ export default function ValidityAnalysisTabs() {
 
       const { data, error } = await supabase
         .from('datasets')
-        .select('id, name, columns, data')
+        .select('id, name, columns, data, metadata')
         .eq('user_id', user.id);
 
       if (error) throw error;
@@ -255,6 +257,32 @@ export default function ValidityAnalysisTabs() {
   };
 
   const currentDataset = datasets.find(d => d.id === selectedDataset);
+
+  // Variable index for the SEM Visual Builder's Variable Explorer. Types/labels
+  // come from real SPSS-style metadata when present; otherwise inferred from a
+  // data sample. Never fabricated.
+  const variableIndex = useMemo(() => {
+    if (!currentDataset) return [];
+    return buildVariableIndex(currentDataset.columns, {
+      meta: currentDataset.metadata?.variables,
+      columnTypes: currentDataset.metadata?.columnTypes,
+      data: currentDataset.data,
+    });
+  }, [currentDataset?.id]);
+
+  const hasMeasureMeta = !!(currentDataset?.metadata?.variables?.some((v: any) => v?.measure));
+
+  // Lazy, cached descriptive stats keyed by dataset id.
+  const statsCache = useRef<Map<string, VarStats>>(new Map());
+  useEffect(() => { statsCache.current = new Map(); }, [selectedDataset]);
+  const getVarStats = React.useCallback((name: string): VarStats | null => {
+    if (!currentDataset) return null;
+    const hit = statsCache.current.get(name);
+    if (hit) return hit;
+    const s = computeVarStats(name, currentDataset.data);
+    statsCache.current.set(name, s);
+    return s;
+  }, [currentDataset?.id]);
 
   const addFactor = () => {
     const factorName = `Factor${Object.keys(factorStructure).length + 1}`;
@@ -695,6 +723,9 @@ export default function ValidityAnalysisTabs() {
               datasets={datasets}
               selectedDataset={selectedDataset}
               onDatasetChange={setSelectedDataset}
+              variables={variableIndex}
+              hasMeasureMeta={hasMeasureMeta}
+              getStats={getVarStats}
             />
           )}
 
