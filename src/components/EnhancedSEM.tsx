@@ -180,8 +180,12 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
     estimatorOverride?: 'auto' | 'DWLS' | 'ULS',
     resCov: Array<[string, string]> = [],
   ) => {
-    if (!currentDataset || Object.keys(mm).length === 0 || sp.length === 0) {
-      setError('Please select a dataset, specify a measurement model, and add structural paths');
+    // A model needs a dataset and a measurement model with indicators. Structural
+    // paths are optional: a measurement-only model estimates as a correlated-
+    // factors CFA (same engine, empty structural section).
+    const hasIndicators = Object.values(mm).some((inds) => inds.length > 0);
+    if (!currentDataset || !hasIndicators) {
+      setError('Please select a dataset and specify a measurement model (a latent variable with indicators).');
       return;
     }
     setLoading(true);
@@ -311,8 +315,8 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-2xl font-bold text-gray-900">SEM Results</h3>
-            <p className="text-gray-600 mt-1">Complete structural equation model analysis</p>
+            <h3 className="text-2xl font-bold text-gray-900">{structuralPaths.length === 0 ? 'CFA Results' : 'SEM Results'}</h3>
+            <p className="text-gray-600 mt-1">{structuralPaths.length === 0 ? 'Confirmatory factor analysis (measurement model, correlated factors)' : 'Complete structural equation model analysis'}</p>
           </div>
           <button onClick={resetAnalysis} className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition text-sm font-medium">
             New Analysis
@@ -460,7 +464,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
           indicatorLabels={indicatorLabels}
           onLabelChange={handleLabelChange}
           theme={diagramTheme}
-          title="Structural Equation Model"
+          title={structuralPaths.length === 0 ? 'Measurement Model (CFA)' : 'Structural Equation Model'}
           estimationLabel={results.estimator === 'DWLS'
             ? 'Diagonally Weighted Least Squares (DWLS), robust'
             : 'Unweighted Least Squares (ULS)'}

@@ -29,6 +29,18 @@ const BASE: SEMModel = {
   structuralPaths: [{ from: 'F1', to: 'F2' }],
 };
 
+test('measurement-only model (no structural paths) estimates as a CFA', () => {
+  const data = makeData();
+  const r = SEMEstimator.estimate(
+    data, { measurementModel: BASE.measurementModel, structuralPaths: [] }, NAMES, { estimator: 'ULS' });
+  // Loadings for all six indicators, valid fit indices, no structural paths.
+  assert.equal(r.measurementModel.factorLoadings.length, 6);
+  assert.equal(r.structuralModel.paths.length, 0);
+  assert.ok(Number.isFinite(r.fitIndices.cfi) && r.fitIndices.cfi <= 1.0001, 'CFI is finite');
+  assert.ok(r.fitIndices.df > 0, 'positive df');
+  assert.ok(Object.keys(r.measurementModel.reliability).length === 2, 'reliability per factor');
+});
+
 test('residual covariances: empty/undefined leave the fit identical', () => {
   const data = makeData();
   const a = SEMEstimator.estimate(data, { ...BASE }, NAMES, { estimator: 'ULS' });
