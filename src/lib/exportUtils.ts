@@ -2757,6 +2757,66 @@ export const exportCulturalAdaptationToHTML = (
   URL.revokeObjectURL(link.href);
 };
 
+// Shared, complete CFA report body used by BOTH the Word and HTML exports so
+// they stay in sync and capture everything the estimator produced (fit indices,
+// standardized loadings + R², factor correlations, reliability/AVE, modification
+// indices, residual covariances). Sections with no data are omitted.
+const buildCFAReportBody = (results: any): string => {
+  const num = (v: any, d = 3) => (v == null || isNaN(Number(v))) ? '—' : Number(v).toFixed(d);
+  const pv = (v: any) => v == null ? '—' : (Number(v) < 0.001 ? '<.001' : Number(v).toFixed(3));
+  const fi = results.fitIndices || {};
+  const parts: string[] = [];
+
+  parts.push(`<h2>Model Fit Indices</h2><table>
+    <tr><th>Index</th><th>Value</th></tr>
+    <tr><td>χ²</td><td>${num(fi.chisq, 2)}</td></tr>
+    <tr><td>df</td><td>${fi.df != null ? String(fi.df) : '—'}</td></tr>
+    <tr><td>p-value</td><td>${pv(fi.pvalue)}</td></tr>
+    <tr><td>CFI</td><td>${num(fi.cfi)}</td></tr>
+    <tr><td>TLI / NNFI</td><td>${num(fi.nnfi ?? fi.tli)}</td></tr>
+    <tr><td>NFI</td><td>${num(fi.nfi)}</td></tr>
+    <tr><td>RMSEA</td><td>${num(fi.rmsea)}${fi.rmsea_ci_lower != null ? ` [${num(fi.rmsea_ci_lower)}, ${num(fi.rmsea_ci_upper)}]` : ''}</td></tr>
+    <tr><td>SRMR</td><td>${num(fi.srmr)}</td></tr>
+    <tr><td>GFI</td><td>${num(fi.gfi)}</td></tr>
+    <tr><td>AGFI</td><td>${num(fi.agfi)}</td></tr>
+    <tr><td>AIC</td><td>${num(fi.aic, 2)}</td></tr>
+    <tr><td>BIC</td><td>${num(fi.bic, 2)}</td></tr>
+  </table>`);
+
+  const fl = results.factorLoadings || [];
+  if (fl.length) parts.push(`<h2>Factor Loadings</h2><table>
+    <tr><th>Item</th><th>Factor</th><th>λ (std)</th><th>SE</th><th>z</th><th>p-value</th><th>R²</th></tr>
+    ${fl.map((l: any) => { const std = l.std_loading ?? l.loading; return `<tr><td>${l.item}</td><td>${l.factor}</td><td>${num(std)}</td><td>${num(l.se)}</td><td>${num(l.z ?? l.zvalue, 2)}</td><td>${pv(l.pvalue)}</td><td>${num(std * std)}</td></tr>`; }).join('')}
+  </table>`);
+
+  const fc = results.factorCorrelations || [];
+  if (fc.length) parts.push(`<h2>Factor Correlations</h2><table>
+    <tr><th>Factor 1</th><th>Factor 2</th><th>r</th>${fc[0]?.se != null ? '<th>SE</th><th>p-value</th>' : ''}</tr>
+    ${fc.map((c: any) => `<tr><td>${c.factor1}</td><td>${c.factor2}</td><td>${num(c.correlation)}</td>${c.se != null ? `<td>${num(c.se)}</td><td>${pv(c.pvalue)}</td>` : ''}</tr>`).join('')}
+  </table>`);
+
+  const rel = results.reliability || {};
+  const relRows = Object.entries(rel);
+  if (relRows.length) parts.push(`<h2>Reliability &amp; Validity</h2><table>
+    <tr><th>Factor</th><th>α</th><th>CR</th><th>AVE</th></tr>
+    ${relRows.map(([f, r]: any) => `<tr><td>${f}</td><td>${num(r.cronbach_alpha)}</td><td>${num(r.composite_reliability)}</td><td>${num(r.ave)}</td></tr>`).join('')}
+  </table><p class="info">AVE &gt; .50 indicates convergent validity; CR &gt; .70 indicates composite reliability.</p>`);
+
+  const rcov = results.residualCovariances || [];
+  if (rcov.length) parts.push(`<h2>Residual Covariances</h2><table>
+    <tr><th>Item 1</th><th>Item 2</th><th>Residual</th><th>Standardized</th></tr>
+    ${rcov.map((r: any) => `<tr><td>${r.item1}</td><td>${r.item2}</td><td>${num(r.residual)}</td><td>${num(r.standardized)}</td></tr>`).join('')}
+  </table>`);
+
+  const mi = results.modificationIndices || [];
+  if (mi.length) parts.push(`<h2>Modification Indices</h2><table>
+    <tr><th>Parameter</th><th>Type</th><th>MI</th><th>EPC</th></tr>
+    ${[...mi].sort((a: any, b: any) => (b.mi ?? 0) - (a.mi ?? 0)).map((m: any) => `<tr><td>${m.param1 ?? m.from ?? ''}${(m.param2 ?? m.to) ? ` ↔ ${m.param2 ?? m.to}` : ''}</td><td>${m.type ?? ''}</td><td>${num(m.mi, 2)}</td><td>${num(m.epc)}</td></tr>`).join('')}
+  </table><p class="info">MI ≥ 10 suggests freeing the parameter would substantially improve fit; free only theoretically justifiable parameters.</p>`);
+
+  return parts.join('\n');
+};
+
 export const exportCFAToWord = (results: any, studyName: string = 'CFA Analysis') => {
   if (!results) return;
 
@@ -2772,113 +2832,17 @@ export const exportCFAToWord = (results: any, studyName: string = 'CFA Analysis'
         body { font-family: 'Calibri', sans-serif; font-size: 11pt; line-height: 1.5; margin: 40px; }
         h1 { font-size: 16pt; font-weight: bold; margin-bottom: 12pt; color: #1e40af; }
         h2 { font-size: 14pt; font-weight: bold; margin-top: 18pt; margin-bottom: 10pt; color: #2563eb; }
-        h3 { font-size: 12pt; font-weight: bold; margin-top: 12pt; margin-bottom: 8pt; }
         table { border-collapse: collapse; width: 100%; margin: 12pt 0; }
         th, td { border: 1px solid #000; padding: 6pt; text-align: left; }
         th { background-color: #dbeafe; font-weight: bold; }
-        .fit-good { background-color: #dcfce7; }
-        .fit-adequate { background-color: #fef3c7; }
-        .fit-poor { background-color: #fee2e2; }
         .info { color: #6b7280; font-size: 9pt; margin: 6pt 0; }
       </style>
     </head>
     <body>
       <h1>${studyName}</h1>
       <p class="info">Generated: ${timestamp}</p>
-
-      <h2>Model Fit Indices</h2>
-      <table>
-        <tr>
-          <th>Index</th>
-          <th>Value</th>
-          <th>Cutoff</th>
-          <th>Interpretation</th>
-        </tr>
-        <tr class="${parseFloat(results.fitIndices.cfi) >= 0.95 ? 'fit-good' : parseFloat(results.fitIndices.cfi) >= 0.90 ? 'fit-adequate' : 'fit-poor'}">
-          <td>CFI</td>
-          <td>${Number(results.fitIndices.cfi).toFixed(3)}</td>
-          <td>≥ 0.95 (good), ≥ 0.90 (adequate)</td>
-          <td>${parseFloat(results.fitIndices.cfi) >= 0.95 ? 'Good fit' : parseFloat(results.fitIndices.cfi) >= 0.90 ? 'Adequate fit' : 'Poor fit'}</td>
-        </tr>
-        <tr class="${parseFloat(results.fitIndices.tli) >= 0.95 ? 'fit-good' : parseFloat(results.fitIndices.tli) >= 0.90 ? 'fit-adequate' : 'fit-poor'}">
-          <td>TLI</td>
-          <td>${Number(results.fitIndices.tli).toFixed(3)}</td>
-          <td>≥ 0.95 (good), ≥ 0.90 (adequate)</td>
-          <td>${parseFloat(results.fitIndices.tli) >= 0.95 ? 'Good fit' : parseFloat(results.fitIndices.tli) >= 0.90 ? 'Adequate fit' : 'Poor fit'}</td>
-        </tr>
-        <tr class="${parseFloat(results.fitIndices.rmsea) <= 0.06 ? 'fit-good' : parseFloat(results.fitIndices.rmsea) <= 0.08 ? 'fit-adequate' : 'fit-poor'}">
-          <td>RMSEA</td>
-          <td>${Number(results.fitIndices.rmsea).toFixed(3)}</td>
-          <td>≤ 0.06 (good), ≤ 0.08 (adequate)</td>
-          <td>${parseFloat(results.fitIndices.rmsea) <= 0.06 ? 'Good fit' : parseFloat(results.fitIndices.rmsea) <= 0.08 ? 'Adequate fit' : 'Poor fit'}</td>
-        </tr>
-        <tr class="${parseFloat(results.fitIndices.srmr) <= 0.08 ? 'fit-good' : 'fit-poor'}">
-          <td>SRMR</td>
-          <td>${Number(results.fitIndices.srmr).toFixed(3)}</td>
-          <td>≤ 0.08 (good)</td>
-          <td>${parseFloat(results.fitIndices.srmr) <= 0.08 ? 'Good fit' : 'Poor fit'}</td>
-        </tr>
-        <tr>
-          <td>χ²</td>
-          <td>${Number(results.fitIndices.chisq).toFixed(2)}</td>
-          <td>Lower is better</td>
-          <td>df = ${results.fitIndices.df}, p = ${Number(results.fitIndices.pvalue).toFixed(3)}</td>
-        </tr>
-        <tr>
-          <td>AIC</td>
-          <td>${Number(results.fitIndices.aic).toFixed(2)}</td>
-          <td>Compare models</td>
-          <td>Lower indicates better fit</td>
-        </tr>
-        <tr>
-          <td>BIC</td>
-          <td>${Number(results.fitIndices.bic).toFixed(2)}</td>
-          <td>Compare models</td>
-          <td>Lower indicates better fit</td>
-        </tr>
-      </table>
-
-      <h2>Factor Loadings</h2>
-      <table>
-        <tr>
-          <th>Item</th>
-          <th>Factor</th>
-          <th>Loading</th>
-          <th>SE</th>
-          <th>Z-value</th>
-          <th>p-value</th>
-        </tr>
-        ${results.factorLoadings.map((loading: any) => `
-          <tr>
-            <td>${loading.item}</td>
-            <td>${loading.factor}</td>
-            <td>${Number(loading.loading).toFixed(3)}</td>
-            <td>${Number(loading.se).toFixed(3)}</td>
-            <td>${Number(loading.z ?? loading.zvalue).toFixed(3)}</td>
-            <td>${Number(loading.pvalue).toFixed(3)}</td>
-          </tr>
-        `).join('')}
-      </table>
-
-      ${results.factorCorrelations && results.factorCorrelations.length > 0 ? `
-        <h2>Factor Correlations</h2>
-        <table>
-          <tr>
-            <th>Factor 1</th>
-            <th>Factor 2</th>
-            <th>Correlation</th>
-          </tr>
-          ${results.factorCorrelations.map((corr: any) => `
-            <tr>
-              <td>${corr.factor1}</td>
-              <td>${corr.factor2}</td>
-              <td>${corr.correlation}</td>
-            </tr>
-          `).join('')}
-        </table>
-      ` : ''}
-
-      <p class="info">Note: Path diagram should be exported separately as PNG</p>
+      ${buildCFAReportBody(results)}
+      <p class="info">Note: the path diagram can be exported separately as PNG/SVG from the diagram toolbar.</p>
     </body>
     </html>
   `;
@@ -2988,100 +2952,8 @@ export const exportCFAToHTML = (results: any, studyName: string = 'CFA Analysis'
         <h1>${studyName}</h1>
         <p class="info">Generated: ${timestamp}</p>
         <button class="print-btn" onclick="window.print()">Print Report</button>
-
-        <h2>Model Fit Indices</h2>
-        <table>
-          <tr>
-            <th>Index</th>
-            <th>Value</th>
-            <th>Cutoff</th>
-            <th>Interpretation</th>
-          </tr>
-          <tr class="${parseFloat(results.fitIndices.cfi) >= 0.95 ? 'fit-good' : parseFloat(results.fitIndices.cfi) >= 0.90 ? 'fit-adequate' : 'fit-poor'}">
-            <td>CFI</td>
-            <td>${results.fitIndices.cfi}</td>
-            <td>≥ 0.95 (good), ≥ 0.90 (adequate)</td>
-            <td>${parseFloat(results.fitIndices.cfi) >= 0.95 ? 'Good fit' : parseFloat(results.fitIndices.cfi) >= 0.90 ? 'Adequate fit' : 'Poor fit'}</td>
-          </tr>
-          <tr class="${parseFloat(results.fitIndices.tli) >= 0.95 ? 'fit-good' : parseFloat(results.fitIndices.tli) >= 0.90 ? 'fit-adequate' : 'fit-poor'}">
-            <td>TLI</td>
-            <td>${results.fitIndices.tli}</td>
-            <td>≥ 0.95 (good), ≥ 0.90 (adequate)</td>
-            <td>${parseFloat(results.fitIndices.tli) >= 0.95 ? 'Good fit' : parseFloat(results.fitIndices.tli) >= 0.90 ? 'Adequate fit' : 'Poor fit'}</td>
-          </tr>
-          <tr class="${parseFloat(results.fitIndices.rmsea) <= 0.06 ? 'fit-good' : parseFloat(results.fitIndices.rmsea) <= 0.08 ? 'fit-adequate' : 'fit-poor'}">
-            <td>RMSEA</td>
-            <td>${results.fitIndices.rmsea}</td>
-            <td>≤ 0.06 (good), ≤ 0.08 (adequate)</td>
-            <td>${parseFloat(results.fitIndices.rmsea) <= 0.06 ? 'Good fit' : parseFloat(results.fitIndices.rmsea) <= 0.08 ? 'Adequate fit' : 'Poor fit'}</td>
-          </tr>
-          <tr class="${parseFloat(results.fitIndices.srmr) <= 0.08 ? 'fit-good' : 'fit-poor'}">
-            <td>SRMR</td>
-            <td>${results.fitIndices.srmr}</td>
-            <td>≤ 0.08 (good)</td>
-            <td>${parseFloat(results.fitIndices.srmr) <= 0.08 ? 'Good fit' : 'Poor fit'}</td>
-          </tr>
-          <tr>
-            <td>χ²</td>
-            <td>${results.fitIndices.chisq}</td>
-            <td>Lower is better</td>
-            <td>df = ${results.fitIndices.df}, p = ${results.fitIndices.pvalue}</td>
-          </tr>
-          <tr>
-            <td>AIC</td>
-            <td>${results.fitIndices.aic}</td>
-            <td>Compare models</td>
-            <td>Lower indicates better fit</td>
-          </tr>
-          <tr>
-            <td>BIC</td>
-            <td>${results.fitIndices.bic}</td>
-            <td>Compare models</td>
-            <td>Lower indicates better fit</td>
-          </tr>
-        </table>
-
-        <h2>Factor Loadings</h2>
-        <table>
-          <tr>
-            <th>Item</th>
-            <th>Factor</th>
-            <th>Loading</th>
-            <th>SE</th>
-            <th>Z-value</th>
-            <th>p-value</th>
-          </tr>
-          ${results.factorLoadings.map((loading: any) => `
-            <tr>
-              <td>${loading.item}</td>
-              <td>${loading.factor}</td>
-              <td>${Number(loading.loading).toFixed(3)}</td>
-              <td>${Number(loading.se).toFixed(3)}</td>
-              <td>${Number(loading.z ?? loading.zvalue).toFixed(3)}</td>
-              <td>${Number(loading.pvalue).toFixed(3)}</td>
-            </tr>
-          `).join('')}
-        </table>
-
-        ${results.factorCorrelations && results.factorCorrelations.length > 0 ? `
-          <h2>Factor Correlations</h2>
-          <table>
-            <tr>
-              <th>Factor 1</th>
-              <th>Factor 2</th>
-              <th>Correlation</th>
-            </tr>
-            ${results.factorCorrelations.map((corr: any) => `
-              <tr>
-                <td>${corr.factor1}</td>
-                <td>${corr.factor2}</td>
-                <td>${corr.correlation}</td>
-              </tr>
-            `).join('')}
-          </table>
-        ` : ''}
-
-        <p class="info">Note: Path diagram should be exported separately as PNG</p>
+        ${buildCFAReportBody(results)}
+        <p class="info">Note: the path diagram can be exported separately as PNG/SVG from the diagram toolbar.</p>
       </div>
     </body>
     </html>
