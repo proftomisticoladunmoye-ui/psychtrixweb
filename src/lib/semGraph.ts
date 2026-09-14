@@ -92,6 +92,8 @@ export interface TranslatedModel {
   measurementModel: { [latent: string]: string[] };
   structuralPaths: Array<{ from: string; to: string }>;
   mediators: string[];
+  /** Residual (error) covariances between observed indicator pairs. */
+  residualCovariances: Array<[string, string]>;
 }
 
 export function toSEMModel(g: SemGraph): TranslatedModel {
@@ -129,7 +131,17 @@ export function toSEMModel(g: SemGraph): TranslatedModel {
     .map((l) => l.name)
     .filter((f) => structuralPaths.some((p) => p.to === f) && structuralPaths.some((p) => p.from === f));
 
-  return { measurementModel, structuralPaths, mediators };
+  // Residual covariances = covariance edges between two OBSERVED indicators.
+  const residualCovariances: Array<[string, string]> = [];
+  for (const e of g.edges) {
+    if (e.kind !== 'covariance') continue;
+    const from = nodeById(g, e.from), to = nodeById(g, e.to);
+    if (from && to && from.kind === 'observed' && to.kind === 'observed' && from.name !== to.name) {
+      residualCovariances.push([from.name, to.name]);
+    }
+  }
+
+  return { measurementModel, structuralPaths, mediators, residualCovariances };
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────────
@@ -205,7 +217,7 @@ export function validateGraph(g: SemGraph): ValidationIssue[] {
 // the visual model stays the single source of truth (editing text back would risk
 // inconsistency), so this is a live mirror, not a second editor.
 export function toLavaanSyntax(g: SemGraph): string {
-  const { measurementModel, structuralPaths } = toSEMModel(g);
+  const { measurementModel, structuralPaths, residualCovariances } = toSEMModel(g);
   const labelOf = (latentName: string) => {
     const n = g.nodes.find((x) => x.kind === 'latent' && x.name === latentName);
     return n?.label && n.label !== n.name ? `  # ${n.label}` : '';
@@ -234,14 +246,10 @@ export function toLavaanSyntax(g: SemGraph): string {
     for (const [to, froms] of byOutcome) lines.push(`${to} ~ ${froms.join(' + ')}`);
   }
 
-  // Explicit covariances, if the researcher drew any.
-  const covs = g.edges.filter((e) => e.kind === 'covariance');
-  if (covs.length) {
-    lines.push('', '# Covariances');
-    for (const e of covs) {
-      const a = nodeById(g, e.from), b = nodeById(g, e.to);
-      if (a && b) lines.push(`${a.name} ~~ ${b.name}`);
-    }
+  // Residual covariances (only observed↔observed pairs are estimated).
+  if (residualCovariances.length) {
+    lines.push('', '# Residual covariances');
+    for (const [a, b] of residualCovariances) lines.push(`${a} ~~ ${b}`);
   }
 
   return lines.length ? lines.join('\n') : '# Empty model — add latent variables and indicators.';

@@ -26,6 +26,8 @@ import { polychoricMatrix, looksOrdinal } from './polychoric';
 export interface SEMModel {
   measurementModel: { [latentVar: string]: string[] };
   structuralPaths:  Array<{ from: string; to: string }>;
+  /** Freely-estimated residual (error) covariances between indicator pairs. */
+  residualCovariances?: Array<[string, string]>;
 }
 
 export interface ModificationIndex {
@@ -87,6 +89,10 @@ export interface SEMResults {
     proportion: number; sobelZ: number; sobelP: number;
     bootstrapCI: [number, number];
     mediationType: 'full' | 'partial' | 'none';
+  }>;
+  residualCovariances?: Array<{
+    item1: string; item2: string;
+    estimate: number; se: number; z: number; pvalue: number;
   }>;
   diagnostics: {
     modificationIndices:   ModificationIndex[];
@@ -212,6 +218,7 @@ export class SEMEstimator {
       structuralModel: structResult,
       mediation,
       diagnostics,
+      residualCovariances: fitted.residualCovariances,
     };
   }
 
@@ -258,6 +265,7 @@ export class SEMEstimator {
     Phi: number[][];
     Sigma: number[][];
     fitStat?: { chisq: number; chisqNull: number; dfNull: number; scaled: boolean; scalingFactor: number };
+    residualCovariances: NonNullable<SEMResults['residualCovariances']>;
   } {
     const p  = allInds.length;
     const q  = model.structuralPaths.length;
@@ -279,6 +287,14 @@ export class SEMEstimator {
     for (let a = 1; a < exoIdx.length; a++)
       for (let b = 0; b < a; b++) exoPairs.push([exoIdx[a], exoIdx[b]]);
     const r = exoPairs.length;
+
+    // Freely-estimated residual covariances (θ off-diagonal) for indicator pairs.
+    // Empty by default → identical behaviour to the diagonal-error model.
+    const indPos = new Map<string, number>(allInds.map((ind, i) => [ind, i]));
+    const resCovPairs: Array<[number, number]> = (model.residualCovariances || [])
+      .map(([a, b]) => [indPos.get(a) ?? -1, indPos.get(b) ?? -1] as [number, number])
+      .filter(([i, j]) => i >= 0 && j >= 0 && i !== j);
+    const rc = resCovPairs.length;
 
     const topo = this.topoOrder(nF, pathIdx);
 
@@ -308,7 +324,7 @@ export class SEMEstimator {
       return { Phi, explained };
     };
 
-    const buildSigma = (lambdas: number[], betas: number[], phis: number[]) => {
+    const buildSigma = (lambdas: number[], betas: number[], phis: number[], rhos: number[] = []) => {
       const { Phi, explained } = buildPhi(betas, phis);
       const Sigma: number[][] = Array.from({ length: p }, (_, i) =>
         Array.from({ length: p }, (_, j) => {
@@ -317,14 +333,16 @@ export class SEMEstimator {
           if (fi < 0 || fj < 0) return 0;
           return lambdas[i] * Phi[fi][fj] * lambdas[j];
         }));
+      // Add freely-estimated residual covariances to the implied correlation.
+      resCovPairs.forEach(([i, j], k) => { Sigma[i][j] += rhos[k]; Sigma[j][i] += rhos[k]; });
       return { Sigma, Phi, explained };
     };
 
     // Discrepancy over the lower triangle. ULS weights every residual equally;
     // DWLS weights by 1/asymVar of the polychoric correlation (pairWeight). A
     // smooth penalty keeps the endogenous variance decompositions admissible.
-    const objective = (lambdas: number[], betas: number[], phis: number[]) => {
-      const { Sigma, explained } = buildSigma(lambdas, betas, phis);
+    const objective = (lambdas: number[], betas: number[], phis: number[], rhos: number[] = []) => {
+      const { Sigma, explained } = buildSigma(lambdas, betas, phis, rhos);
       let f = 0, k = 0;
       for (let i = 0; i < p; i++)
         for (let j = 0; j < i; j++) {
@@ -343,15 +361,17 @@ export class SEMEstimator {
     let betas: number[] = model.structuralPaths.map(pt =>
       clamp(warmPathMap.get(`${pt.from}->${pt.to}`) ?? 0.3, -0.9, 0.9));
     let phis: number[] = exoPairs.map(([a, b]) => clamp(PhiScores[a]?.[b] ?? 0, -0.9, 0.9));
+    // Residual covariances warm-start at the raw off-diagonal residual (S − warm Σ).
+    let rhos: number[] = resCovPairs.map(([i, j]) => clamp((S[i][j] ?? 0) * 0.5, -0.6, 0.6));
 
     // ── Gradient descent with Armijo line search (mirrors CFAEstimator) ─────
-    const nPar = p + q + r;
-    const unpack = (t: number[]) => ({ l: t.slice(0, p), b: t.slice(p, p + q), ph: t.slice(p + q) });
+    const nPar = p + q + r + rc;
+    const unpack = (t: number[]) => ({ l: t.slice(0, p), b: t.slice(p, p + q), ph: t.slice(p + q, p + q + r), rh: t.slice(p + q + r) });
     const clampTheta = (t: number[]) => t.map((v, k) =>
-      k < p ? clamp(v, -0.999, 0.999) : k < p + q ? clamp(v, -1.5, 1.5) : clamp(v, -0.99, 0.99));
-    const F = (t: number[]) => { const { l, b, ph } = unpack(t); return objective(l, b, ph); };
+      k < p ? clamp(v, -0.999, 0.999) : k < p + q ? clamp(v, -1.5, 1.5) : k < p + q + r ? clamp(v, -0.99, 0.99) : clamp(v, -0.9, 0.9));
+    const F = (t: number[]) => { const { l, b, ph, rh } = unpack(t); return objective(l, b, ph, rh); };
 
-    let theta: number[] = clampTheta([...lambdas, ...betas, ...phis]);
+    let theta: number[] = clampTheta([...lambdas, ...betas, ...phis, ...rhos]);
     const H_STEP = 1e-5;
     let stepSize = 0.05;
     for (let iter = 0; iter < 500; iter++) {
@@ -374,7 +394,7 @@ export class SEMEstimator {
       }
       if (!moved) break;
     }
-    ({ l: lambdas, b: betas, ph: phis } = unpack(theta));
+    ({ l: lambdas, b: betas, ph: phis, rh: rhos } = unpack(theta));
 
     // ── Standard errors via numerical Hessian of F (CFA convention) ─────────
     const hh = 1e-4;
@@ -398,13 +418,13 @@ export class SEMEstimator {
     if (pairWeight && Gamma && lowerPairs.length === pairWeight.length) {
       const qy = lowerPairs.length;
       // Jacobian Δ = ∂σ/∂θ over the lower-triangle implied correlations
-      const base = buildSigma(...([lambdas, betas, phis] as [number[], number[], number[]])).Sigma;
+      const base = buildSigma(lambdas, betas, phis, rhos).Sigma;
       const Dj: number[][] = Array.from({ length: qy }, () => new Array(nPar).fill(0));
       const hj = 1e-5;
       for (let t = 0; t < nPar; t++) {
         const tp = [...theta]; tp[t] += hj;
         const u = unpack(tp);
-        const pert = buildSigma(u.l, u.b, u.ph).Sigma;
+        const pert = buildSigma(u.l, u.b, u.ph, u.rh).Sigma;
         for (let kk = 0; kk < qy; kk++) { const [i, j] = lowerPairs[kk]; Dj[kk][t] = (pert[i][j] - base[i][j]) / hj; }
       }
       // Robust SE sandwich: acov = (4/N)·Hinv·(Δ'VΓVΔ)·Hinv, V = diag(pairWeight)
@@ -449,7 +469,7 @@ export class SEMEstimator {
     }
 
     // ── Assemble outputs ────────────────────────────────────────────────────
-    const { Sigma, Phi, explained } = buildSigma(lambdas, betas, phis);
+    const { Sigma, Phi, explained } = buildSigma(lambdas, betas, phis, rhos);
 
     const factorLoadings: SEMResults['measurementModel']['factorLoadings'] = [];
     allInds.forEach((item, k) => {
@@ -481,7 +501,18 @@ export class SEMEstimator {
     const rSquared: { [f: string]: number } = {};
     endoSet.forEach(e => { rSquared[factorNames[e]] = clamp(explained[e], 0, 1); });
 
-    return { factorLoadings, paths, rSquared, Phi, Sigma, fitStat };
+    const residualCovariances = resCovPairs.map(([i, j], k) => {
+      const est = rhos[k];
+      const se  = seTheta[p + q + r + k] > 1e-8 ? seTheta[p + q + r + k] : 0.05;
+      const z   = se > 0 ? est / se : 0;
+      return {
+        item1: allInds[i], item2: allInds[j],
+        estimate: est, se, z,
+        pvalue: Math.min(1, 2 * (1 - normalCDF(Math.abs(z)))),
+      };
+    });
+
+    return { factorLoadings, paths, rSquared, Phi, Sigma, fitStat, residualCovariances };
   }
 
   // ── Topological order of factors (Kahn); cycles appended in input order ──────
@@ -844,7 +875,8 @@ export class SEMEstimator {
     const p = new Set(Object.values(model.measurementModel).flat()).size;
     const endo = new Set(model.structuralPaths.map(pt => pt.to));
     const exo  = Object.keys(model.measurementModel).filter(f => !endo.has(f));
-    return p + model.structuralPaths.length + exo.length * (exo.length - 1) / 2;
+    const resCov = model.residualCovariances?.length || 0;
+    return p + model.structuralPaths.length + exo.length * (exo.length - 1) / 2 + resCov;
   }
 
   // ── Modification indices (LM-test on off-diagonal residuals) ─────────────────

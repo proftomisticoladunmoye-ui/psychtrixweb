@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState, useCallback } from 'react';
 import {
   MousePointer2, Spline, GitBranch, Trash2, Undo2, Redo2, LayoutGrid,
   Maximize2, Plus, Play, CheckCircle2, AlertTriangle, XCircle, Info, ZoomIn, ZoomOut, Circle, Square,
-  Code2, Copy, Check, FileStack, Users, SendHorizontal, Expand, Shrink, X,
+  Code2, Copy, Check, FileStack, Users, SendHorizontal, Expand, Shrink, X, ArrowLeftRight,
 } from 'lucide-react';
 import { VariableExplorer } from './VariableExplorer';
 import { type VariableInfo, type VarStats } from '../lib/pathVariableUtils';
@@ -11,7 +11,7 @@ import {
   SEM_FAMILIES, SEM_TEMPLATES, emptyGraph, makeId, nodeById, toSEMModel, validateGraph, toLavaanSyntax,
 } from '../lib/semGraph';
 
-type Mode = 'select' | 'loading' | 'path' | 'delete';
+type Mode = 'select' | 'loading' | 'path' | 'covariance' | 'delete';
 
 interface Props {
   variables: VariableInfo[];
@@ -181,6 +181,12 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
         const exists = graph.edges.some((e) => e.kind === 'regression' && e.from === a.id && e.to === b.id);
         if (!exists) commit({ ...graph, edges: [...graph.edges, { id: makeId('reg'), from: a.id, to: b.id, kind: 'regression' }] });
       }
+    } else if (mode === 'covariance') {
+      // Residual covariance between two observed indicators (the estimator frees it).
+      if (a.kind === 'observed' && b.kind === 'observed') {
+        const exists = graph.edges.some((e) => e.kind === 'covariance' && ((e.from === a.id && e.to === b.id) || (e.from === b.id && e.to === a.id)));
+        if (!exists) commit({ ...graph, edges: [...graph.edges, { id: makeId('cov'), from: a.id, to: b.id, kind: 'covariance' }] });
+      }
     }
     setPendingSource(null);
   };
@@ -193,7 +199,7 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
   const onNodePointerDown = (e: React.MouseEvent, node: SemNode) => {
     e.stopPropagation();
     if (mode === 'delete') { removeNode(node.id); return; }
-    if (mode === 'loading' || mode === 'path') { setSelected(node.id); tryConnect(node.id); return; }
+    if (mode === 'loading' || mode === 'path' || mode === 'covariance') { setSelected(node.id); tryConnect(node.id); return; }
     setSelected(node.id);
     const p = toLogical(e.clientX, e.clientY);
     drag.current = { id: node.id, dx: p.x - node.x, dy: p.y - node.y, panX: 0, panY: 0, panning: false };
@@ -336,6 +342,7 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
             {modeBtn('select', <MousePointer2 className="w-3.5 h-3.5" />, 'Select')}
             {modeBtn('loading', <Spline className="w-3.5 h-3.5" />, 'Measurement')}
             {modeBtn('path', <GitBranch className="w-3.5 h-3.5" />, 'Path')}
+            {modeBtn('covariance', <ArrowLeftRight className="w-3.5 h-3.5" />, 'Covariance')}
             {modeBtn('delete', <Trash2 className="w-3.5 h-3.5" />, 'Delete')}
             <div className="w-px h-5 bg-gray-200 mx-1" />
             <button onClick={addLatent} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-blue-50 text-blue-700 hover:bg-blue-100 transition"><Plus className="w-3.5 h-3.5" /> Latent</button>
@@ -367,6 +374,7 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
               {mode === 'delete' ? 'Click a node or arrow to delete it.'
                 : mode === 'loading' ? <>Click a latent, then an observed variable, to connect an indicator.{pendingSource && <b> · from: {nodeById(graph, pendingSource)?.label || nodeById(graph, pendingSource)?.name}</b>}</>
                 : mode === 'path' ? <>Click a predictor latent, then an outcome latent, to draw a path.{pendingSource && <b> · from: {nodeById(graph, pendingSource)?.label || nodeById(graph, pendingSource)?.name}</b>}</>
+                : mode === 'covariance' ? <>Click two observed variables to add a residual covariance (error correlation).{pendingSource && <b> · from: {nodeById(graph, pendingSource)?.label || nodeById(graph, pendingSource)?.name}</b>}</>
                 : activeLatent ? <>Adding indicators to <b>{activeLatent.label || activeLatent.name}</b> — click variables in the explorer to attach them.</>
                 : 'Tip: click “+ Latent”, then click variables in the explorer to add its indicators.'}
             </span>
@@ -394,6 +402,8 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
               <svg className="absolute top-0 left-0 overflow-visible" style={{ width: 1, height: 1 }}>
                 <defs>
                   <marker id="sem-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#475569" /></marker>
+                  <marker id="sem-cov-end" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#9333ea" /></marker>
+                  <marker id="sem-cov-start" markerWidth="8" markerHeight="8" refX="1" refY="4" orient="auto"><path d="M8,0 L0,4 L8,8 Z" fill="#9333ea" /></marker>
                 </defs>
                 {graph.edges.map((e) => {
                   const a = nodeById(graph, e.from), b = nodeById(graph, e.to);
@@ -401,6 +411,23 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
                   const ac = nodeCenter(a), bc = nodeCenter(b);
                   const end = clipToNode(ac, b);
                   const start = clipToNode(bc, a);
+                  if (e.kind === 'covariance') {
+                    // Curved, double-headed arc — standard residual-covariance notation.
+                    const mx = (start.x + end.x) / 2, my = (start.y + end.y) / 2;
+                    const dx = end.x - start.x, dy = end.y - start.y;
+                    const len = Math.hypot(dx, dy) || 1;
+                    const cx = mx - (dy / len) * 34, cy = my + (dx / len) * 34;
+                    return (
+                      <path
+                        key={e.id}
+                        d={`M ${start.x} ${start.y} Q ${cx} ${cy} ${end.x} ${end.y}`}
+                        fill="none" stroke="#9333ea" strokeWidth={1.6} strokeDasharray="5 3"
+                        markerStart="url(#sem-cov-start)" markerEnd="url(#sem-cov-end)"
+                        style={{ cursor: mode === 'delete' ? 'pointer' : 'default', pointerEvents: 'stroke' }}
+                        onMouseDown={(ev) => { if (mode === 'delete') { ev.stopPropagation(); removeEdge(e.id); } }}
+                      />
+                    );
+                  }
                   const isLoad = e.kind === 'loading';
                   return (
                     <line
@@ -450,7 +477,7 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
           {/* Status bar */}
           <div className="px-3 py-1.5 bg-gray-50 border-t border-gray-100 flex items-center justify-between text-xs text-gray-500">
             <span>
-              {graph.nodes.filter((n) => n.kind === 'latent').length} latent · {graph.nodes.filter((n) => n.kind === 'observed').length} observed · {graph.edges.filter((e) => e.kind === 'loading').length} loadings · {graph.edges.filter((e) => e.kind === 'regression').length} paths
+              {graph.nodes.filter((n) => n.kind === 'latent').length} latent · {graph.nodes.filter((n) => n.kind === 'observed').length} observed · {graph.edges.filter((e) => e.kind === 'loading').length} loadings · {graph.edges.filter((e) => e.kind === 'regression').length} paths · {graph.edges.filter((e) => e.kind === 'covariance').length} covariances
             </span>
             <span className="text-gray-400">Drag background to pan · drag node to move</span>
           </div>

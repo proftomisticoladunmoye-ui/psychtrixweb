@@ -178,6 +178,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
     sp: Array<{ from: string; to: string }>,
     meds: string[],
     estimatorOverride?: 'auto' | 'DWLS' | 'ULS',
+    resCov: Array<[string, string]> = [],
   ) => {
     if (!currentDataset || Object.keys(mm).length === 0 || sp.length === 0) {
       setError('Please select a dataset, specify a measurement model, and add structural paths');
@@ -213,7 +214,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
         return;
       }
 
-      const libResults = SEMEstimator.estimate(numericData, { measurementModel, structuralPaths }, allVariables, {
+      const libResults = SEMEstimator.estimate(numericData, { measurementModel, structuralPaths, residualCovariances: resCov }, allVariables, {
         estimator: estimatorOverride ?? advancedOptions.estimator,
       });
 
@@ -768,6 +769,45 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
           </div>
         )}
 
+        {/* Residual Covariances (freed error correlations) */}
+        {results.residualCovariances && results.residualCovariances.length > 0 && (
+          <div className="bg-white rounded-xl border border-gray-200 p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Layers className="w-5 h-5 text-purple-600" />
+              <h4 className="text-lg font-bold text-gray-900">Residual Covariances</h4>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b-2 border-gray-200">
+                    <th className="text-left py-2 px-2 font-semibold text-gray-700">Indicator 1</th>
+                    <th className="text-left py-2 px-2 font-semibold text-gray-700">Indicator 2</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-700">Estimate</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-700">SE</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-700">z</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-700">p</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.residualCovariances.map((rcv, i) => (
+                    <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="py-1.5 px-2 text-gray-900">{rcv.item1}</td>
+                      <td className="py-1.5 px-2 text-gray-900">{rcv.item2}</td>
+                      <td className="py-1.5 px-2 text-right font-medium text-gray-900">{rcv.estimate.toFixed(3)}{pStar(rcv.pvalue)}</td>
+                      <td className="py-1.5 px-2 text-right text-gray-600">{rcv.se.toFixed(3)}</td>
+                      <td className="py-1.5 px-2 text-right text-gray-600">{rcv.z.toFixed(2)}</td>
+                      <td className="py-1.5 px-2 text-right text-gray-600">{fmtP(rcv.pvalue)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-gray-500 mt-3">
+              Freely-estimated error correlations you specified. Free residual covariances only when theoretically justified (e.g. shared method or wording).
+            </p>
+          </div>
+        )}
+
         {/* Modification Indices (collapsible) */}
         {diag.modificationIndices.length > 0 && (
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -981,7 +1021,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
               getStats={getStats}
               loading={loading}
               onEstimate={(model: TranslatedModel, options: SemOptions) =>
-                estimateModel(model.measurementModel, model.structuralPaths, model.mediators, options.estimator)}
+                estimateModel(model.measurementModel, model.structuralPaths, model.mediators, options.estimator, model.residualCovariances)}
               onSendToGroupAnalysis={(target, model, groupVariable) => {
                 const ds = datasets.find(d => d.id === selectedDataset);
                 setHandoff({

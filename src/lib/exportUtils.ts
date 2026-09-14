@@ -3203,6 +3203,13 @@ const buildSEMReportBody = (results: any): string => {
     ${med.map((m: any) => `<tr><td>${m.iv}</td><td>${m.mediator}</td><td>${m.dv}</td><td>${num(m.directEffect)}</td><td>${num(m.indirectEffect)}</td><td>${num(m.totalEffect)}</td><td>${m.proportion != null ? (Number(m.proportion) * 100).toFixed(1) + '%' : '—'}</td><td>${num(m.sobelZ)}</td><td>${pv(m.sobelP)}</td><td>${m.mediationType || ''}</td></tr>`).join('')}
   </table><p class="info">95% CI via delta-method (Sobel 1982). Full = significant indirect, non-significant direct; partial = both significant.</p>`);
 
+  // Residual covariances (freed error correlations)
+  const rcov = results.residualCovariances || [];
+  if (rcov.length) parts.push(`<h2>Residual Covariances</h2><table>
+    <tr><th>Indicator 1</th><th>Indicator 2</th><th>Estimate</th><th>SE</th><th>z</th><th>p-value</th></tr>
+    ${rcov.map((r: any) => `<tr><td>${r.item1}</td><td>${r.item2}</td><td>${num(r.estimate)}</td><td>${num(r.se)}</td><td>${num(r.z, 2)}</td><td>${pv(r.pvalue)}</td></tr>`).join('')}
+  </table><p class="info">Freely-estimated error correlations; free only when theoretically justified.</p>`);
+
   // Modification indices
   const mi = diag.modificationIndices || [];
   if (mi.length) parts.push(`<h2>Modification Indices</h2><table>
