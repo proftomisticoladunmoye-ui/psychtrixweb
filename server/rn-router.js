@@ -226,6 +226,7 @@ export function mountResearchNotes(app) {
       const filenameTitle = decodeURIComponent(req.query.filename || '').replace(/\.docx$/i, '').trim();
       const note = await data.createNote({
         title: result.title || filenameTitle || 'Imported Research Note',
+        subtitle: result.subtitle || null,
         abstract: result.abstract || null,
         keywords: result.keywords || [],
         body_html: sanitizeBody(result.html),

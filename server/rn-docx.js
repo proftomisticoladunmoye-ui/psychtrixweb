@@ -24,6 +24,10 @@ const decode = (s) => String(s).replace(/&amp;/g, '&').replace(/&lt;/g, '<').rep
   .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ');
 const clean = (h) => decode(stripTags(h));
 const AFFIL_RE = /univers|institut|department|college|faculty|\bschool\b|hospital|centre|center|laborator|academy|polytechnic|ministry|organi[sz]ation/i;
+// Leading academic/honorific titles, captured into academic_title and stripped from the name.
+const TITLE_RE = /^((?:dr|prof|professor|assoc(?:iate)?\.?\s*prof(?:essor)?|assist(?:ant)?\.?\s*prof(?:essor)?|mr|mrs|ms|miss|rev|sir|dame|engr?|arch)\.?)\s+/i;
+const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.-]+/g;
+const AUTHOR_LABEL_RE = /^\s*(?:by|authors?|written by|prepared by)\s*[:.\-—]?\s*/i;
 
 // A paragraph that is just a YouTube link becomes a responsive embed.
 function embedYoutube(html) {
@@ -47,24 +51,43 @@ function toBlocks(html) {
 
 // Pull author names + affiliations out of the front matter (between title and
 // abstract). Author lines are comma/"and"-separated names; affiliation lines
-// contain institution keywords.
+// contain institution keywords. Honorific titles (Dr, Prof…) become
+// academic_title, e-mail addresses mark the corresponding author, and
+// superscript affiliation markers are stripped — so the name field is clean.
 function parseFrontMatter(blocks) {
-  const authors = [];
+  const authors = [];       // { full_name, academic_title? }
   const affiliations = [];
+  const emails = [];
   for (const b of blocks) {
-    if (AFFIL_RE.test(b.text)) { affiliations.push(b.text); continue; }
-    // author line: short, name-like, comma/and separated, no sentence punctuation
-    const parts = b.text.split(/,|;|\band\b|&/i).map((p) => p.replace(/[\d*†‡§¶^]/g, '').trim()).filter(Boolean);
+    const foundEmails = b.text.match(EMAIL_RE);
+    if (foundEmails) foundEmails.forEach((e) => emails.push(e.toLowerCase()));
+    if (AFFIL_RE.test(b.text)) { affiliations.push(b.text.replace(EMAIL_RE, '').trim()); continue; }
+    // author line: strip an "Authors:"/"By" label and any e-mail, then split.
+    const line = b.text.replace(AUTHOR_LABEL_RE, '').replace(EMAIL_RE, '').trim();
+    const parts = line.split(/,|;|\band\b|&/i).map((p) => p.replace(/[\d*†‡§¶^()]/g, '').trim()).filter(Boolean);
     const looksLikeNames = parts.length > 0 && parts.length <= 12 && parts.every((p) => {
-      const words = p.split(/\s+/);
-      return words.length >= 1 && words.length <= 5 && /^[A-Z]/.test(p)
-        && !/\b(the|of|study|this|these|we|our|results?|analysis|paper|research|abstract|introduction)\b/i.test(p)
-        && !/\w{20,}/.test(p);
+      const noTitle = p.replace(TITLE_RE, '').trim();
+      const words = noTitle.split(/\s+/);
+      return words.length >= 1 && words.length <= 5 && /^[A-Za-z]/.test(noTitle)
+        && !/\b(the|of|study|this|these|we|our|results?|analysis|paper|research|abstract|introduction)\b/i.test(noTitle)
+        && !/\w{20,}/.test(noTitle);
     });
-    if (looksLikeNames) parts.forEach((name) => authors.push(name));
+    if (looksLikeNames) parts.forEach((raw) => {
+      const tm = raw.match(TITLE_RE);
+      const academic_title = tm ? tm[1].replace(/\.$/, '').trim() : undefined;
+      const full_name = raw.replace(TITLE_RE, '').trim();
+      if (full_name) authors.push({ full_name, academic_title });
+    });
   }
   const affiliation = affiliations[0] || null;
-  return { authors: authors.map((full_name) => ({ full_name, affiliation })), affiliation };
+  const withMeta = authors.map((a) => ({
+    full_name: a.full_name,
+    ...(a.academic_title ? { academic_title: a.academic_title } : {}),
+    affiliation,
+  }));
+  // If exactly one e-mail was found, the first author is the corresponding one.
+  if (emails.length && withMeta.length) withMeta[0].is_corresponding = true;
+  return { authors: withMeta, affiliation, emails };
 }
 
 export async function importDocx(buffer) {
@@ -83,6 +106,28 @@ export async function importDocx(buffer) {
   if (h1) { title = h1.text; consumed.add(h1.html); }
   else { const h2 = blocks.findIndex((b) => b.tag === 'h2'); if (h2 >= 0) { title = blocks[h2].text; titleIdx = h2; consumed.add(blocks[h2].html); } }
 
+  // ---- Subtitle ----
+  // Prefer an explicit Word "Subtitle" style (mapped to <p class="subtitle">).
+  // Otherwise, a single short descriptive line right after the title that is not
+  // authors/affiliation and reads like a phrase (no terminal period, title-ish)
+  // is treated as the subtitle. Conservative — leaves it blank when unsure.
+  let subtitle = null;
+  const styledSub = blocks.find((b) => b.tag === 'p' && /class="subtitle"/i.test(b.html) && !consumed.has(b.html) && b.text);
+  if (styledSub) { subtitle = styledSub.text; consumed.add(styledSub.html); }
+  else if (titleIdx >= 0) {
+    const cand = blocks[titleIdx + 1];
+    if (cand && cand.tag === 'p' && !consumed.has(cand.html) && cand.text
+      && cand.text.length >= 6 && cand.text.length <= 200
+      && !AFFIL_RE.test(cand.text) && !EMAIL_RE.test(cand.text) && !AUTHOR_LABEL_RE.test(cand.text)
+      && !/[.!?]\s*$/.test(cand.text)                 // subtitles rarely end a sentence
+      && !/^abstract|^key\s?words?/i.test(cand.text)
+      && cand.text.split(/\s+/).length >= 2) {
+      // Not author-like: avoid consuming a plain list of names.
+      const fm = parseFrontMatter([cand]);
+      if (!fm.authors.length) { subtitle = cand.text; consumed.add(cand.html); }
+    }
+  }
+
   // ---- Abstract ----
   let abstract = null;
   const absHeadingIdx = blocks.findIndex((b) => isHeading(b) && /^abstract$/.test(headingText(b)));
@@ -90,6 +135,8 @@ export async function importDocx(buffer) {
     consumed.add(blocks[absHeadingIdx].html);
     for (let i = absHeadingIdx + 1; i < blocks.length; i++) {
       if (isHeading(blocks[i])) break;
+      // A keywords line ends the abstract (it's captured separately below).
+      if (/^key\s?words?\s*[:.\-—]/i.test(blocks[i].text)) break;
       abstract = (abstract ? abstract + ' ' : '') + blocks[i].text;
       consumed.add(blocks[i].html);
     }
@@ -144,6 +191,7 @@ export async function importDocx(buffer) {
 
   const report = {
     title_detected: !!title,
+    subtitle_detected: !!subtitle,
     authors: authors.length,
     affiliation_detected: !!affiliation,
     abstract_detected: !!abstract,
@@ -157,5 +205,5 @@ export async function importDocx(buffer) {
     links: (body.match(/<a\s+href=/gi) || []).length,
   };
 
-  return { title, authors, affiliation, abstract, keywords, references, html: body, report, warnings };
+  return { title, subtitle, authors, affiliation, abstract, keywords, references, html: body, report, warnings };
 }

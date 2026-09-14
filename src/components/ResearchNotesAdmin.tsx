@@ -764,8 +764,9 @@ function CommentsModeration({ onBack }: { onBack: () => void }) {
 
 function ImportReport({ report, warnings, onClose }: { report: any; warnings: string[]; onClose: () => void }) {
   const rows: [string, boolean | number][] = [
-    ['Title', report.title_detected], ['Authors', report.authors], ['Affiliation', report.affiliation_detected],
-    ['Abstract', report.abstract_detected], ['Keywords', report.keywords], ['References', report.references],
+    ['Title', report.title_detected], ['Subtitle', report.subtitle_detected], ['Authors', report.authors],
+    ['Affiliation', report.affiliation_detected], ['Abstract', report.abstract_detected],
+    ['Keywords', report.keywords], ['References', report.references],
     ['Headings', report.headings], ['Paragraphs', report.paragraphs], ['Tables', report.tables],
     ['Images', report.images], ['YouTube', report.youtube], ['Links', report.links],
   ];
@@ -791,7 +792,7 @@ function ImportReport({ report, warnings, onClose }: { report: any; warnings: st
           <ul className="list-disc pl-5 space-y-0.5">{warnings.slice(0, 6).map((w, i) => <li key={i}>{w}</li>)}</ul>
         </div>
       )}
-      <p className="text-xs text-gray-500 mt-2">Review the title, authors, abstract, keywords and figures below, then Save or Publish.</p>
+      <p className="text-xs text-gray-500 mt-2">Each part was split into its own field — review the title, subtitle, authors, abstract, keywords, references and figures below, then Save or Publish.</p>
     </div>
   );
 }
