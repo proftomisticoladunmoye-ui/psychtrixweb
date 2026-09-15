@@ -28,8 +28,8 @@ export const SEM_FAMILIES: SemFamilyInfo[] = [
   { id: 'path', label: 'Path Model', supported: true },
   { id: 'full', label: 'Full SEM', supported: true },
   { id: 'mediation', label: 'Mediation SEM', supported: true },
+  { id: 'second-order', label: 'Second-Order CFA', supported: true },
   { id: 'moderation', label: 'Moderation SEM', supported: false, note: 'Latent interactions are not yet estimable here — use Multi-group SEM for group moderation.' },
-  { id: 'second-order', label: 'Second-Order CFA', supported: false, note: 'A higher-order factor is drawn, but the estimator fits first-order factors only — true higher-order estimation is planned.' },
   { id: 'multigroup', label: 'Multigroup SEM', supported: false, note: 'Use the Multi-group SEM tab; visual multigroup wiring is planned.' },
   { id: 'invariance', label: 'Measurement Invariance', supported: false, note: 'Use the Measurement Invariance tab; shared-graph wiring is planned.' },
   { id: 'mimic', label: 'MIMIC Model', supported: false, note: 'Covariates → latent direct effects are not yet estimable client-side.' },
@@ -82,6 +82,29 @@ export function makeId(prefix: string): string {
 }
 
 export const nodeById = (g: SemGraph, id: string) => g.nodes.find((n) => n.id === id);
+
+// A higher-order (e.g. second-order) factor is a latent with NO observed
+// indicators that instead LOADS ON first-order factors — i.e. it has at least
+// one outgoing regression edge to another latent. (A fresh latent with neither
+// indicators nor outgoing paths is just an unfinished first-order factor, not a
+// higher-order one.) Returns the set of such latent node ids.
+export function higherOrderLatentIds(g: SemGraph): Set<string> {
+  const hasIndicator = new Set<string>();
+  for (const e of g.edges) {
+    if (e.kind !== 'loading') continue;
+    const a = nodeById(g, e.from), b = nodeById(g, e.to);
+    const lat = a?.kind === 'latent' ? a : b?.kind === 'latent' ? b : null;
+    if (lat) hasIndicator.add(lat.id);
+  }
+  const out = new Set<string>();
+  for (const n of g.nodes) {
+    if (n.kind !== 'latent' || hasIndicator.has(n.id)) continue;
+    const loadsOnLatent = g.edges.some((e) => e.kind === 'regression' && e.from === n.id
+      && nodeById(g, e.to)?.kind === 'latent');
+    if (loadsOnLatent) out.add(n.id);
+  }
+  return out;
+}
 
 // ── Estimator translation ─────────────────────────────────────────────────────
 // measurementModel: { latentName: [indicator columns] } from loading edges.
@@ -163,8 +186,22 @@ export function validateGraph(g: SemGraph): ValidationIssue[] {
     issues.push({ level: 'error', message: 'No latent variables. Add at least one latent variable with indicators.' });
   }
 
+  // Higher-order (second-order) factors have no observed indicators; they load
+  // on first-order factors via regression edges instead.
+  const higherOrder = higherOrderLatentIds(g);
+
   // Indicators per latent.
   for (const lv of latents) {
+    if (higherOrder.has(lv.id)) {
+      // A second-order factor: it needs first-order factors loading on it.
+      const targets = g.edges.filter((e) => e.kind === 'regression' && e.from === lv.id).length;
+      if (targets === 0) {
+        issues.push({ level: 'error', message: `${lv.label || lv.name} has no indicators and no first-order factors — connect indicators, or draw paths to first-order factors to make it a second-order factor.`, nodeId: lv.id });
+      } else if (targets < 3) {
+        issues.push({ level: 'warning', message: `Second-order factor ${lv.label || lv.name} has ${targets} first-order factor${targets === 1 ? '' : 's'} — ≥3 recommended for identification.`, nodeId: lv.id });
+      }
+      continue;
+    }
     const inds = measurementModel[lv.name] || [];
     if (inds.length === 0) {
       issues.push({ level: 'error', message: `${lv.label || lv.name} has no indicators. Connect observed variables to it.`, nodeId: lv.id });
@@ -224,21 +261,30 @@ export function toLavaanSyntax(g: SemGraph): string {
   };
 
   const lines: string[] = [];
-  const latents = Object.keys(measurementModel);
+  const higherOrderNames = new Set([...higherOrderLatentIds(g)].map((id) => nodeById(g, id)!.name));
 
-  if (latents.length) {
+  // First-order measurement model (latents that have observed indicators).
+  const firstOrder = Object.keys(measurementModel).filter((lv) => measurementModel[lv].length > 0);
+  if (firstOrder.length) {
     lines.push('# Measurement model');
-    for (const lv of latents) {
-      const inds = measurementModel[lv];
-      if (inds.length) lines.push(`${lv} =~ ${inds.join(' + ')}${labelOf(lv)}`);
-      else lines.push(`# ${lv} =~ (no indicators yet)`);
-    }
+    for (const lv of firstOrder) lines.push(`${lv} =~ ${measurementModel[lv].join(' + ')}${labelOf(lv)}`);
   }
 
-  if (structuralPaths.length) {
-    // Group regressions by outcome: "Y ~ X1 + X2".
+  // Second-order factors: a higher-order latent loads on first-order factors,
+  // written with the measurement operator (G =~ F1 + F2 + F3).
+  const secondOrder = structuralPaths.filter((p) => higherOrderNames.has(p.from));
+  if (secondOrder.length) {
+    const byG = new Map<string, string[]>();
+    for (const p of secondOrder) { if (!byG.has(p.from)) byG.set(p.from, []); byG.get(p.from)!.push(p.to); }
+    lines.push('', '# Second-order factor(s)');
+    for (const [g2, fs] of byG) lines.push(`${g2} =~ ${fs.join(' + ')}${labelOf(g2)}`);
+  }
+
+  // Structural regressions (everything except second-order loadings).
+  const structural = structuralPaths.filter((p) => !higherOrderNames.has(p.from));
+  if (structural.length) {
     const byOutcome = new Map<string, string[]>();
-    for (const p of structuralPaths) {
+    for (const p of structural) {
       if (!byOutcome.has(p.to)) byOutcome.set(p.to, []);
       byOutcome.get(p.to)!.push(p.from);
     }
@@ -307,6 +353,24 @@ export const SEM_TEMPLATES: SemTemplate[] = [
           { id: makeId('reg'), from: X.id, to: M.id, kind: 'regression' },
           { id: makeId('reg'), from: M.id, to: Y.id, kind: 'regression' },
           { id: makeId('reg'), from: X.id, to: Y.id, kind: 'regression' },
+        ],
+      };
+    },
+  },
+  {
+    id: 'second-order', label: 'Second-Order CFA', family: 'second-order',
+    description: 'A general factor over three first-order factors — add each factor’s indicators.',
+    build: () => {
+      const G = latentNode('General', 330, 70);
+      const F1 = latentNode('Factor1', 120, 240);
+      const F2 = latentNode('Factor2', 330, 240);
+      const F3 = latentNode('Factor3', 540, 240);
+      return {
+        ...emptyGraph('second-order'), nodes: [G, F1, F2, F3],
+        edges: [
+          { id: makeId('reg'), from: G.id, to: F1.id, kind: 'regression' },
+          { id: makeId('reg'), from: G.id, to: F2.id, kind: 'regression' },
+          { id: makeId('reg'), from: G.id, to: F3.id, kind: 'regression' },
         ],
       };
     },

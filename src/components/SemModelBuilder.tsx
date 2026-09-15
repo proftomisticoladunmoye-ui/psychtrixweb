@@ -9,6 +9,7 @@ import { type VariableInfo, type VarStats } from '../lib/pathVariableUtils';
 import {
   type SemGraph, type SemNode, type SemFamily, type SemOptions, type TranslatedModel,
   SEM_FAMILIES, SEM_TEMPLATES, emptyGraph, makeId, nodeById, toSEMModel, validateGraph, toLavaanSyntax,
+  higherOrderLatentIds,
 } from '../lib/semGraph';
 
 type Mode = 'select' | 'loading' | 'path' | 'covariance' | 'delete';
@@ -73,6 +74,7 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
   const warnCount = issues.filter((i) => i.level === 'warning').length;
   const translated = useMemo(() => toSEMModel({ ...graph, family }), [graph, family]);
   const syntax = useMemo(() => toLavaanSyntax({ ...graph, family }), [graph, family]);
+  const higherOrderIds = useMemo(() => higherOrderLatentIds(graph), [graph]);
 
   const applyTemplate = (id: string) => {
     const tpl = SEM_TEMPLATES.find((t) => t.id === id);
@@ -505,8 +507,32 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
                 {selNode.kind === 'latent' ? <Circle className="w-4 h-4 text-blue-500" /> : <Square className="w-4 h-4 text-emerald-500" />}
                 <span className="font-semibold text-gray-900">{selNode.label || selNode.name}</span>
               </div>
-              <p className="text-gray-500">Type: <span className="text-gray-800">{selNode.kind === 'latent' ? 'Latent variable' : 'Observed variable'}</span></p>
+              {(() => { const isHO = higherOrderIds.has(selNode.id); return (
+              <p className="text-gray-500">Type: <span className="text-gray-800">{selNode.kind !== 'latent' ? 'Observed variable' : isHO ? 'Second-order factor' : 'Latent variable'}</span></p>
+              ); })()}
               {selNode.kind === 'latent' ? (
+                higherOrderIds.has(selNode.id) ? (
+                <>
+                  <label className="block text-gray-500">Display label
+                    <input
+                      value={selNode.label || ''} placeholder={selNode.name}
+                      onChange={(e) => renameLatent(selNode.id, e.target.value)}
+                      className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1 text-xs"
+                    />
+                  </label>
+                  <div>
+                    <p className="text-gray-500 mb-1">Loads on first-order factors ({graph.edges.filter((e) => e.kind === 'regression' && e.from === selNode.id).length})</p>
+                    <div className="flex flex-wrap gap-1">
+                      {graph.edges.filter((e) => e.kind === 'regression' && e.from === selNode.id).map((e) => {
+                        const t = nodeById(graph, e.to);
+                        return <span key={e.id} className="px-1.5 py-0.5 bg-blue-50 border border-blue-200 rounded text-blue-800">{t?.label || t?.name}</span>;
+                      })}
+                      {!graph.edges.some((e) => e.kind === 'regression' && e.from === selNode.id) && <span className="text-blue-600">Use <b>Path</b> mode to connect first-order factors →</span>}
+                    </div>
+                    <p className="text-[11px] text-gray-400 mt-1">A general factor with no indicators of its own — measured through the first-order factors it predicts (G =~ F1 + F2 + …).</p>
+                  </div>
+                </>
+                ) : (
                 <>
                   <label className="block text-gray-500">Display label
                     <input
@@ -529,6 +555,7 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
                   </div>
                   <p className="text-gray-500">Identification: <span className="text-gray-800">marker / fixed-variance (std. solution)</span></p>
                 </>
+                )
               ) : (
                 <>
                   {(() => { const st = getStats?.(selNode.name); return st ? (

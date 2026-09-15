@@ -358,8 +358,34 @@ export class SEMEstimator {
     const lamMap = new Map<string, number>(warmLoadings.map(fl => [fl.item, fl.loading]));
     let lambdas: number[] = allInds.map(ind => clamp((lamMap.get(ind) ?? 0.6) * 0.95, -0.98, 0.98));
     const warmPathMap = new Map<string, number>(warmPaths.map(pt => [`${pt.from}->${pt.to}`, pt.coefficient]));
+
+    // Higher-order factors (second-order CFA) are latents with NO observed
+    // indicators — they are measured only through the first-order factors they
+    // predict. Their loadings can't be warm-started from factor scores (the
+    // factor has none), and starting them at 0 lands on a saddle (the implied
+    // cross-factor covariances are products λ_Gj·λ_Gk, whose gradient is 0 at 0).
+    // Warm-start them from the first-order factor-score correlations instead
+    // (Φ[Fj][Fk] ≈ λ_Gj·λ_Gk ⇒ λ_Gk ≈ √mean|Φ[Fk][Fj]|), else a positive default.
+    const noIndFactors = new Set(
+      Object.entries(model.measurementModel).filter(([, inds]) => inds.length === 0).map(([f]) => f));
+    const hoTargets = new Map<string, string[]>();
+    for (const pt of model.structuralPaths) if (noIndFactors.has(pt.from)) {
+      if (!hoTargets.has(pt.from)) hoTargets.set(pt.from, []);
+      hoTargets.get(pt.from)!.push(pt.to);
+    }
+    const hoWarm = (from: string, to: string): number => {
+      const fk = fIndex.get(to) ?? -1;
+      const others = (hoTargets.get(from) || []).filter(t => t !== to);
+      let sum = 0, cnt = 0;
+      for (const tj of others) { const fj = fIndex.get(tj) ?? -1; if (fk >= 0 && fj >= 0) { sum += Math.abs(PhiScores[fk]?.[fj] ?? 0); cnt++; } }
+      const est = cnt ? Math.sqrt(sum / cnt) : 0.5;
+      return clamp(est > 0.05 ? est : 0.5, 0.3, 0.9);
+    };
+
     let betas: number[] = model.structuralPaths.map(pt =>
-      clamp(warmPathMap.get(`${pt.from}->${pt.to}`) ?? 0.3, -0.9, 0.9));
+      noIndFactors.has(pt.from)
+        ? hoWarm(pt.from, pt.to)
+        : clamp(warmPathMap.get(`${pt.from}->${pt.to}`) ?? 0.3, -0.9, 0.9));
     let phis: number[] = exoPairs.map(([a, b]) => clamp(PhiScores[a]?.[b] ?? 0, -0.9, 0.9));
     // Residual covariances warm-start at the raw off-diagonal residual (S − warm Σ).
     let rhos: number[] = resCovPairs.map(([i, j]) => clamp((S[i][j] ?? 0) * 0.5, -0.6, 0.6));
