@@ -90,7 +90,8 @@ export function ris(note, canonicalUrl) {
 export function citationMetaTags(note, canonicalUrl, pdfUrl = null) {
   const tags = [];
   const add = (name, content) => { if (content != null && content !== '') tags.push({ name, content }); };
-  add('citation_title', note.title);
+  const title = String(note.title || '').replace(/\s+/g, ' ').trim();
+  add('citation_title', title);
   for (const a of (note.authors || [])) {
     add('citation_author', a.full_name);
     if (a.affiliation) add('citation_author_institution', a.affiliation);
@@ -121,7 +122,7 @@ export function citationMetaTags(note, canonicalUrl, pdfUrl = null) {
   if (note.abstract) add('citation_abstract', note.abstract);
 
   // Dublin Core
-  add('DC.title', note.title);
+  add('DC.title', title);
   for (const a of (note.authors || [])) add('DC.creator', a.full_name);
   add('DC.publisher', SERIES.publisher);
   add('DC.type', 'Text');

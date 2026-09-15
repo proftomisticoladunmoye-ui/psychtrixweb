@@ -268,12 +268,13 @@ export async function listForEditor() {
 }
 
 export async function createNote(data, userId) {
-  const slug = await uniqueSlug(data.title || data.slug || 'untitled-research-note');
+  const title = normText(data.title) || 'Untitled Research Note';
+  const slug = await uniqueSlug(title || data.slug || 'untitled-research-note');
   const { rows } = await query(
     `INSERT INTO research_notes (slug, note_type, title, subtitle, abstract, keywords, categories,
         body_html, body_json, license, version, seo_title, seo_description, meta, created_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
-    [slug, data.note_type || 'Research Note', data.title || 'Untitled Research Note', data.subtitle || null,
+    [slug, data.note_type || 'Research Note', title, normText(data.subtitle) || null,
      data.abstract || null, data.keywords || [], data.categories || [], data.body_html || '',
      data.body_json ? JSON.stringify(data.body_json) : null, data.license || 'cc-by', data.version || '1.0',
      data.seo_title || null, data.seo_description || null, JSON.stringify(data.meta || {}), userId]);
@@ -284,6 +285,11 @@ const EDITABLE = ['note_type', 'title', 'subtitle', 'abstract', 'keywords', 'cat
   'body_html', 'body_json', 'license', 'version', 'seo_title', 'seo_description', 'featured',
   'first_page', 'last_page', 'meta', 'doi'];
 
+// Collapse runs of whitespace and trim — titles/subtitles must never carry stray
+// leading/trailing spaces (they leak into <title>, <h1>, and citation_* meta,
+// which Google Scholar is picky about).
+const normText = (s) => (s == null ? s : String(s).replace(/\s+/g, ' ').trim());
+
 export async function updateNote(id, patch) {
   const cols = [];
   const vals = [];
@@ -291,6 +297,7 @@ export async function updateNote(id, patch) {
   for (const key of EDITABLE) {
     if (!(key in patch)) continue;
     let v = patch[key];
+    if (key === 'title' || key === 'subtitle') v = normText(v);
     if (key === 'body_json' || key === 'meta') v = v == null ? null : JSON.stringify(v);
     cols.push(`${key} = $${i++}`);
     vals.push(v);
