@@ -45,6 +45,25 @@ function decodeEntities(s) {
 function htmlToBlocks(html) {
   let s = String(html || '');
   s = s.replace(/<br\s*\/?>/gi, ' ');
+  // Tables -> TABLE marker carrying the parsed rows (before any other tag work,
+  // so cell contents aren't flattened into scrambled body text).
+  s = s.replace(/<table\b[^>]*>([\s\S]*?)<\/table>/gi, (_m, inner) => {
+    const rows = [];
+    const trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+    let tr;
+    while ((tr = trRe.exec(inner))) {
+      const cells = [];
+      let header = false;
+      const cellRe = /<(t[dh])\b[^>]*>([\s\S]*?)<\/\1>/gi;
+      let c;
+      while ((c = cellRe.exec(tr[1]))) {
+        if (c[1].toLowerCase() === 'th') header = true;
+        cells.push(decodeEntities(String(c[2]).replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim());
+      }
+      if (cells.length) rows.push({ header, cells });
+    }
+    return rows.length ? `\nTABLE\x1f${encodeURIComponent(JSON.stringify(rows))}\n` : '';
+  });
   // Figures / images -> IMG marker with src + caption.
   s = s.replace(/<figure\b[^>]*>([\s\S]*?)<\/figure>/gi, (_m, inner) => {
     const src = (inner.match(/<img[^>]+src="([^"]+)"/i) || [])[1] || '';
@@ -64,6 +83,10 @@ function htmlToBlocks(html) {
       if (src) out.push({ type: 'IMG', src, caption: (caption || '').trim() });
       continue;
     }
+    if (line.startsWith('TABLE\x1f')) {
+      try { const rows = JSON.parse(decodeURIComponent(line.slice(6))); if (rows.length) out.push({ type: 'TABLE', rows }); } catch { /* skip malformed */ }
+      continue;
+    }
     const m = line.match(/^(H2|H3|H4|QUOTE|CAP|LI|P)\x1f([\s\S]*)$/);
     const type = m ? m[1] : 'P';
     const text = decodeEntities(m ? m[2] : line).replace(/\s+/g, ' ').trim();
@@ -81,6 +104,54 @@ function htmlToBlocks(html) {
 }
 
 const isPngOrJpeg = (b) => b && b.length > 3 && ((b[0] === 0x89 && b[1] === 0x50) || (b[0] === 0xff && b[1] === 0xd8));
+
+// Draw a data table as a bordered grid. Columns share the content width equally;
+// cells wrap; header rows are bold on a tint; numeric-looking cells right-align.
+// Rows page-break cleanly (the header repeats at the top of a continued table).
+function drawTable(doc, rows, { W, F, pageBottom }) {
+  const nCols = Math.max(0, ...rows.map((r) => r.cells.length));
+  if (!nCols) return;
+  const x0 = doc.page.margins.left;
+  const colW = W / nCols;
+  const padX = 5, padY = 4;
+  const fontSize = nCols >= 6 ? 8 : nCols >= 4 ? 8.5 : 9.5;
+  const isNumeric = (t) => /^[-−+]?[\d.,%()<>=–≤≥*\s]+$/.test(t) && /\d/.test(t);
+
+  const measureRow = (r) => {
+    let h = 0;
+    for (let c = 0; c < nCols; c++) {
+      doc.font(r.header ? F.bold : F.body).fontSize(fontSize);
+      const ch = doc.heightOfString(r.cells[c] || '', { width: colW - 2 * padX });
+      if (ch > h) h = ch;
+    }
+    return h + 2 * padY;
+  };
+  const drawRow = (r, y, rowH) => {
+    if (r.header) { doc.save(); doc.rect(x0, y, colW * nCols, rowH).fill('#eef2fb'); doc.restore(); }
+    for (let c = 0; c < nCols; c++) {
+      const cx = x0 + c * colW;
+      doc.strokeColor('#d7dbe6').lineWidth(0.6).rect(cx, y, colW, rowH).stroke();
+      const txt = r.cells[c] || '';
+      doc.fillColor(INK).font(r.header ? F.bold : F.body).fontSize(fontSize)
+        .text(txt, cx + padX, y + padY, { width: colW - 2 * padX, align: (!r.header && isNumeric(txt)) ? 'right' : 'left' });
+    }
+  };
+
+  doc.moveDown(0.5);
+  const headerRow = rows.find((r) => r.header);
+  for (const r of rows) {
+    const rowH = measureRow(r);
+    if (doc.y + rowH > pageBottom) {
+      doc.addPage();
+      // Repeat the header at the top of a continued table.
+      if (headerRow && !r.header) { const hh = measureRow(headerRow); const hy = doc.y; drawRow(headerRow, hy, hh); doc.y = hy + hh; }
+    }
+    const y = doc.y;
+    drawRow(r, y, rowH);
+    doc.y = y + rowH;   // cells advanced doc.y themselves; pin it to the row bottom
+  }
+  doc.moveDown(0.6);
+}
 
 // Fetch a figure's bytes: same-origin DB media directly, otherwise over HTTP.
 async function fetchImage(src, baseUrl) {
@@ -199,6 +270,8 @@ export async function buildPdf(note, baseUrl) {
         if (b.caption) doc.fillColor(MUTED).font(F.italic).fontSize(9)
           .text(b.caption, doc.page.margins.left, doc.y, { width: W, align: 'center' });
         doc.moveDown(0.6);
+      } else if (b.type === 'TABLE') {
+        drawTable(doc, b.rows, { W, F, pageBottom });
       } else if (b.type === 'H2') doc.moveDown(0.6).fillColor(INK).font(F.bold).fontSize(14).text(b.text, { lineGap: 1 });
       else if (b.type === 'H3') doc.moveDown(0.4).fillColor(INK).font(F.bold).fontSize(12).text(b.text);
       else if (b.type === 'H4') doc.moveDown(0.3).fillColor(INK).font(F.bold).fontSize(10.5).text(b.text);
