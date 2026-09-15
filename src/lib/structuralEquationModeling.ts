@@ -32,6 +32,12 @@ export interface SEMModel {
    *  0, so the latent IS the observed variable. Used to let observed variables act
    *  as exogenous predictors of a latent (MIMIC models). */
   fixedUnitLatents?: string[];
+  /** Bifactor model: orthogonal specific factors, each over a subset of the
+   *  general factor's items. The general factor is the (single) latent in
+   *  measurementModel; every item also loads on it. Modelled additively (the
+   *  specific factors add λ_S,i·λ_S,j to same-group item covariances) so the
+   *  general and specific factors stay orthogonal by construction. */
+  bifactorSpecifics?: { [specificName: string]: string[] };
 }
 
 export interface ModificationIndex {
@@ -97,6 +103,12 @@ export interface SEMResults {
   residualCovariances?: Array<{
     item1: string; item2: string;
     estimate: number; se: number; z: number; pvalue: number;
+  }>;
+  /** Bifactor specific-factor loadings (each item's loading on its specific
+   *  factor; the general-factor loadings are in measurementModel.factorLoadings). */
+  specificLoadings?: Array<{
+    item: string; factor: string;
+    loading: number; se: number; z: number; pvalue: number;
   }>;
   diagnostics: {
     modificationIndices:   ModificationIndex[];
@@ -223,6 +235,7 @@ export class SEMEstimator {
       mediation,
       diagnostics,
       residualCovariances: fitted.residualCovariances,
+      specificLoadings: fitted.specificLoadings,
     };
   }
 
@@ -270,6 +283,7 @@ export class SEMEstimator {
     Sigma: number[][];
     fitStat?: { chisq: number; chisqNull: number; dfNull: number; scaled: boolean; scalingFactor: number };
     residualCovariances: NonNullable<SEMResults['residualCovariances']>;
+    specificLoadings: NonNullable<SEMResults['specificLoadings']>;
   } {
     const p  = allInds.length;
     const q  = model.structuralPaths.length;
@@ -304,6 +318,23 @@ export class SEMEstimator {
       .filter(([i, j]) => i >= 0 && j >= 0 && i !== j);
     const rc = resCovPairs.length;
 
+    // Bifactor specific factors (orthogonal): each item in a specific factor gains
+    // a specific loading μ; items sharing a specific factor add μ_i·μ_j to their
+    // covariance. Represented additively so the general/specific factors stay
+    // orthogonal by construction (no factor covariances between them).
+    const specSlots: Array<{ i: number; factor: string }> = [];
+    const specGroups: number[][] = [];         // item indices per specific factor
+    const specSlotOf = new Map<number, number>(); // item index → μ slot
+    for (const [sName, items] of Object.entries(model.bifactorSpecifics || {})) {
+      const idxs: number[] = [];
+      for (const it of items) {
+        const i = indPos.get(it);
+        if (i != null && !specSlotOf.has(i)) { specSlotOf.set(i, specSlots.length); specSlots.push({ i, factor: sName }); idxs.push(i); }
+      }
+      if (idxs.length) specGroups.push(idxs);
+    }
+    const ns = specSlots.length;
+
     const topo = this.topoOrder(nF, pathIdx);
 
     // Implied latent correlation matrix + explained variance per endo factor
@@ -332,7 +363,7 @@ export class SEMEstimator {
       return { Phi, explained };
     };
 
-    const buildSigma = (lambdas: number[], betas: number[], phis: number[], rhos: number[] = []) => {
+    const buildSigma = (lambdas: number[], betas: number[], phis: number[], rhos: number[] = [], mus: number[] = []) => {
       const { Phi, explained } = buildPhi(betas, phis);
       const Sigma: number[][] = Array.from({ length: p }, (_, i) =>
         Array.from({ length: p }, (_, j) => {
@@ -343,14 +374,22 @@ export class SEMEstimator {
         }));
       // Add freely-estimated residual covariances to the implied correlation.
       resCovPairs.forEach(([i, j], k) => { Sigma[i][j] += rhos[k]; Sigma[j][i] += rhos[k]; });
+      // Bifactor: orthogonal specific factors add μ_i·μ_j within each group.
+      for (const idxs of specGroups) {
+        for (let a = 0; a < idxs.length; a++) for (let b = 0; b < a; b++) {
+          const i = idxs[a], j = idxs[b];
+          const m = mus[specSlotOf.get(i)!] * mus[specSlotOf.get(j)!];
+          Sigma[i][j] += m; Sigma[j][i] += m;
+        }
+      }
       return { Sigma, Phi, explained };
     };
 
     // Discrepancy over the lower triangle. ULS weights every residual equally;
     // DWLS weights by 1/asymVar of the polychoric correlation (pairWeight). A
     // smooth penalty keeps the endogenous variance decompositions admissible.
-    const objective = (lambdas: number[], betas: number[], phis: number[], rhos: number[] = []) => {
-      const { Sigma, explained } = buildSigma(lambdas, betas, phis, rhos);
+    const objective = (lambdas: number[], betas: number[], phis: number[], rhos: number[] = [], mus: number[] = []) => {
+      const { Sigma, explained } = buildSigma(lambdas, betas, phis, rhos, mus);
       let f = 0, k = 0;
       for (let i = 0; i < p; i++)
         for (let j = 0; j < i; j++) {
@@ -359,6 +398,11 @@ export class SEMEstimator {
           k++;
         }
       for (const e of endoSet) f += 100 * Math.max(0, explained[e] - 0.98) ** 2;
+      // Bifactor: keep each item's communality λ_G² + μ² admissible (≤ 1).
+      for (const { i } of specSlots) {
+        const comm = lambdas[i] * lambdas[i] + mus[specSlotOf.get(i)!] ** 2;
+        f += 50 * Math.max(0, comm - 0.98) ** 2;
+      }
       return f;
     };
 
@@ -397,15 +441,18 @@ export class SEMEstimator {
     let phis: number[] = exoPairs.map(([a, b]) => clamp(PhiScores[a]?.[b] ?? 0, -0.9, 0.9));
     // Residual covariances warm-start at the raw off-diagonal residual (S − warm Σ).
     let rhos: number[] = resCovPairs.map(([i, j]) => clamp((S[i][j] ?? 0) * 0.5, -0.6, 0.6));
+    // Bifactor specific loadings warm-start positive (0 is a saddle, like second-order).
+    let mus: number[] = specSlots.map(() => 0.35);
 
     // ── Gradient descent with Armijo line search (mirrors CFAEstimator) ─────
-    const nPar = p + q + r + rc;
-    const unpack = (t: number[]) => ({ l: t.slice(0, p), b: t.slice(p, p + q), ph: t.slice(p + q, p + q + r), rh: t.slice(p + q + r) });
+    const nPar = p + q + r + rc + ns;
+    const b0 = p + q + r + rc;   // start index of the μ block
+    const unpack = (t: number[]) => ({ l: t.slice(0, p), b: t.slice(p, p + q), ph: t.slice(p + q, p + q + r), rh: t.slice(p + q + r, b0), mu: t.slice(b0) });
     const clampTheta = (t: number[]) => t.map((v, k) =>
-      k < p ? (isFixedLambda[k] ? 1 : clamp(v, -0.999, 0.999)) : k < p + q ? clamp(v, -1.5, 1.5) : k < p + q + r ? clamp(v, -0.99, 0.99) : clamp(v, -0.9, 0.9));
-    const F = (t: number[]) => { const { l, b, ph, rh } = unpack(t); return objective(l, b, ph, rh); };
+      k < p ? (isFixedLambda[k] ? 1 : clamp(v, -0.999, 0.999)) : k < p + q ? clamp(v, -1.5, 1.5) : k < p + q + r ? clamp(v, -0.99, 0.99) : k < b0 ? clamp(v, -0.9, 0.9) : clamp(v, -0.95, 0.95));
+    const F = (t: number[]) => { const { l, b, ph, rh, mu } = unpack(t); return objective(l, b, ph, rh, mu); };
 
-    let theta: number[] = clampTheta([...lambdas, ...betas, ...phis, ...rhos]);
+    let theta: number[] = clampTheta([...lambdas, ...betas, ...phis, ...rhos, ...mus]);
     const H_STEP = 1e-5;
     let stepSize = 0.05;
     for (let iter = 0; iter < 500; iter++) {
@@ -428,7 +475,7 @@ export class SEMEstimator {
       }
       if (!moved) break;
     }
-    ({ l: lambdas, b: betas, ph: phis, rh: rhos } = unpack(theta));
+    ({ l: lambdas, b: betas, ph: phis, rh: rhos, mu: mus } = unpack(theta));
 
     // ── Standard errors via numerical Hessian of F (CFA convention) ─────────
     const hh = 1e-4;
@@ -452,13 +499,13 @@ export class SEMEstimator {
     if (pairWeight && Gamma && lowerPairs.length === pairWeight.length) {
       const qy = lowerPairs.length;
       // Jacobian Δ = ∂σ/∂θ over the lower-triangle implied correlations
-      const base = buildSigma(lambdas, betas, phis, rhos).Sigma;
+      const base = buildSigma(lambdas, betas, phis, rhos, mus).Sigma;
       const Dj: number[][] = Array.from({ length: qy }, () => new Array(nPar).fill(0));
       const hj = 1e-5;
       for (let t = 0; t < nPar; t++) {
         const tp = [...theta]; tp[t] += hj;
         const u = unpack(tp);
-        const pert = buildSigma(u.l, u.b, u.ph, u.rh).Sigma;
+        const pert = buildSigma(u.l, u.b, u.ph, u.rh, u.mu).Sigma;
         for (let kk = 0; kk < qy; kk++) { const [i, j] = lowerPairs[kk]; Dj[kk][t] = (pert[i][j] - base[i][j]) / hj; }
       }
       // Robust SE sandwich: acov = (4/N)·Hinv·(Δ'VΓVΔ)·Hinv, V = diag(pairWeight)
@@ -503,7 +550,7 @@ export class SEMEstimator {
     }
 
     // ── Assemble outputs ────────────────────────────────────────────────────
-    const { Sigma, Phi, explained } = buildSigma(lambdas, betas, phis, rhos);
+    const { Sigma, Phi, explained } = buildSigma(lambdas, betas, phis, rhos, mus);
 
     const factorLoadings: SEMResults['measurementModel']['factorLoadings'] = [];
     allInds.forEach((item, k) => {
@@ -551,7 +598,19 @@ export class SEMEstimator {
       };
     });
 
-    return { factorLoadings, paths, rSquared, Phi, Sigma, fitStat, residualCovariances };
+    // Bifactor specific-factor loadings.
+    const specificLoadings = specSlots.map((s, k) => {
+      const lam = mus[k];
+      const se  = seTheta[b0 + k] > 1e-8 ? seTheta[b0 + k] : Math.abs(lam) / Math.sqrt(Math.max(n, 2));
+      const z   = se > 0 ? lam / se : 0;
+      return {
+        item: allInds[s.i], factor: s.factor,
+        loading: lam, se, z,
+        pvalue: Math.min(1, 2 * (1 - normalCDF(Math.abs(z)))),
+      };
+    });
+
+    return { factorLoadings, paths, rSquared, Phi, Sigma, fitStat, residualCovariances, specificLoadings };
   }
 
   // ── Topological order of factors (Kahn); cycles appended in input order ──────
@@ -917,7 +976,9 @@ export class SEMEstimator {
     const resCov = model.residualCovariances?.length || 0;
     // Proxy latents' loadings are fixed (not free), so they don't count.
     const fixed = (model.fixedUnitLatents || []).reduce((s, f) => s + (model.measurementModel[f]?.length || 0), 0);
-    return p + model.structuralPaths.length + exo.length * (exo.length - 1) / 2 + resCov - fixed;
+    // Bifactor: each item in a specific factor adds one specific loading.
+    const spec = Object.values(model.bifactorSpecifics || {}).reduce((s, items) => s + items.length, 0);
+    return p + model.structuralPaths.length + exo.length * (exo.length - 1) / 2 + resCov - fixed + spec;
   }
 
   // ── Modification indices (LM-test on off-diagonal residuals) ─────────────────

@@ -35,7 +35,7 @@ export const SEM_FAMILIES: SemFamilyInfo[] = [
   { id: 'mimic', label: 'MIMIC Model', supported: true },
   { id: 'higher-order', label: 'Higher-Order SEM', supported: false, note: 'Planned.' },
   { id: 'lgm', label: 'Latent Growth Model', supported: false, note: 'Growth factors require a dedicated estimator — planned.' },
-  { id: 'bifactor', label: 'Bifactor Model', supported: false, note: 'Orthogonal general + specific factors — planned.' },
+  { id: 'bifactor', label: 'Bifactor Model', supported: true },
 ];
 
 export type SemNodeKind = 'latent' | 'observed';
@@ -122,6 +122,9 @@ export interface TranslatedModel {
   /** Observed variables that act as covariates (predict a latent) — these appear
    *  as proxy latents in the estimator model but are covariates to the researcher. */
   covariates: string[];
+  /** Bifactor specific factors (each over a subset of the general factor's items).
+   *  Present only when the family is 'bifactor'. */
+  bifactorSpecifics?: { [name: string]: string[] };
 }
 
 export function toSEMModel(g: SemGraph): TranslatedModel {
@@ -183,7 +186,24 @@ export function toSEMModel(g: SemGraph): TranslatedModel {
     }
   }
 
-  return { measurementModel, structuralPaths, mediators, residualCovariances, fixedUnitLatents, covariates };
+  // Bifactor: split the latents into one GENERAL factor (loads on the most items —
+  // ideally a superset of every specific factor) and orthogonal SPECIFIC factors.
+  let bifactorSpecifics: { [name: string]: string[] } | undefined;
+  if (g.family === 'bifactor') {
+    const withItems = latents.map((l) => ({ name: l.name, items: measurementModel[l.name] || [] })).filter((x) => x.items.length);
+    if (withItems.length >= 2) {
+      const superset = (a: string[], b: string[]) => b.every((x) => a.includes(x));
+      let general = withItems.find((cand) => withItems.every((o) => o.name === cand.name || superset(cand.items, o.items)));
+      if (!general) general = [...withItems].sort((a, b) => b.items.length - a.items.length)[0];
+      bifactorSpecifics = {};
+      for (const li of withItems) if (li.name !== general.name) {
+        bifactorSpecifics[li.name] = li.items;
+        delete measurementModel[li.name];   // estimator sees only the general factor
+      }
+    }
+  }
+
+  return { measurementModel, structuralPaths, mediators, residualCovariances, fixedUnitLatents, covariates, bifactorSpecifics };
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────────
@@ -199,7 +219,10 @@ export function validateGraph(g: SemGraph): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const latents = g.nodes.filter((n) => n.kind === 'latent');
   const observed = g.nodes.filter((n) => n.kind === 'observed');
-  const { measurementModel, structuralPaths } = toSEMModel(g);
+  const { measurementModel, structuralPaths, bifactorSpecifics } = toSEMModel(g);
+  // Bifactor specific factors keep their indicators in bifactorSpecifics; merge
+  // them back so the per-latent checks and cross-loading count see every loading.
+  const indicatorsOf = (name: string) => measurementModel[name] || bifactorSpecifics?.[name] || [];
 
   if (latents.length === 0) {
     issues.push({ level: 'error', message: 'No latent variables. Add at least one latent variable with indicators.' });
@@ -221,7 +244,7 @@ export function validateGraph(g: SemGraph): ValidationIssue[] {
       }
       continue;
     }
-    const inds = measurementModel[lv.name] || [];
+    const inds = indicatorsOf(lv.name);
     if (inds.length === 0) {
       issues.push({ level: 'error', message: `${lv.label || lv.name} has no indicators. Connect observed variables to it.`, nodeId: lv.id });
     } else if (inds.length < 3) {
@@ -231,10 +254,10 @@ export function validateGraph(g: SemGraph): ValidationIssue[] {
 
   // Cross-loadings (an indicator on more than one latent).
   const loadCount = new Map<string, number>();
-  for (const [, inds] of Object.entries(measurementModel)) {
-    for (const ind of inds) loadCount.set(ind, (loadCount.get(ind) || 0) + 1);
-  }
-  for (const [ind, c] of loadCount) {
+  for (const lv of latents) for (const ind of indicatorsOf(lv.name)) loadCount.set(ind, (loadCount.get(ind) || 0) + 1);
+  // In a bifactor model every item loads on the general factor + one specific
+  // factor by design, so cross-loadings there are expected, not a warning.
+  if (g.family !== 'bifactor') for (const [ind, c] of loadCount) {
     if (c > 1) issues.push({ level: 'warning', message: `${ind} loads on ${c} factors (cross-loading). Confirm this is intended.` });
   }
 
@@ -273,7 +296,7 @@ export function validateGraph(g: SemGraph): ValidationIssue[] {
 // the visual model stays the single source of truth (editing text back would risk
 // inconsistency), so this is a live mirror, not a second editor.
 export function toLavaanSyntax(g: SemGraph): string {
-  const { measurementModel, structuralPaths, residualCovariances, fixedUnitLatents } = toSEMModel(g);
+  const { measurementModel, structuralPaths, residualCovariances, fixedUnitLatents, bifactorSpecifics } = toSEMModel(g);
   const proxy = new Set(fixedUnitLatents);   // MIMIC covariates — shown as regressors, not =~
   const labelOf = (latentName: string) => {
     const n = g.nodes.find((x) => x.kind === 'latent' && x.name === latentName);
@@ -287,8 +310,14 @@ export function toLavaanSyntax(g: SemGraph): string {
   // single-indicator proxy latents that stand in for MIMIC covariates).
   const firstOrder = Object.keys(measurementModel).filter((lv) => measurementModel[lv].length > 0 && !proxy.has(lv));
   if (firstOrder.length) {
-    lines.push('# Measurement model');
+    lines.push(bifactorSpecifics ? '# General factor' : '# Measurement model');
     for (const lv of firstOrder) lines.push(`${lv} =~ ${measurementModel[lv].join(' + ')}${labelOf(lv)}`);
+  }
+
+  // Bifactor specific factors (orthogonal to the general factor and each other).
+  if (bifactorSpecifics && Object.keys(bifactorSpecifics).length) {
+    lines.push('', '# Specific factors (orthogonal)');
+    for (const [s, items] of Object.entries(bifactorSpecifics)) lines.push(`${s} =~ ${items.join(' + ')}`);
   }
 
   // Second-order factors: a higher-order latent loads on first-order factors,
@@ -394,6 +423,17 @@ export const SEM_TEMPLATES: SemTemplate[] = [
           { id: makeId('reg'), from: G.id, to: F3.id, kind: 'regression' },
         ],
       };
+    },
+  },
+  {
+    id: 'bifactor', label: 'Bifactor', family: 'bifactor',
+    description: 'A general factor on every item + orthogonal specific factors — connect indicators to both.',
+    build: () => {
+      const G = latentNode('General', 330, 70);
+      const S1 = latentNode('Specific1', 120, 240);
+      const S2 = latentNode('Specific2', 330, 240);
+      const S3 = latentNode('Specific3', 540, 240);
+      return { ...emptyGraph('bifactor'), nodes: [G, S1, S2, S3] };
     },
   },
 ];

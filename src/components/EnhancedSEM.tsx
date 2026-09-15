@@ -181,6 +181,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
     estimatorOverride?: 'auto' | 'DWLS' | 'ULS',
     resCov: Array<[string, string]> = [],
     fixedUnit: string[] = [],
+    bifactorSpecifics?: { [k: string]: string[] },
   ) => {
     // A model needs a dataset and a measurement model with indicators. Structural
     // paths are optional: a measurement-only model estimates as a correlated-
@@ -221,7 +222,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
         return;
       }
 
-      const libResults = SEMEstimator.estimate(numericData, { measurementModel, structuralPaths, residualCovariances: resCov, fixedUnitLatents: fixedUnit }, allVariables, {
+      const libResults = SEMEstimator.estimate(numericData, { measurementModel, structuralPaths, residualCovariances: resCov, fixedUnitLatents: fixedUnit, bifactorSpecifics }, allVariables, {
         estimator: estimatorOverride ?? advancedOptions.estimator,
       });
 
@@ -787,6 +788,45 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
           </div>
         )}
 
+        {/* Bifactor: specific-factor loadings (each item also loads on the general factor above) */}
+        {results.specificLoadings && results.specificLoadings.length > 0 && (
+          <div className="bg-white rounded-xl border border-gray-200 p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <Layers className="w-5 h-5 text-indigo-600" />
+              <h4 className="text-lg font-bold text-gray-900">Specific-Factor Loadings (Bifactor)</h4>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b-2 border-gray-200">
+                    <th className="text-left py-2 px-2 font-semibold text-gray-700">Item</th>
+                    <th className="text-left py-2 px-2 font-semibold text-gray-700">Specific factor</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-700">λ (std)</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-700">SE</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-700">z</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-700">p</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.specificLoadings.map((sl, i) => (
+                    <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="py-1.5 px-2 text-gray-900">{sl.item}</td>
+                      <td className="py-1.5 px-2 text-gray-600">{sl.factor}</td>
+                      <td className="py-1.5 px-2 text-right font-medium text-gray-900">{sl.loading.toFixed(3)}{pStar(sl.pvalue)}</td>
+                      <td className="py-1.5 px-2 text-right text-gray-600">{sl.se.toFixed(3)}</td>
+                      <td className="py-1.5 px-2 text-right text-gray-600">{sl.z.toFixed(2)}</td>
+                      <td className="py-1.5 px-2 text-right text-gray-600">{fmtP(sl.pvalue)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-gray-500 mt-3">
+              Each item loads on the general factor (above) and one orthogonal specific factor. General and specific factors are uncorrelated by construction.
+            </p>
+          </div>
+        )}
+
         {/* Residual Covariances (freed error correlations) */}
         {results.residualCovariances && results.residualCovariances.length > 0 && (
           <div className="bg-white rounded-xl border border-gray-200 p-6">
@@ -1039,7 +1079,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
               getStats={getStats}
               loading={loading}
               onEstimate={(model: TranslatedModel, options: SemOptions) =>
-                estimateModel(model.measurementModel, model.structuralPaths, model.mediators, options.estimator, model.residualCovariances, model.fixedUnitLatents)}
+                estimateModel(model.measurementModel, model.structuralPaths, model.mediators, options.estimator, model.residualCovariances, model.fixedUnitLatents, model.bifactorSpecifics)}
               onSendToGroupAnalysis={(target, model, groupVariable) => {
                 const ds = datasets.find(d => d.id === selectedDataset);
                 setHandoff({

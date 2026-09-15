@@ -2789,6 +2789,12 @@ const buildCFAReportBody = (results: any): string => {
     ${fl.map((l: any) => { const std = l.std_loading ?? l.loading; return `<tr><td>${l.item}</td><td>${l.factor}</td><td>${num(std)}</td><td>${num(l.se)}</td><td>${num(l.z ?? l.zvalue, 2)}</td><td>${pv(l.pvalue)}</td><td>${num(std * std)}</td></tr>`; }).join('')}
   </table>`);
 
+  const spec = results.specificLoadings || [];
+  if (spec.length) parts.push(`<h2>Specific-Factor Loadings (Bifactor)</h2><table>
+    <tr><th>Item</th><th>Specific Factor</th><th>λ (std)</th><th>SE</th><th>z</th><th>p-value</th></tr>
+    ${spec.map((l: any) => `<tr><td>${l.item}</td><td>${l.factor}</td><td>${num(l.loading)}</td><td>${num(l.se)}</td><td>${num(l.z, 2)}</td><td>${pv(l.pvalue)}</td></tr>`).join('')}
+  </table><p class="info">Specific factors are orthogonal to the general factor and to one another; each item loads on the general factor and at most one specific factor.</p>`);
+
   const fc = results.factorCorrelations || [];
   if (fc.length) parts.push(`<h2>Factor Correlations</h2><table>
     <tr><th>Factor 1</th><th>Factor 2</th><th>r</th>${fc[0]?.se != null ? '<th>SE</th><th>p-value</th>' : ''}</tr>
@@ -3015,6 +3021,13 @@ const buildSEMReportBody = (results: any): string => {
     <tr><th>Item</th><th>Factor</th><th>λ (std)</th><th>SE</th><th>z</th><th>p-value</th><th>R²</th></tr>
     ${fl.map((l: any) => `<tr><td>${l.item}</td><td>${l.factor}</td><td>${num(l.std_loading ?? l.loading)}</td><td>${num(l.se)}</td><td>${num(l.z, 2)}</td><td>${pv(l.pvalue)}</td><td>${num(l.r_squared)}</td></tr>`).join('')}
   </table>`);
+
+  // Specific-factor loadings (bifactor)
+  const spec = results.specificLoadings || [];
+  if (spec.length) parts.push(`<h2>Specific-Factor Loadings (Bifactor)</h2><table>
+    <tr><th>Item</th><th>Specific Factor</th><th>λ (std)</th><th>SE</th><th>z</th><th>p-value</th></tr>
+    ${spec.map((l: any) => `<tr><td>${l.item}</td><td>${l.factor}</td><td>${num(l.loading)}</td><td>${num(l.se)}</td><td>${num(l.z, 2)}</td><td>${pv(l.pvalue)}</td></tr>`).join('')}
+  </table><p class="info">Specific factors are orthogonal to the general factor and to one another; each item loads on the general factor and at most one specific factor.</p>`);
 
   // Reliability & validity
   const rel = mm.reliability || {};
