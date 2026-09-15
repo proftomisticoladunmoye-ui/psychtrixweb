@@ -94,6 +94,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
   const [measurementModel, setMeasurementModel] = useState<{ [key: string]: string[] }>({});
   const [structuralPaths, setStructuralPaths] = useState<Array<{ from: string; to: string }>>([]);
   const [mediators, setMediators] = useState<string[]>([]);
+  const [proxyLatents, setProxyLatents] = useState<string[]>([]);   // MIMIC covariates (single-indicator proxies)
   const [results, setResults] = useState<SEMDisplayResults | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -179,6 +180,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
     meds: string[],
     estimatorOverride?: 'auto' | 'DWLS' | 'ULS',
     resCov: Array<[string, string]> = [],
+    fixedUnit: string[] = [],
   ) => {
     // A model needs a dataset and a measurement model with indicators. Structural
     // paths are optional: a measurement-only model estimates as a correlated-
@@ -193,6 +195,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
     setMeasurementModel(mm);
     setStructuralPaths(sp);
     setMediators(meds);
+    setProxyLatents(fixedUnit);
 
     try {
       const measurementModel = mm;
@@ -218,7 +221,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
         return;
       }
 
-      const libResults = SEMEstimator.estimate(numericData, { measurementModel, structuralPaths, residualCovariances: resCov }, allVariables, {
+      const libResults = SEMEstimator.estimate(numericData, { measurementModel, structuralPaths, residualCovariances: resCov, fixedUnitLatents: fixedUnit }, allVariables, {
         estimator: estimatorOverride ?? advancedOptions.estimator,
       });
 
@@ -239,6 +242,17 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
         const [from, to] = key.split('->');
         return { from, to, effect: e.effect, se: e.se, pvalue: e.pvalue };
       });
+
+      // Proxy latents (MIMIC covariates) are estimation devices, not measured
+      // constructs — drop them from the measurement-model output so they don't
+      // clutter the loadings/reliability tables or exports (their effect on the
+      // latent shows in the structural paths). Their covariate→latent paths stay.
+      if (fixedUnit.length) {
+        const px = new Set(fixedUnit);
+        libResults.measurementModel.factorLoadings = libResults.measurementModel.factorLoadings.filter((fl) => !px.has(fl.factor));
+        for (const f of fixedUnit) { delete libResults.measurementModel.reliability[f]; delete (libResults.diagnostics.factorScoreDeterminacy as any)[f]; }
+        for (const key of Object.keys(libResults.measurementModel.htmt)) { if (fixedUnit.some((f) => key.startsWith(f + '_') || key.endsWith('_' + f))) delete libResults.measurementModel.htmt[key]; }
+      }
 
       setResults({ ...libResults, effectArrays: { direct: directRows, indirect: indirectRows, total: totalRows } });
       setActiveView('results');
@@ -276,7 +290,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
         { index: 'BIC', value: results.fitIndices.bic },
       ], 'SEM_Fit_Indices');
     else if (format === 'csv-reliability') exportToCSV(
-      Object.entries(results.measurementModel.reliability).map(([factor, r]: any) => ({
+      Object.entries(results.measurementModel.reliability).filter(([factor]) => !proxyLatents.includes(factor)).map(([factor, r]: any) => ({
         factor,
         cronbach_alpha: r.cronbach_alpha,
         composite_reliability: r.composite_reliability,
@@ -502,7 +516,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
                   </tr>
                 </thead>
                 <tbody>
-                  {results.measurementModel.factorLoadings.map((fl, i) => (
+                  {results.measurementModel.factorLoadings.filter((fl) => !proxyLatents.includes(fl.factor)).map((fl, i) => (
                     <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
                       <td className="py-1.5 px-2 text-gray-900">{fl.item}</td>
                       <td className="py-1.5 px-2 text-gray-600">{fl.factor}</td>
@@ -535,7 +549,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(results.measurementModel.reliability).map(([factor, rel]) => (
+                  {Object.entries(results.measurementModel.reliability).filter(([factor]) => !proxyLatents.includes(factor)).map(([factor, rel]) => (
                     <tr key={factor} className="border-b border-gray-100">
                       <td className="py-1.5 px-2 font-medium text-gray-900">{factor}</td>
                       <td className={`py-1.5 px-2 text-right ${rel.cronbach_alpha >= 0.7 ? 'text-green-600' : 'text-orange-600'} font-medium`}>
@@ -585,7 +599,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
               <>
                 <h5 className="font-semibold text-xs text-gray-500 uppercase tracking-wide mt-4 mb-2">Factor Score Determinacy</h5>
                 <div className="space-y-1">
-                  {Object.entries(diag.factorScoreDeterminacy).map(([factor, fsd]) => (
+                  {Object.entries(diag.factorScoreDeterminacy).filter(([factor]) => !proxyLatents.includes(factor)).map(([factor, fsd]) => (
                     <div key={factor} className="flex items-center justify-between text-xs px-2 py-1.5 bg-gray-50 rounded">
                       <span className="font-medium text-gray-900">{factor}</span>
                       <div className="flex items-center gap-2">
@@ -1025,7 +1039,7 @@ export function EnhancedSEM({ datasets, selectedDataset, onDatasetChange, variab
               getStats={getStats}
               loading={loading}
               onEstimate={(model: TranslatedModel, options: SemOptions) =>
-                estimateModel(model.measurementModel, model.structuralPaths, model.mediators, options.estimator, model.residualCovariances)}
+                estimateModel(model.measurementModel, model.structuralPaths, model.mediators, options.estimator, model.residualCovariances, model.fixedUnitLatents)}
               onSendToGroupAnalysis={(target, model, groupVariable) => {
                 const ds = datasets.find(d => d.id === selectedDataset);
                 setHandoff({

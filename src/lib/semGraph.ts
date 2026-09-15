@@ -32,7 +32,7 @@ export const SEM_FAMILIES: SemFamilyInfo[] = [
   { id: 'moderation', label: 'Moderation SEM', supported: false, note: 'Latent interactions are not yet estimable here — use Multi-group SEM for group moderation.' },
   { id: 'multigroup', label: 'Multigroup SEM', supported: false, note: 'Use the Multi-group SEM tab; visual multigroup wiring is planned.' },
   { id: 'invariance', label: 'Measurement Invariance', supported: false, note: 'Use the Measurement Invariance tab; shared-graph wiring is planned.' },
-  { id: 'mimic', label: 'MIMIC Model', supported: false, note: 'Covariates → latent direct effects are not yet estimable client-side.' },
+  { id: 'mimic', label: 'MIMIC Model', supported: true },
   { id: 'higher-order', label: 'Higher-Order SEM', supported: false, note: 'Planned.' },
   { id: 'lgm', label: 'Latent Growth Model', supported: false, note: 'Growth factors require a dedicated estimator — planned.' },
   { id: 'bifactor', label: 'Bifactor Model', supported: false, note: 'Orthogonal general + specific factors — planned.' },
@@ -117,6 +117,11 @@ export interface TranslatedModel {
   mediators: string[];
   /** Residual (error) covariances between observed indicator pairs. */
   residualCovariances: Array<[string, string]>;
+  /** Single-indicator proxy latents (observed covariates in a MIMIC model). */
+  fixedUnitLatents: string[];
+  /** Observed variables that act as covariates (predict a latent) — these appear
+   *  as proxy latents in the estimator model but are covariates to the researcher. */
+  covariates: string[];
 }
 
 export function toSEMModel(g: SemGraph): TranslatedModel {
@@ -138,16 +143,30 @@ export function toSEMModel(g: SemGraph): TranslatedModel {
 
   const latentNames = new Set(latents.map((l) => l.name));
   const structuralPaths: Array<{ from: string; to: string }> = [];
+  const covariates: string[] = [];      // observed variables that predict a latent
+  const addPath = (from: string, to: string) => {
+    if (!structuralPaths.some((p) => p.from === from && p.to === to)) structuralPaths.push({ from, to });
+  };
   for (const e of g.edges) {
     if (e.kind !== 'regression') continue;
     const from = nodeById(g, e.from);
     const to = nodeById(g, e.to);
     if (!from || !to) continue;
     if (latentNames.has(from.name) && latentNames.has(to.name)) {
-      if (!structuralPaths.some((p) => p.from === from.name && p.to === to.name)) {
-        structuralPaths.push({ from: from.name, to: to.name });
-      }
+      addPath(from.name, to.name);                        // latent → latent (structural / second-order)
+    } else if (from.kind === 'observed' && to.kind === 'latent') {
+      // MIMIC covariate: observed variable predicts a latent. Modelled as a
+      // single-indicator proxy latent (loading fixed to 1) so the latent equals
+      // the observed variable, then a structural path proxy → target latent.
+      if (!covariates.includes(from.name)) covariates.push(from.name);
+      addPath(from.name, to.name);
     }
+  }
+
+  // Register a proxy latent for each covariate: it is measured by itself.
+  const fixedUnitLatents: string[] = [];
+  for (const cov of covariates) {
+    if (!(cov in measurementModel)) { measurementModel[cov] = [cov]; fixedUnitLatents.push(cov); }
   }
 
   const mediators = latents
@@ -164,7 +183,7 @@ export function toSEMModel(g: SemGraph): TranslatedModel {
     }
   }
 
-  return { measurementModel, structuralPaths, mediators, residualCovariances };
+  return { measurementModel, structuralPaths, mediators, residualCovariances, fixedUnitLatents, covariates };
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────────
@@ -254,7 +273,8 @@ export function validateGraph(g: SemGraph): ValidationIssue[] {
 // the visual model stays the single source of truth (editing text back would risk
 // inconsistency), so this is a live mirror, not a second editor.
 export function toLavaanSyntax(g: SemGraph): string {
-  const { measurementModel, structuralPaths, residualCovariances } = toSEMModel(g);
+  const { measurementModel, structuralPaths, residualCovariances, fixedUnitLatents } = toSEMModel(g);
+  const proxy = new Set(fixedUnitLatents);   // MIMIC covariates — shown as regressors, not =~
   const labelOf = (latentName: string) => {
     const n = g.nodes.find((x) => x.kind === 'latent' && x.name === latentName);
     return n?.label && n.label !== n.name ? `  # ${n.label}` : '';
@@ -263,8 +283,9 @@ export function toLavaanSyntax(g: SemGraph): string {
   const lines: string[] = [];
   const higherOrderNames = new Set([...higherOrderLatentIds(g)].map((id) => nodeById(g, id)!.name));
 
-  // First-order measurement model (latents that have observed indicators).
-  const firstOrder = Object.keys(measurementModel).filter((lv) => measurementModel[lv].length > 0);
+  // First-order measurement model (real latents with observed indicators; not the
+  // single-indicator proxy latents that stand in for MIMIC covariates).
+  const firstOrder = Object.keys(measurementModel).filter((lv) => measurementModel[lv].length > 0 && !proxy.has(lv));
   if (firstOrder.length) {
     lines.push('# Measurement model');
     for (const lv of firstOrder) lines.push(`${lv} =~ ${measurementModel[lv].join(' + ')}${labelOf(lv)}`);

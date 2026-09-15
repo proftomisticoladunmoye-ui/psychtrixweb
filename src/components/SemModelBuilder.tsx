@@ -178,8 +178,10 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
         if (!exists) commit({ ...graph, edges: [...graph.edges, { id: makeId('load'), from: latent.id, to: observed.id, kind: 'loading' }] });
       }
     } else if (mode === 'path') {
-      // Structural regression between two latents (what the estimator fits).
-      if (a.kind === 'latent' && b.kind === 'latent') {
+      // latent → latent (structural / second-order loading) OR
+      // observed → latent (a MIMIC covariate predicting a factor).
+      const valid = (a.kind === 'latent' && b.kind === 'latent') || (a.kind === 'observed' && b.kind === 'latent');
+      if (valid) {
         const exists = graph.edges.some((e) => e.kind === 'regression' && e.from === a.id && e.to === b.id);
         if (!exists) commit({ ...graph, edges: [...graph.edges, { id: makeId('reg'), from: a.id, to: b.id, kind: 'regression' }] });
       }
@@ -375,7 +377,7 @@ export function SemModelBuilder({ variables, hasMeasureMeta, getStats, onEstimat
             <span className="truncate">
               {mode === 'delete' ? 'Click a node or arrow to delete it.'
                 : mode === 'loading' ? <>Click a latent, then an observed variable, to connect an indicator.{pendingSource && <b> · from: {nodeById(graph, pendingSource)?.label || nodeById(graph, pendingSource)?.name}</b>}</>
-                : mode === 'path' ? <>Click a predictor latent, then an outcome latent, to draw a path.{pendingSource && <b> · from: {nodeById(graph, pendingSource)?.label || nodeById(graph, pendingSource)?.name}</b>}</>
+                : mode === 'path' ? <>Click a predictor (a latent, or an observed covariate for MIMIC), then an outcome latent, to draw a path.{pendingSource && <b> · from: {nodeById(graph, pendingSource)?.label || nodeById(graph, pendingSource)?.name}</b>}</>
                 : mode === 'covariance' ? <>Click two observed variables to add a residual covariance (error correlation).{pendingSource && <b> · from: {nodeById(graph, pendingSource)?.label || nodeById(graph, pendingSource)?.name}</b>}</>
                 : activeLatent ? <>Adding indicators to <b>{activeLatent.label || activeLatent.name}</b> — click variables in the explorer to attach them.</>
                 : 'Tip: click “+ Latent”, then click variables in the explorer to add its indicators.'}

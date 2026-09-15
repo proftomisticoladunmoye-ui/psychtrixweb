@@ -28,6 +28,10 @@ export interface SEMModel {
   structuralPaths:  Array<{ from: string; to: string }>;
   /** Freely-estimated residual (error) covariances between indicator pairs. */
   residualCovariances?: Array<[string, string]>;
+  /** Single-indicator "proxy" latents whose loading is fixed to 1 and residual to
+   *  0, so the latent IS the observed variable. Used to let observed variables act
+   *  as exogenous predictors of a latent (MIMIC models). */
+  fixedUnitLatents?: string[];
 }
 
 export interface ModificationIndex {
@@ -278,6 +282,10 @@ export class SEMEstimator {
         if (inds.includes(ind)) return fIndex.get(f) ?? -1;
       return -1;
     });
+    // Proxy (fixed-unit) latents: their single indicator's loading is fixed to 1
+    // so the latent equals the observed variable (used for MIMIC covariates).
+    const fixedUnit = new Set(model.fixedUnitLatents || []);
+    const isFixedLambda: boolean[] = allInds.map((_, i) => fixedUnit.has(factorNames[indFactor[i]] || ''));
     const pathIdx: Array<[number, number]> = model.structuralPaths
       .map(pt => [fIndex.get(pt.from) ?? -1, fIndex.get(pt.to) ?? -1] as [number, number]);
 
@@ -356,7 +364,7 @@ export class SEMEstimator {
 
     // ── Warm starts from the two-stage estimates ────────────────────────────
     const lamMap = new Map<string, number>(warmLoadings.map(fl => [fl.item, fl.loading]));
-    let lambdas: number[] = allInds.map(ind => clamp((lamMap.get(ind) ?? 0.6) * 0.95, -0.98, 0.98));
+    let lambdas: number[] = allInds.map((ind, i) => isFixedLambda[i] ? 1 : clamp((lamMap.get(ind) ?? 0.6) * 0.95, -0.98, 0.98));
     const warmPathMap = new Map<string, number>(warmPaths.map(pt => [`${pt.from}->${pt.to}`, pt.coefficient]));
 
     // Higher-order factors (second-order CFA) are latents with NO observed
@@ -394,7 +402,7 @@ export class SEMEstimator {
     const nPar = p + q + r + rc;
     const unpack = (t: number[]) => ({ l: t.slice(0, p), b: t.slice(p, p + q), ph: t.slice(p + q, p + q + r), rh: t.slice(p + q + r) });
     const clampTheta = (t: number[]) => t.map((v, k) =>
-      k < p ? clamp(v, -0.999, 0.999) : k < p + q ? clamp(v, -1.5, 1.5) : k < p + q + r ? clamp(v, -0.99, 0.99) : clamp(v, -0.9, 0.9));
+      k < p ? (isFixedLambda[k] ? 1 : clamp(v, -0.999, 0.999)) : k < p + q ? clamp(v, -1.5, 1.5) : k < p + q + r ? clamp(v, -0.99, 0.99) : clamp(v, -0.9, 0.9));
     const F = (t: number[]) => { const { l, b, ph, rh } = unpack(t); return objective(l, b, ph, rh); };
 
     let theta: number[] = clampTheta([...lambdas, ...betas, ...phis, ...rhos]);
@@ -501,6 +509,11 @@ export class SEMEstimator {
     allInds.forEach((item, k) => {
       const fi = indFactor[k];
       if (fi < 0) return;
+      // A fixed-unit (proxy) latent's loading is fixed to 1 — no standard error/test.
+      if (isFixedLambda[k]) {
+        factorLoadings.push({ item, factor: factorNames[fi], loading: 1, se: 0, z: 0, pvalue: 0, std_loading: 1, r_squared: 1 });
+        return;
+      }
       const lam  = lambdas[k];
       const se   = seTheta[k] > 1e-8 ? seTheta[k] : Math.abs(lam) / Math.sqrt(Math.max(n, 2));
       const z    = se > 0 ? lam / se : 0;
@@ -902,7 +915,9 @@ export class SEMEstimator {
     const endo = new Set(model.structuralPaths.map(pt => pt.to));
     const exo  = Object.keys(model.measurementModel).filter(f => !endo.has(f));
     const resCov = model.residualCovariances?.length || 0;
-    return p + model.structuralPaths.length + exo.length * (exo.length - 1) / 2 + resCov;
+    // Proxy latents' loadings are fixed (not free), so they don't count.
+    const fixed = (model.fixedUnitLatents || []).reduce((s, f) => s + (model.measurementModel[f]?.length || 0), 0);
+    return p + model.structuralPaths.length + exo.length * (exo.length - 1) / 2 + resCov - fixed;
   }
 
   // ── Modification indices (LM-test on off-diagonal residuals) ─────────────────
