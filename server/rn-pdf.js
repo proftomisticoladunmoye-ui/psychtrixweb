@@ -150,6 +150,10 @@ function drawTable(doc, rows, { W, F, pageBottom }) {
     drawRow(r, y, rowH);
     doc.y = y + rowH;   // cells advanced doc.y themselves; pin it to the row bottom
   }
+  // Each cell was drawn at an explicit column x, so doc.x is left at the last
+  // column. Restore it to the left margin, or the following paragraph would take
+  // that x as its left edge and wrap inside the last column's width.
+  doc.x = x0;
   doc.moveDown(0.6);
 }
 
