@@ -21,27 +21,54 @@ const LICENSE_ID = {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function api(path, { method = 'GET', body, raw, _retried = false } = {}) {
-  const url = `${BASE}${path}${path.includes('?') ? '&' : '?'}access_token=${encodeURIComponent(TOKEN)}`;
-  const opts = { method, headers: {} };
-  if (raw) { opts.body = raw.buffer; opts.headers['Content-Type'] = 'application/octet-stream'; }
-  else if (body) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
+// Cloudflare (which fronts zenodo.org) serves an "unusual traffic" challenge to
+// requests that look like an anonymous bot — chiefly ones with no descriptive
+// User-Agent. Node's built-in fetch sends a bare/undici UA, so identify the
+// client explicitly (overridable via ZENODO_USER_AGENT). A real contact URL is
+// what Cloudflare/Zenodo expect from a legitimate API integration.
+const USER_AGENT = process.env.ZENODO_USER_AGENT
+  || 'PsychtrixWeb-ResearchNotes/1.0 (+https://www.psychtrixweb.online; mailto:notifications@psychtrixweb.online)';
+
+// A Cloudflare bot-block comes back as an HTML page (not Zenodo's JSON API), so
+// an HTML body on a 403 means "challenged", not "token/permission denied".
+const looksLikeCloudflare = (text) => /<html|cloudflare|cf-|unusual traffic|attention required/i.test(text || '');
+
+async function api(path, { method = 'GET', body, raw, _attempt = 0 } = {}) {
+  const url = `${BASE}${path}`;
+  // Bearer-header auth (Zenodo's documented method) instead of ?access_token= in
+  // the URL: the token never lands in query strings/logs, and credential-in-URL
+  // is itself one of the patterns that trips Cloudflare's heuristics.
+  const headers = {
+    Authorization: `Bearer ${TOKEN}`,
+    'User-Agent': USER_AGENT,
+    Accept: 'application/json',
+  };
+  const opts = { method, headers };
+  if (raw) { opts.body = raw.buffer; headers['Content-Type'] = 'application/octet-stream'; }
+  else if (body) { opts.body = JSON.stringify(body); headers['Content-Type'] = 'application/json'; }
   const res = await fetch(url, opts);
   const text = await res.text();
   let json = null; try { json = text ? JSON.parse(text) : null; } catch { /* non-json (e.g. an HTML error page) */ }
   if (!res.ok) {
-    // Zenodo/Cloudflare rate limiting — a temporary IP block, not an account issue.
-    if (res.status === 403 || res.status === 429) {
-      // One automatic retry after a short pause (honours Retry-After, capped).
-      if (!_retried) {
+    // Transient: Cloudflare bot-challenge (HTML 403) or genuine rate limit (429).
+    // Retry with backoff (honours Retry-After, capped). A 403 carrying a JSON
+    // body is a real auth/permission error — do NOT retry that.
+    const cloudflareBlock = res.status === 403 && looksLikeCloudflare(text);
+    if (res.status === 429 || cloudflareBlock) {
+      if (_attempt < 2) {
         const ra = parseInt(res.headers.get('retry-after') || '', 10);
-        const waitMs = Math.min(Math.max((Number.isFinite(ra) ? ra : 8) * 1000, 4000), 20000);
-        await sleep(waitMs);
-        return api(path, { method, body, raw, _retried: true });
+        const base = Number.isFinite(ra) ? ra : 6 * Math.pow(2, _attempt); // 6s, 12s
+        await sleep(Math.min(Math.max(base * 1000, 4000), 30000));
+        return api(path, { method, body, raw, _attempt: _attempt + 1 });
       }
       throw Object.assign(new Error(
-        'Zenodo is temporarily rate-limiting requests from the server ("unusual traffic"). This is temporary and not a problem with your account or token — please wait a few minutes and try minting again (and avoid repeated clicks).'
+        'Zenodo is temporarily blocking requests from the server ("unusual traffic"). This is a Cloudflare bot check on Zenodo\'s side, not a problem with your account or token — please wait a few minutes and try minting again (and avoid repeated clicks).'
       ), { status: 429 });
+    }
+    // A 403 with a JSON body is an authorization problem, not a bot block.
+    if (res.status === 401 || res.status === 403) {
+      const detail = json?.message || 'Check that ZENODO_TOKEN is valid, unexpired, and has the deposit:write + deposit:actions scopes.';
+      throw Object.assign(new Error(`Zenodo rejected the request (${res.status}): ${detail}`), { status: 502, zenodo: json });
     }
     // Otherwise surface a concise message, never a full HTML page.
     const msg = json?.message || json?.errors?.[0]?.message || (text && text.length < 200 ? text.trim() : `HTTP ${res.status}`);
