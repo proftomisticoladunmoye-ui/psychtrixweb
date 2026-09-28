@@ -7,6 +7,7 @@ import PDFDocument from 'pdfkit';
 import SVGtoPDF from 'svg-to-pdfkit';
 import { SERIES, LICENSES, canonicalPath, pad3 } from './rn-data.js';
 import { apaCitation } from './rn-citations.js';
+import { cleanAuthorName } from './rn-names.js';
 import { getMediaForServe } from './rn-storage.js';
 import { tex2svg, svgMetrics } from './rn-math.js';
 
@@ -191,7 +192,7 @@ export async function buildPdf(note, baseUrl) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({
       size: 'A4', margins: { top: 70, bottom: 70, left: 64, right: 64 }, bufferPages: true,
-      info: { Title: note.title, Author: (note.authors || []).map((a) => a.full_name).join(', '), Subject: (note.keywords || []).join(', ') },
+      info: { Title: note.title, Author: (note.authors || []).map((a) => cleanAuthorName(a.full_name)).join(', '), Subject: (note.keywords || []).join(', ') },
     });
     const F = registerFonts(doc);
     if (process.env.RN_PDF_DEBUG) {

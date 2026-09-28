@@ -4,7 +4,7 @@
 // present in the raw HTML that Google / Google Scholar receive.
 import sanitizeHtml from 'sanitize-html';
 import { SERIES, LICENSES, canonicalPath, pad3, slugify } from './rn-data.js';
-import { citationMetaTags, suggestedCitation, apaCitation, parseName } from './rn-citations.js';
+import { citationMetaTags, suggestedCitation, apaCitation, parseName, cleanAuthorName } from './rn-citations.js';
 import { renderMathToHtml } from './rn-math.js';
 
 export function esc(s) {
@@ -357,7 +357,7 @@ function discussionHtml(note, canonicalUrl, flash) {
 
 function jsonLdArticle(note, canonicalUrl) {
   const authors = (note.authors || []).map((a) => ({
-    '@type': 'Person', name: a.full_name,
+    '@type': 'Person', name: cleanAuthorName(a.full_name),
     ...(a.affiliation ? { affiliation: { '@type': 'Organization', name: a.affiliation } } : {}),
     ...(a.orcid ? { identifier: a.orcid, sameAs: `https://orcid.org/${a.orcid}` } : {}),
     ...(a.google_scholar_url ? { sameAs: a.google_scholar_url } : {}),
@@ -403,7 +403,7 @@ export function renderArticle(note, { baseUrl, flash }) {
     { name: 'og:image', content: baseUrl + '/icon-512.png' },
     { name: 'og:site_name', content: SERIES.name },
     ...(note.published_at ? [{ name: 'article:published_time', content: new Date(note.published_at).toISOString() }] : []),
-    ...(note.authors || []).map((a) => ({ name: 'article:author', content: a.full_name })),
+    ...(note.authors || []).map((a) => ({ name: 'article:author', content: cleanAuthorName(a.full_name) })),
     { name: 'twitter:card', content: 'summary' },
     { name: 'twitter:title', content: note.title },
     { name: 'twitter:description', content: note.abstract || SERIES.name },
@@ -531,7 +531,7 @@ export function renderAuthor(author, notes, { baseUrl }) {
     </div></aside>
   </div>`;
   const jsonLd = JSON.stringify({
-    '@context': 'https://schema.org', '@type': 'Person', name: author.full_name,
+    '@context': 'https://schema.org', '@type': 'Person', name: cleanAuthorName(author.full_name),
     ...(author.affiliation ? { affiliation: { '@type': 'Organization', name: author.affiliation } } : {}),
     ...(author.orcid ? { sameAs: `https://orcid.org/${author.orcid}` } : {}), url: canonicalUrl,
   });
