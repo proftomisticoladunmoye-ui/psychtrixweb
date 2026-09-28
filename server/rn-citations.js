@@ -1,10 +1,13 @@
 // Citation formatting for Research Notes: APA / BibTeX / RIS + the HighWire and
 // Dublin Core <meta> tags that Google Scholar reads from raw server HTML.
 import { SERIES, pad3 } from './rn-data.js';
+import { cleanAuthorName } from './rn-names.js';
+
+export { cleanAuthorName };
 
 // "Enoch Olusegun Oladunmoye" -> { last: 'Oladunmoye', initials: 'E. O.', apa: 'Oladunmoye, E. O.' }
 export function parseName(full) {
-  const parts = String(full || '').trim().split(/\s+/).filter(Boolean);
+  const parts = cleanAuthorName(full).split(/\s+/).filter(Boolean);
   if (!parts.length) return { last: 'Unknown', initials: '', apa: 'Unknown', given: '' };
   const last = parts[parts.length - 1];
   const givens = parts.slice(0, -1);
@@ -93,7 +96,7 @@ export function citationMetaTags(note, canonicalUrl, pdfUrl = null) {
   const title = String(note.title || '').replace(/\s+/g, ' ').trim();
   add('citation_title', title);
   for (const a of (note.authors || [])) {
-    add('citation_author', a.full_name);
+    add('citation_author', cleanAuthorName(a.full_name));
     if (a.affiliation) add('citation_author_institution', a.affiliation);
     if (a.orcid) add('citation_author_orcid', a.orcid);
   }
@@ -123,7 +126,7 @@ export function citationMetaTags(note, canonicalUrl, pdfUrl = null) {
 
   // Dublin Core
   add('DC.title', title);
-  for (const a of (note.authors || [])) add('DC.creator', a.full_name);
+  for (const a of (note.authors || [])) add('DC.creator', cleanAuthorName(a.full_name));
   add('DC.publisher', SERIES.publisher);
   add('DC.type', 'Text');
   add('DC.format', 'text/html');
